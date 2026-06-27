@@ -1,0 +1,80 @@
+name: metrics
+
+# Daily snapshot of repository metrics into a permanent time series, so the data
+# (especially GitHub Traffic, which GitHub only retains for 14 days) is never lost.
+#
+# Where it writes: a dedicated `metrics` branch (file `metrics.ndjson`, one JSON object
+# per line). This keeps `main`'s history clean - the daily snapshots live on their own branch.
+#
+# Auth:
+#   - Cumulative metrics (stars/forks/watchers/issues/release downloads) use the built-in
+#     GITHUB_TOKEN and work out of the box.
+#   - Traffic (views/clones) requires a token with "Administration: read". Add a fine-grained
+#     PAT as the repo secret METRICS_TOKEN to capture it; without it, traffic fields are null.
+
+on:
+  schedule:
+    - cron: '17 6 * * *' # daily, 06:17 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Collect metrics and append to the metrics branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TRAFFIC_TOKEN: ${{ secrets.METRICS_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # --- cumulative metrics (always available) ---
+          repo_json=$(gh api "repos/$REPO")
+          stars=$(echo "$repo_json"   | jq '.stargazers_count')
+          forks=$(echo "$repo_json"   | jq '.forks_count')
+          watchers=$(echo "$repo_json" | jq '.subscribers_count')
+          issues=$(echo "$repo_json"  | jq '.open_issues_count')
+          downloads=$(gh api "repos/$REPO/releases" --jq '[.[].assets[].download_count] | add // 0')
+
+          # --- traffic (needs an admin-read token in METRICS_TOKEN) ---
+          views=null; uniques=null; clones=null; clone_uniques=null
+          if [ -n "${TRAFFIC_TOKEN:-}" ]; then
+            v=$(GH_TOKEN="$TRAFFIC_TOKEN" gh api "repos/$REPO/traffic/views"  2>/dev/null || echo '{}')
+            c=$(GH_TOKEN="$TRAFFIC_TOKEN" gh api "repos/$REPO/traffic/clones" 2>/dev/null || echo '{}')
+            views=$(echo "$v" | jq '.count // null')
+            uniques=$(echo "$v" | jq '.uniques // null')
+            clones=$(echo "$c" | jq '.count // null')
+            clone_uniques=$(echo "$c" | jq '.uniques // null')
+          fi
+
+          line=$(jq -nc \
+            --arg ts "$(date -u +%FT%TZ)" \
+            --argjson stars "$stars" --argjson forks "$forks" --argjson watchers "$watchers" \
+            --argjson issues "$issues" --argjson downloads "$downloads" \
+            --argjson views "$views" --argjson uniques "$uniques" \
+            --argjson clones "$clones" --argjson clone_uniques "$clone_uniques" \
+            '{ts:$ts, stars:$stars, forks:$forks, watchers:$watchers, open_issues:$issues,
+              release_downloads:$downloads, views_14d:$views, unique_visitors_14d:$uniques,
+              clones_14d:$clones, unique_cloners_14d:$clone_uniques}')
+          echo "snapshot: $line"
+
+          # --- append to the metrics branch (kept off main) ---
+          work=$(mktemp -d)
+          git -C "$work" init -q
+          git -C "$work" config user.name "github-actions[bot]"
+          git -C "$work" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$work" remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git"
+          if git -C "$work" fetch -q --depth 1 origin metrics; then
+            git -C "$work" checkout -q -B metrics FETCH_HEAD
+          else
+            git -C "$work" checkout -q --orphan metrics
+            printf '# SourceCapsule metrics\n\nOne JSON object per line in `metrics.ndjson` - a daily snapshot logged by `.github/workflows/metrics.yml`.\n' > "$work/README.md"
+          fi
+          echo "$line" >> "$work/metrics.ndjson"
+          git -C "$work" add metrics.ndjson README.md
+          git -C "$work" commit -q -m "metrics: $(date -u +%F)"
+          git -C "$work" push -q origin metrics
