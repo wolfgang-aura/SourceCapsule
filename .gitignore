@@ -1,0 +1,19 @@
+# Dependencies (dev-only: lint/format tooling)
+node_modules/
+
+# Logs / debug
+npm-debug.log*
+*.log
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local exports produced while testing the userscript
+*.export.html
+exports/
+
+# Local cross-session working notes (kept on-machine, not published)
+SESSION_HANDOFF.md

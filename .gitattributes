@@ -1,0 +1,3 @@
+# Normalize all text files to LF in the repository (keeps Prettier's lf check and
+# cross-platform contributors consistent; avoids CRLF noise on Windows).
+* text=auto eol=lf

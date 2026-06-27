@@ -1,0 +1,41 @@
+{
+  "name": "sourcecapsule",
+  "version": "0.5.0",
+  "private": false,
+  "description": "Export an X (Twitter) Article or post to a single self-contained, fully-offline HTML file with all media and quoted tweets embedded.",
+  "keywords": [
+    "twitter",
+    "x",
+    "userscript",
+    "tampermonkey",
+    "archive",
+    "html",
+    "single-file",
+    "offline"
+  ],
+  "homepage": "https://github.com/wolfgang-aura/SourceCapsule#readme",
+  "bugs": {
+    "url": "https://github.com/wolfgang-aura/SourceCapsule/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/wolfgang-aura/SourceCapsule.git"
+  },
+  "license": "MIT",
+  "author": "wolfgang-aura",
+  "scripts": {
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "node test/smoke.mjs && node test/dom.test.mjs",
+    "test:dom": "node test/dom.test.mjs"
+  },
+  "comment": "This package.json exists ONLY for lint/format tooling and CI. The shipped artifact is sourcecapsule.user.js, which has no build step.",
+  "devDependencies": {
+    "@eslint/js": "^9.18.0",
+    "eslint": "^9.18.0",
+    "globals": "^15.14.0",
+    "jsdom": "^29.1.1",
+    "prettier": "^3.4.2"
+  }
+}
