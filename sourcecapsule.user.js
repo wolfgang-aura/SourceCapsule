@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SourceCapsule - X Article/Post -> self-contained HTML
 // @namespace    https://github.com/wolfgang-aura/SourceCapsule
-// @version      0.5.0
+// @version      1.0.0
 // @description  Export an X (Twitter) Article or post to a self-contained, fully-offline HTML file (images, inline videos, quoted tweets embedded) plus a clean LLM-readable Markdown companion. Per-post Export buttons; choose HTML, Markdown, or both.
 // @author       wolfgang-aura
 // @license      MIT
@@ -139,7 +139,7 @@
   };
 
   const APP = 'SourceCapsule';
-  const VERSION = '0.5.0';
+  const VERSION = '1.0.0';
 
   // ===========================================================================
   // Small utilities

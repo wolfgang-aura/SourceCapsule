@@ -18,10 +18,9 @@ boundaries, media references, warnings, and source links, without base64, CSS, o
 - 🌗 **Clean reader layout** with automatic light/dark mode.
 - 🔒 **Runs locally in your browser** on content _you_ can already see while logged in. See [Security & privacy](#security--privacy).
 
-> Status: **v0.5.0 — release candidate (pre-public).** The media-honesty rules are
-> implemented and verified by local export audits on real articles, posts, and videos. The
-> export engine is solid; the fragile part is reading X's ever-changing page — see
-> [Limitations](#limitations).
+> Status: **v1.0.0 — first public release.** The media-honesty rules are implemented and
+> verified by local export audits on real articles, posts, and videos. The export engine is
+> solid; the fragile part is reading X's ever-changing page — see [Limitations](#limitations).
 
 ### Honesty first
 

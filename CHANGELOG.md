@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
-## [0.5.0] - 2026-06-27
+## [1.0.0] - 2026-06-27
 
 First public release.
 
