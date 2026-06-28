@@ -396,6 +396,21 @@ check('buildModelForArticle captures article media and embedded quote separately
   );
 });
 
+// Regression: the article author must be the post author (from the canonical page
+// URL), NOT an embedded/quoted tweet's author. X renders the author header outside
+// the read-view body, so the first in-body User-Name belongs to a quote (@xiaomustock
+// here) - taking that one misattributed the whole archive. The URL handle (@Vegahao)
+// is authoritative.
+check('buildModelForArticle attributes the article to the post author, not a quote', () => {
+  // Handle comes from the canonical URL, so it is exact and authoritative.
+  assert.equal(articleModel.author.handle, '@Vegahao');
+  assert.notEqual(articleModel.author.handle, '@xiaomustock');
+  // Display name comes from the matching DOM block (jsdom lacks innerText newlines,
+  // so assert containment, not equality). It must be the author, not the quote.
+  assert.ok(articleModel.author.name.includes('Vega Hao'), 'author display name lost');
+  assert.ok(!articleModel.author.name.includes('Trumoo'), 'pulled a quote author as the name');
+});
+
 // ---------------------------------------------------------------------------
 // Media harvest survives virtualization (the v0.2.5 fix). X recycles off-screen
 // media out of the DOM, so we snapshot it during the scroll. Simulate that here:

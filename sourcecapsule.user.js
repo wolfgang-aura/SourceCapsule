@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SourceCapsule - X Article/Post -> self-contained HTML
 // @namespace    https://github.com/wolfgang-aura/SourceCapsule
-// @version      1.1.0
+// @version      1.1.1
 // @description  Export an X (Twitter) Article or post to a self-contained, fully-offline HTML file (images, inline videos, quoted tweets embedded) plus a clean LLM-readable Markdown companion. Per-post Export buttons; choose HTML, Markdown, or both.
 // @author       wolfgang-aura
 // @license      MIT
@@ -141,7 +141,7 @@
   };
 
   const APP = 'SourceCapsule';
-  const VERSION = '1.1.0';
+  const VERSION = '1.1.1';
 
   // ===========================================================================
   // Small utilities
@@ -1786,22 +1786,57 @@
     return quotes.sort(compareDocumentOrder);
   }
 
+  /** Parse {name, handle} from a single User-Name block's text. */
+  function authorFromNameBlock(nameBlock) {
+    const out = { name: '', handle: '' };
+    if (!nameBlock) return out;
+    const text = nameBlock.innerText || nameBlock.textContent || '';
+    const handleMatch = text.match(/@[A-Za-z0-9_]+/);
+    out.handle = handleMatch ? handleMatch[0] : '';
+    // The display name is usually the first line before the @handle.
+    out.name =
+      text
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean)[0] || '';
+    return out;
+  }
+
   /** Extract author {name, handle, avatarUrl} from a tweet element. */
   function extractAuthor(tweetEl) {
-    const author = { name: '', handle: '', avatarUrl: '' };
     const nameBlock = pick(tweetEl, CONFIG.selectors.userName, { quiet: true });
-    if (nameBlock) {
-      const text = nameBlock.innerText || nameBlock.textContent || '';
-      const handleMatch = text.match(/@[A-Za-z0-9_]+/);
-      author.handle = handleMatch ? handleMatch[0] : '';
-      // The display name is usually the first line before the @handle.
-      author.name =
-        text
-          .split('\n')
-          .map((s) => s.trim())
-          .filter(Boolean)[0] || '';
-    }
+    const author = { ...authorFromNameBlock(nameBlock), avatarUrl: '' };
     const avatar = pick(tweetEl, CONFIG.selectors.avatar, { quiet: true });
+    if (avatar && avatar.src) author.avatarUrl = highResImageUrl(avatar.src);
+    return author;
+  }
+
+  /**
+   * Resolve the author of an ARTICLE. X renders the article author header OUTSIDE the
+   * read-view body, while embedded/quoted tweets live INSIDE it - so the first in-body
+   * User-Name block belongs to a QUOTE, not the author (the cause of the misattribution
+   * bug). The canonical page URL (x.com/<author>/status/<id>) is the authoritative
+   * source for the handle; we trust it and use the DOM only to recover the matching
+   * display name + avatar. Worst case is an honest @handle with no name, never a quote's
+   * author. `quoteEls` are the embedded-tweet containers to skip.
+   */
+  function resolveArticleAuthor(scope, sourceUrl, quoteEls) {
+    const urlHandle = handleFromSourceUrl(sourceUrl);
+    const norm = (h) =>
+      String(h || '')
+        .replace(/^@/, '')
+        .toLowerCase();
+    const inQuote = (el) => quoteEls.some((q) => q.contains(el));
+    const nameBlocks = pickAll(scope, CONFIG.selectors.userName).filter((b) => !inQuote(b));
+    let block = null;
+    if (urlHandle)
+      block =
+        nameBlocks.find((b) => norm(authorFromNameBlock(b).handle) === norm(urlHandle)) || null;
+    if (!block) block = nameBlocks[0] || null; // no URL handle (reserved path) -> best-effort header
+    const author = { ...authorFromNameBlock(block), avatarUrl: '' };
+    if (urlHandle) author.handle = urlHandle; // the URL is authoritative for the handle
+    const avatar =
+      pickAll(scope, CONFIG.selectors.avatar).filter((img) => !inQuote(img))[0] || null;
     if (avatar && avatar.src) author.avatarUrl = highResImageUrl(avatar.src);
     return author;
   }
@@ -2036,9 +2071,6 @@
       ? (titleEl.innerText || titleEl.textContent || '').trim()
       : document.title.replace(/ \/ X.*$/, '');
 
-    // Author: the article header reuses the User-Name block.
-    const author = extractAuthor(root);
-
     const blocks = [];
     const seenImg = new Set();
     const seenVideo = new Set();
@@ -2046,6 +2078,10 @@
     const richRoot = pick(root, CONFIG.selectors.articleTextRoot, { quiet: true });
     const quoteEls = findArticleEmbeddedTweetEls(root);
     const insideQuote = (el) => quoteEls.some((quoteEl) => quoteEl !== el && quoteEl.contains(el));
+    // Author: trust the canonical page URL for the handle; the article header lives
+    // outside the read-view body, so the first in-body User-Name is a quoted tweet's,
+    // not the author's. Recover display name + avatar from the matching DOM block.
+    const author = resolveArticleAuthor(articleTweetEl, location.href.split('?')[0], quoteEls);
 
     const pushTextBlock = (el) => {
       const html = inlineHtmlFromArticleBlock(el);
