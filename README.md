@@ -39,21 +39,37 @@ capture summary, the `.llm.md` companion, and the embedded debug manifest.
 
 ## Screenshots
 
-**Export any post or article — choose HTML, Markdown, or both:**
+<img src="docs/screenshots/export-menu.png" alt="SourceCapsule's Export menu open on an X article, showing four options: Save to library, HTML + Markdown, HTML only, Markdown only" width="320">
 
-<img src="docs/screenshots/export-menu.png" alt="An X article with SourceCapsule's inline Export button, its menu open showing HTML + Markdown, HTML only, and Markdown only" width="320">
-
-**The result is a self-contained HTML archive that opens fully offline** (note the `file://` address):
+_One click on any X post or article — Save to library, HTML, Markdown, or both._
 
 <img src="docs/screenshots/offline-archive.png" alt="The exported HTML archive opened from a local file, showing the article title, provenance line, capture summary, and an inlined chart image" width="560">
 
-**Plus a clean `.llm.md` companion** with honest capture accounting and no base64/CSS/JS:
+_The archive opens straight from a `file://` path — fully offline, nothing left to load or rot._
 
-<img src="docs/screenshots/llm-markdown.png" alt="The .llm.md companion showing exporter version, source, language, capture note, and a capture summary of text, images, and videos" width="560">
+<img src="docs/screenshots/llm-markdown.png" alt="The .llm.md companion showing source URL, exporter version, author, and a 'What This File Is' section explaining it is text plus a media inventory" width="560">
 
-**Honesty first** — when something can't be preserved, the archive says so instead of pretending:
+_The clean `.llm.md` companion — source, version, author, and an honest "What This File Is" header._
+
+<img src="docs/screenshots/capture-summary.png" alt="A SourceCapsule capture summary listing images captured and missing, incomplete media, source links, and 'Warnings: None'" width="560">
+
+_Every image and video is accounted for — and anything incomplete is flagged (here: none)._
 
 <img src="docs/screenshots/truncation-notice.png" alt="A notice reading: Long-form post — only the preview above was available at export; X did not expose the full text. Read the full post on X" width="560">
+
+_When X only exposes a preview, the archive says so plainly instead of pretending it's complete._
+
+<img src="docs/screenshots/library-folder.png" alt="Windows Explorer showing a saved post folder 'kobeissiletter-…' containing the HTML archive, a .llm.md file, a README, and a media folder" width="560">
+
+_Save to library drops each post into a dated, per-post folder — text plus the real image files._
+
+<img src="docs/screenshots/ai-reads-folder.png" alt="An AI assistant reading a SourceCapsule export folder, summarizing the article and displaying the actual exported images" width="560">
+
+_Point an AI at the folder and it reads the text **and** sees the real exported images._
+
+<img src="docs/screenshots/quoted-card.png" alt="A quoted tweet rebuilt by SourceCapsule as a selectable HTML card with its own chart and author, not a screenshot" width="560">
+
+_Quoted tweets are rebuilt as real, selectable HTML cards with their own media — not screenshots._
 
 Ready-made examples of the output are in [`examples/sample-export.html`](examples/sample-export.html)
 and [`examples/sample-export.llm.md`](examples/sample-export.llm.md).
