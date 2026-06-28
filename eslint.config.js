@@ -19,6 +19,8 @@ module.exports = [
         ...globals.browser,
         // Greasemonkey / Tampermonkey APIs granted in the metadata block.
         GM_xmlhttpRequest: 'readonly',
+        GM_registerMenuCommand: 'readonly',
+        GM_unregisterMenuCommand: 'readonly',
         GM: 'readonly',
         unsafeWindow: 'readonly',
         // Node-only export guard at the bottom of the file (no-op in browser).

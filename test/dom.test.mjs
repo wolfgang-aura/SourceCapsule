@@ -111,6 +111,24 @@ check('inlineHtmlFromTweetText captures nested-span text', () => {
   assert.ok(html.includes('对我们这些炒币的可能就够了'), `got: ${JSON.stringify(html)}`);
 });
 
+check('articleListType: "unordered" class is bullets, not numbers (no substring trap)', () => {
+  const d = dom.window.document;
+  const make = (attr, val) => {
+    const el = d.createElement('div');
+    el.setAttribute(attr, val);
+    el.textContent = 'a list item';
+    return el;
+  };
+  // The bug: /ordered/ matched the "ordered" inside "unordered", so bullets became numbers.
+  assert.equal(
+    engine.articleListType(make('class', 'public-DraftStyleDefault-unorderedListItem')),
+    'unordered'
+  );
+  assert.equal(engine.articleListType(make('aria-label', 'Bulleted list')), 'unordered');
+  assert.equal(engine.articleListType(make('data-list-type', 'ordered')), 'ordered');
+  assert.equal(engine.articleListType(make('aria-label', 'Numbered list')), 'ordered');
+});
+
 const model = engine.buildModelForPost();
 
 function allBlocks(blocks) {

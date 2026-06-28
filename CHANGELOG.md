@@ -6,6 +6,45 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-06-28
+
+### Added
+
+- **Save to library.** A new primary export option that writes each export into an organized,
+  per-post folder (`<root>/<date>/<handle>-<id>/`) containing `post.html` (full mode),
+  `post.llm.md`, a `media/` folder, and a `README.txt`. You pick the root folder once (remembered
+  via IndexedDB) and exports drop in automatically — so an agent can be pointed at a date folder to
+  summarize a day's exports. Uses the File System Access API on desktop Chromium (Chrome, Edge,
+  Opera, Vivaldi, Arc); **other browsers (Brave, Firefox, Safari, mobile) get a single `.zip`**
+  with the same per-post layout via a built-in store-only zip writer.
+- **LLM bundle media as real files.** In Save to library, images and **video poster stills** are
+  written next to the Markdown as actual files, and the `.llm.md` references them with relative
+  `![](media/…)` embeds. Raw video bytes are deliberately excluded (an LLM can't watch video), so
+  the bundle stays small while remaining viewable by an agent.
+- **`## What This File Is` header in `.llm.md`.** Every Markdown companion now states up front what
+  it does and does not contain, and points at exactly where the media lives (bundle `media/` files,
+  the named companion `.html`, or "not saved" for Markdown-only).
+- **Library settings in the userscript-manager menu.** Toggle Layout (`by date` / `flat`),
+  Contents (`full` / `lean`), and the page-level **Floating button** (now **off by default** —
+  the inline per-post / article-header buttons are the primary entry point), or change the export
+  folder — no in-app settings panel.
+- **Author fallback from the source URL.** When author metadata can't be read from the page, the
+  Markdown derives the `@handle` from the post/article URL (flagged as derived).
+
+### Fixed
+
+- **`.llm.md` no longer references a nonexistent `archive.html`.** The companion now names the real
+  sibling file (or states honestly that Markdown-only / bundle exports keep no embedded bytes),
+  instead of pointing readers at a file that was never written.
+- **No more double-numbered list items ("1. 2. …").** When X fragments a manually-numbered article
+  list around an embedded post, each piece is a single-item ordered list whose text already carries
+  the author's number (sometimes bolded, e.g. `<strong>2. …`). The HTML and Markdown renderers now
+  detect a self-numbered item and keep the author's number instead of adding their own marker.
+- **Bulleted article lists are no longer turned into numbered lists.** List-type detection tested
+  `/ordered/` before `/unordered/`, and "ordered" is a substring of "un​ordered" — so every
+  bulleted list (X labels them `unordered` / "Bulleted list") was mis-classified as numbered.
+  Detection now checks unordered first and anchors "ordered" on a word boundary.
+
 ## [1.0.0] - 2026-06-27
 
 First public release.

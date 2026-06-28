@@ -2,11 +2,20 @@
 
 Source: https://x.com/ada/article/12345
 Exported at: 2026-06-25 10:00:00 UTC
-Exporter: SourceCapsule v1.0.0
+Exporter: SourceCapsule v1.1.0
 Language: en
 Published at: 2026-06-24 09:30:00 UTC
 Author: Ada Lovelace @ada
 Capture note: This file preserves content visible to the logged-in user at export time. It may not include unavailable, private, deleted, failed, or unloaded content.
+
+## What This File Is
+
+This is the text + metadata companion (a .llm.md file). Reading only this file, an agent or LLM has access to:
+- The full article/post text and embedded-post text (in the sections below).
+- A metadata-only inventory of every image and video: type, dimensions, duration, original source URL, byte size, and SHA-256.
+
+This file does NOT contain the media itself: no image pixels, no video or audio bytes, no transcripts, and no visual descriptions. From this file alone you cannot view the images or play/transcribe the videos.
+The media bytes are embedded (base64) inside the companion file sample-export.html, downloaded alongside this markdown. If you also have that file, the media is available there; if you only have this markdown, it is not.
 
 ## Capture Summary
 
@@ -36,10 +45,10 @@ Capture note: This file preserves content visible to the logged-in user at expor
   - 1 duplicate media hash group(s) were detected.
   - Video video-003 was detected, but the video file was not preserved offline. Only the poster and source link were preserved.
   - Video video-003 has no transcript or visual description in llm.md.
-  - Video video-004 is preserved offline in archive.html, but no transcript or visual description is available in llm.md.
+  - Video video-004 bytes are embedded in the companion file sample-export.html; this markdown holds only metadata (no video bytes, transcript, or visual description).
   - Video video-005 was detected, but the video file was not preserved offline. No poster and source link were preserved.
   - Video video-005 has no transcript or visual description in llm.md.
-  - Video video-006 is preserved offline in archive.html, but no transcript or visual description is available in llm.md.
+  - Video video-006 bytes are embedded in the companion file sample-export.html; this markdown holds only metadata (no video bytes, transcript, or visual description).
   - Video video-007 was detected, but the video file was not preserved offline. No poster and source link were preserved.
   - Video video-007 has no transcript or visual description in llm.md.
   - Embedded Post 1 text may be truncated because only preview text may have been available at export time.
@@ -61,11 +70,11 @@ Plain text with a link & an ampersand.
 
 [Video: video-003 - video file not preserved offline; poster captured; source link preserved]
 
-[Video: video-004 - 14:45, 438x270, preserved offline in archive.html]
+[Video: video-004 - 14:45, 438x270, bytes embedded in companion file sample-export.html, not in this markdown]
 
 [Missing video: video-005 - video file not preserved offline; poster unavailable; source link preserved]
 
-[Video: video-006 - 0:12, 640x360, preserved offline in archive.html]
+[Video: video-006 - 0:12, 640x360, bytes embedded in companion file sample-export.html, not in this markdown]
 
 [Missing video: video-007 - video file not preserved offline; poster unavailable; source link preserved]
 
@@ -143,6 +152,7 @@ Text:
 - Width: 1200
 - Height: 800
 - MIME: image/png
+- Pixels location: embedded in companion file sample-export.html (not in this markdown)
 - Byte size: 68
 - SHA-256: sha256:duplicate-media-hash
 - Source post ID: 12345
@@ -183,7 +193,7 @@ Text:
 - MIME: video/mp4
 - Poster captured: yes
 - Source link preserved: yes
-- Preserved in: archive.html
+- Bytes location: embedded in companion file sample-export.html (not in this markdown)
 - Transcript: unavailable
 - Keyframe description: unavailable
 - Byte size: 456
@@ -218,7 +228,7 @@ Text:
 - MIME: video/mp4
 - Poster captured: no
 - Source link preserved: yes
-- Preserved in: archive.html
+- Bytes location: embedded in companion file sample-export.html (not in this markdown)
 - Transcript: unavailable
 - Keyframe description: unavailable
 - Byte size: 789
@@ -249,6 +259,7 @@ Text:
 - Width: 640
 - Height: 480
 - MIME: image/png
+- Pixels location: embedded in companion file sample-export.html (not in this markdown)
 - Byte size: 68
 - SHA-256: sha256:duplicate-media-hash
 - Original URL: https://pbs.twimg.com/media/q.jpg

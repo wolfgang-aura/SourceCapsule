@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SourceCapsule - X Article/Post -> self-contained HTML
 // @namespace    https://github.com/wolfgang-aura/SourceCapsule
-// @version      1.0.0
+// @version      1.1.0
 // @description  Export an X (Twitter) Article or post to a self-contained, fully-offline HTML file (images, inline videos, quoted tweets embedded) plus a clean LLM-readable Markdown companion. Per-post Export buttons; choose HTML, Markdown, or both.
 // @author       wolfgang-aura
 // @license      MIT
@@ -12,6 +12,8 @@
 // @icon         https://abs.twimg.com/favicons/twitter.3.ico
 // @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
+// @grant        GM_registerMenuCommand
+// @grant        GM_unregisterMenuCommand
 // @connect      pbs.twimg.com
 // @connect      video.twimg.com
 // @connect      abs.twimg.com
@@ -139,7 +141,7 @@
   };
 
   const APP = 'SourceCapsule';
-  const VERSION = '1.0.0';
+  const VERSION = '1.1.0';
 
   // ===========================================================================
   // Small utilities
@@ -401,6 +403,40 @@
     return article ? article[1] : '';
   }
 
+  // Reserved first-path segments on x.com/twitter.com that are NOT user handles.
+  const NON_HANDLE_SEGMENTS = new Set([
+    'i',
+    'home',
+    'search',
+    'explore',
+    'notifications',
+    'messages',
+    'settings',
+    'compose',
+    'hashtag',
+    'intent',
+    'share',
+    'login',
+    'signup',
+    'about',
+    'tos',
+    'privacy',
+  ]);
+
+  /**
+   * Best-effort author handle from a post/article URL (e.g. https://x.com/dingyi/status/123 ->
+   * "@dingyi"). Used only as a fallback when the DOM author metadata is missing. Returns '' for
+   * reserved paths (/i/, /home, ...) or anything that does not look like a handle.
+   */
+  function handleFromSourceUrl(url) {
+    const m = String(url || '').match(
+      /^https?:\/\/(?:[\w-]+\.)*(?:x|twitter)\.com\/([A-Za-z0-9_]{1,15})(?:[/?#]|$)/i
+    );
+    if (!m) return '';
+    if (NON_HANDLE_SEGMENTS.has(m[1].toLowerCase())) return '';
+    return `@${m[1]}`;
+  }
+
   function publishedAtFromElement(root, expectedStatusId = '') {
     const times = Array.from(
       (root || document).querySelectorAll
@@ -660,6 +696,186 @@
       binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
     }
     return btoa(binary);
+  }
+
+  /** base64 string -> Uint8Array (inverse of bytesToBase64; atob exists in Node 18+). */
+  function base64ToBytes(b64) {
+    const binary = atob(String(b64 || ''));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  /** "data:<mime>[;base64],<payload>" -> { bytes, mime }. */
+  function dataUriToBytes(dataUri) {
+    const s = String(dataUri || '');
+    const comma = s.indexOf(',');
+    if (comma === -1 || !s.startsWith('data:')) return { bytes: new Uint8Array(0), mime: '' };
+    const header = s.slice(5, comma);
+    const mime = header.split(';')[0] || '';
+    const payload = s.slice(comma + 1);
+    const bytes = /;base64/i.test(header)
+      ? base64ToBytes(payload)
+      : new TextEncoder().encode(decodeURIComponent(payload));
+    return { bytes, mime };
+  }
+
+  /** MIME -> a sensible file extension for sidecar media files. */
+  function mimeToExt(mime) {
+    switch (String(mime || '').toLowerCase()) {
+      case 'image/jpeg':
+      case 'image/jpg':
+        return 'jpg';
+      case 'image/png':
+        return 'png';
+      case 'image/gif':
+        return 'gif';
+      case 'image/webp':
+        return 'webp';
+      case 'image/svg+xml':
+        return 'svg';
+      case 'video/mp4':
+        return 'mp4';
+      default:
+        return 'bin';
+    }
+  }
+
+  /**
+   * PURE: decide the on-disk folder names for one export, given the user's layout pref.
+   * `date` is a pre-formatted "YYYY-MM-DD" string (caller supplies the local date). Returns the
+   * directory segments from the chosen root down to the per-post folder. The post-folder name is
+   * stable (handle + status id) so re-exporting the same post overwrites instead of duplicating.
+   */
+  function bundlePaths(model, prefs, date) {
+    const layout = prefs && prefs.layout === 'flat' ? 'flat' : 'date';
+    const handle = String((model.author && model.author.handle) || '').replace(/^@/, '');
+    const statusId = statusIdFromSourceUrl(model.sourceUrl || '');
+    let postName;
+    if (handle && statusId) postName = `${slugify(handle)}-${statusId}`;
+    else if (statusId) postName = `post-${statusId}`;
+    else postName = slugify(model.title || model.heading || 'x-export');
+    const dateFolder = String(date || '');
+    if (layout === 'flat') {
+      const folder = dateFolder ? `${dateFolder}_${postName}` : postName;
+      return { layout, dateFolder, postName, postFolder: folder, segments: [folder] };
+    }
+    return {
+      layout,
+      dateFolder,
+      postName,
+      postFolder: postName,
+      segments: dateFolder ? [dateFolder, postName] : [postName],
+    };
+  }
+
+  /** Local "YYYY-MM-DD" for date-grouped folders (the user's day, not UTC). */
+  function localDateStamp(d = new Date()) {
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Store-only ZIP writer (no dependency). Used only as the fallback delivery on
+  // browsers without the File System Access API. Media is already compressed, so
+  // we store (method 0) rather than deflate - simpler and effectively the same size.
+  // ---------------------------------------------------------------------------
+  const CRC32_TABLE = (() => {
+    const table = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      table[n] = c >>> 0;
+    }
+    return table;
+  })();
+
+  function crc32(bytes) {
+    let crc = 0xffffffff;
+    for (let i = 0; i < bytes.length; i++) crc = CRC32_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+    return (crc ^ 0xffffffff) >>> 0;
+  }
+
+  /**
+   * Build a store-only ZIP from `[{ name, bytes }]` -> Uint8Array. Names use forward slashes
+   * (e.g. "media/image-001.jpg") and must be ASCII. No timestamps (set to 0).
+   */
+  function buildZip(entries) {
+    const enc = new TextEncoder();
+    const chunks = [];
+    const central = [];
+    let offset = 0;
+    const u16 = (n) => [n & 0xff, (n >>> 8) & 0xff];
+    const u32 = (n) => [n & 0xff, (n >>> 8) & 0xff, (n >>> 16) & 0xff, (n >>> 24) & 0xff];
+
+    for (const entry of entries) {
+      const nameBytes = enc.encode(entry.name);
+      const data = entry.bytes instanceof Uint8Array ? entry.bytes : new Uint8Array(entry.bytes);
+      const crc = crc32(data);
+      const local = [
+        ...u32(0x04034b50), // local file header signature
+        ...u16(20), // version needed
+        ...u16(0), // flags
+        ...u16(0), // method: store
+        ...u16(0), // mod time
+        ...u16(0), // mod date
+        ...u32(crc),
+        ...u32(data.length), // compressed size
+        ...u32(data.length), // uncompressed size
+        ...u16(nameBytes.length),
+        ...u16(0), // extra length
+      ];
+      chunks.push(new Uint8Array(local), nameBytes, data);
+      central.push({ nameBytes, crc, size: data.length, offset });
+      offset += local.length + nameBytes.length + data.length;
+    }
+
+    const centralStart = offset;
+    let centralSize = 0;
+    for (const c of central) {
+      const header = [
+        ...u32(0x02014b50), // central directory header signature
+        ...u16(20), // version made by
+        ...u16(20), // version needed
+        ...u16(0), // flags
+        ...u16(0), // method: store
+        ...u16(0), // mod time
+        ...u16(0), // mod date
+        ...u32(c.crc),
+        ...u32(c.size),
+        ...u32(c.size),
+        ...u16(c.nameBytes.length),
+        ...u16(0), // extra length
+        ...u16(0), // comment length
+        ...u16(0), // disk number start
+        ...u16(0), // internal attrs
+        ...u32(0), // external attrs
+        ...u32(c.offset),
+      ];
+      chunks.push(new Uint8Array(header), c.nameBytes);
+      centralSize += header.length + c.nameBytes.length;
+    }
+
+    const end = [
+      ...u32(0x06054b50), // end of central directory signature
+      ...u16(0), // disk number
+      ...u16(0), // disk with central dir
+      ...u16(central.length),
+      ...u16(central.length),
+      ...u32(centralSize),
+      ...u32(centralStart),
+      ...u16(0), // comment length
+    ];
+    chunks.push(new Uint8Array(end));
+
+    const total = chunks.reduce((sum, c) => sum + c.length, 0);
+    const out = new Uint8Array(total);
+    let pos = 0;
+    for (const c of chunks) {
+      out.set(c, pos);
+      pos += c.length;
+    }
+    return out;
   }
 
   async function sha256Hex(bytes) {
@@ -1402,6 +1618,17 @@
       .replace(/^\s*\d+[.)\u3001]\s+/, '');
   }
 
+  // True when a list item already begins with its own ordinal - e.g. "2. ..." or, when the number
+  // is bolded, "<strong>2. ..." / "**2. ...". X fragments manually-numbered article lists around
+  // embedded posts, so each piece becomes a single-item <ol> that the renderer would re-number
+  // "1.", doubling the author's number ("1. 2. ..."). When an item is self-numbered the renderers
+  // keep the author's number and omit their own marker.
+  function itemHasLeadingOrdinal(s) {
+    return /^\s*(?:<(?:strong|em|b|i)>\s*|\*{1,2}|_{1,2})?\s*\d+[.)\u3001]\s+/.test(
+      String(s || '')
+    );
+  }
+
   function articleListType(el) {
     if (!el) return '';
     const listEl = el.closest && el.closest('li,[role="listitem"],[data-list],[data-list-type]');
@@ -1415,8 +1642,12 @@
       .filter(Boolean)
       .join(' ')
       .toLowerCase();
-    if (/ordered|decimal|number/.test(attrs)) return 'ordered';
-    if (/unordered|bullet|disc/.test(attrs)) return 'unordered';
+    // Check unordered FIRST, and anchor "ordered" on a word boundary: the substring "ordered"
+    // lives inside "unordered", so a naive /ordered/ test mis-classifies every bulleted list
+    // (class/aria like "unordered-list" / "Bulleted list") as numbered. \bordered does not match
+    // the internal "ordered" in "unordered" (no boundary after the preceding "n").
+    if (/\b(?:unordered|bullet|disc)/.test(attrs)) return 'unordered';
+    if (/\b(?:ordered|decimal|number)/.test(attrs)) return 'ordered';
     if (source.tagName && source.tagName.toLowerCase() === 'li') {
       const parent = source.parentElement && source.parentElement.tagName.toLowerCase();
       if (parent === 'ol') return 'ordered';
@@ -2340,6 +2571,34 @@
     return media;
   }
 
+  /**
+   * For the "Save to library" bundle: turn captured media into standalone files. Images become
+   * `media/<id>.<ext>`; videos contribute only their poster still as `media/<id>.poster.<ext>`
+   * (raw video bytes are intentionally never bundled). Missing/failed media is skipped (it stays
+   * listed as missing in the markdown). Requires the model to be prepared (media ids assigned).
+   */
+  function collectBundleMediaFiles(model) {
+    const files = [];
+    const pathById = new Map();
+    const add = (id, dataUri, suffix) => {
+      if (!id || !dataUri) return;
+      const { bytes, mime } = dataUriToBytes(dataUri);
+      if (!bytes.length) return;
+      const name = `media/${id}${suffix}.${mimeToExt(mime)}`;
+      files.push({ name, bytes });
+      pathById.set(id, name);
+    };
+    const walk = (blocks) => {
+      (blocks || []).forEach((b) => {
+        if (b.kind === 'image') add(b._xaMediaId, b.dataUri, '');
+        else if (b.kind === 'video') add(b._xaMediaId, b.posterDataUri, '.poster');
+        else if (b.kind === 'quote' || b.kind === 'blockquote') walk(b.blocks);
+      });
+    };
+    walk(model.blocks);
+    return { files, pathById };
+  }
+
   function duplicateMediaReport(media) {
     const byHash = new Map();
     media.forEach((item) => {
@@ -2474,7 +2733,13 @@
         }</blockquote>`;
       case 'list': {
         const items = b.items.map((i) => `<li>${i}</li>`).join('');
-        return b.ordered ? `<ol>${items}</ol>` : `<ul>${items}</ul>`;
+        if (!b.ordered) return `<ul>${items}</ul>`;
+        // If the author already numbered the items (kept as text, e.g. a list X split around an
+        // embedded post), suppress the <ol> marker so we don't render "1." on top of their "2.".
+        const selfNumbered = b.items.length > 0 && itemHasLeadingOrdinal(b.items[0]);
+        return selfNumbered
+          ? `<ol style="list-style:none;padding-inline-start:0">${items}</ol>`
+          : `<ol>${items}</ol>`;
       }
       case 'image':
         return renderImageBlock(b, ctx);
@@ -3069,8 +3334,13 @@
     const warnings = [];
     videoMedia.forEach((item) => {
       if (item.offlinePlayable) {
+        const posterPath = llmMediaFiles && llmMediaFiles.get(item.id);
         warnings.push(
-          `Video ${item.id} is preserved offline in archive.html, but no transcript or visual description is available in llm.md.`
+          llmMediaFiles
+            ? `Video ${item.id} full video is NOT included in this bundle (an LLM cannot watch video); ${posterPath ? `its poster frame is ${posterPath}` : 'no poster frame was captured'} and the source link is provided (no transcript or visual description).`
+            : llmCompanionHtml
+              ? `Video ${item.id} bytes are embedded in the companion file ${llmCompanionHtml}; this markdown holds only metadata (no video bytes, transcript, or visual description).`
+              : `Video ${item.id} bytes were captured but not saved in this Markdown-only export; only metadata is available here (no playable file, transcript, or visual description).`
         );
       } else {
         warnings.push(
@@ -3110,10 +3380,13 @@
 
   function llmMediaDescription(block, type) {
     const id = block._xaMediaId || `${type}-unknown`;
+    const bundlePath = llmMediaFiles ? llmMediaFiles.get(id) : '';
     if (type === 'image') {
       const alt = markdownLineText(block._xaExportAlt || block.alt || 'Image');
-      const missing = !block.dataUri ? 'Missing image' : 'Image';
-      return `[${missing}: ${id}${alt ? ` - ${alt}` : ''}]`;
+      if (!block.dataUri) return `[Missing image: ${id}${alt ? ` - ${alt}` : ''}]`;
+      // Bundle: emit a real relative embed so markdown-aware readers render the actual file.
+      if (bundlePath) return `![${alt} (${id})](${bundlePath})`;
+      return `[Image: ${id}${alt ? ` - ${alt}` : ''}]`;
     }
     const pieces = [];
     const duration = formatDuration(block.duration);
@@ -3121,7 +3394,20 @@
     if (Number(block.width) > 0 && Number(block.height) > 0) {
       pieces.push(`${Math.round(Number(block.width))}x${Math.round(Number(block.height))}`);
     }
-    if (block.dataUri) pieces.push('preserved offline in archive.html');
+    if (llmMediaFiles) {
+      // Bundle: raw video bytes are never included; the poster still is the visual the LLM gets.
+      pieces.push('full video not included in this bundle');
+      pieces.push(bundlePath ? `poster frame ${bundlePath}` : 'poster unavailable');
+      pieces.push(block.sourceUrl ? 'source link preserved' : 'source link unavailable');
+      const tag = `[Video: ${id} - ${pieces.join(', ')}]`;
+      return bundlePath ? `![Poster of ${id}](${bundlePath})\n${tag}` : tag;
+    }
+    if (block.dataUri)
+      pieces.push(
+        llmCompanionHtml
+          ? `bytes embedded in companion file ${llmCompanionHtml}, not in this markdown`
+          : 'bytes captured but not saved in this Markdown-only export; metadata only'
+      );
     else {
       pieces.push(
         `video file not preserved offline; ${block.posterDataUri ? 'poster captured' : 'poster unavailable'}; ${
@@ -3169,8 +3455,16 @@
               : markdownPlainText(text);
           })
           .filter(Boolean);
+        // Keep the author's own numbering when items are already numbered (X split a numbered list
+        // around an embedded post), so we don't emit "1." on top of their "2.".
+        const selfNumbered = items.length > 0 && itemHasLeadingOrdinal(items[0]);
         lines.push(
-          items.map((item, index) => (b.ordered ? `${index + 1}. ${item}` : `- ${item}`)).join('\n')
+          items
+            .map((item, index) => {
+              if (!b.ordered) return `- ${item}`;
+              return selfNumbered ? item : `${index + 1}. ${item}`;
+            })
+            .join('\n')
         );
       } else if (b.kind === 'blockquote') {
         const inner = renderLlmBlocks(b.blocks, options);
@@ -3262,8 +3556,28 @@
       if (offlinePlayable) row('MIME', item.mime);
       row('Poster captured', item.posterCaptured ? 'yes' : item.posterUrl ? 'no' : '');
       row('Source link preserved', item.sourceLinkPreserved ? 'yes' : 'no');
-      if (offlinePlayable) row('Preserved in', 'archive.html');
-      else {
+      if (llmMediaFiles) {
+        // Bundle: the raw video is never included; the poster still is the visual the LLM gets.
+        row(
+          'Full video',
+          'not included in this bundle (an LLM cannot watch video); see source link'
+        );
+        row(
+          'Poster frame',
+          llmMediaFiles.get(item.id) || (item.posterCaptured ? 'captured (no file)' : 'unavailable')
+        );
+        if (!offlinePlayable) {
+          row('Original video URL', item.originalUrl || 'unavailable');
+          row('Failure reason', item.failureReason || 'video_file_not_captured');
+        }
+      } else if (offlinePlayable) {
+        row(
+          'Bytes location',
+          llmCompanionHtml
+            ? `embedded in companion file ${llmCompanionHtml} (not in this markdown)`
+            : 'captured but not saved (Markdown-only export); metadata only'
+        );
+      } else {
         row('Video file MIME', 'unavailable');
         row('Video file byte size', 'unavailable');
         row('Video file SHA-256', 'unavailable');
@@ -3274,6 +3588,16 @@
       row('Keyframe description', 'unavailable');
     } else {
       row('MIME', item.mime);
+      if (!item.missing) {
+        if (llmMediaFiles) row('File', llmMediaFiles.get(item.id) || 'unavailable');
+        else
+          row(
+            'Pixels location',
+            llmCompanionHtml
+              ? `embedded in companion file ${llmCompanionHtml} (not in this markdown)`
+              : 'captured but not saved (Markdown-only export); metadata only'
+          );
+      }
     }
     if (item.type !== 'video' || item.offlinePlayable) {
       row('Byte size', item.size);
@@ -3286,7 +3610,17 @@
     return lines.join('\n');
   }
 
-  function renderLlmMarkdown(model, debugJson = '') {
+  // Set per render by renderLlmMarkdown. '' means a Markdown-only export: the media bytes were
+  // captured in memory but never written to any file the reader keeps, so the markdown must say so
+  // honestly instead of pointing at a companion that does not exist.
+  let llmCompanionHtml = '';
+  // Set per render for the "Save to library" bundle: Map<mediaId, "media/...">. When present, the
+  // markdown references the real sidecar files. Precedence: mediaFiles > companionHtmlFilename > md.
+  let llmMediaFiles = null;
+
+  function renderLlmMarkdown(model, debugJson = '', options = {}) {
+    llmCompanionHtml = options.companionHtmlFilename || '';
+    llmMediaFiles = options.mediaFiles instanceof Map ? options.mediaFiles : null;
     prepareArchiveModel(model);
     assignLlmQuoteNumbers(model);
     const documentLang = inferDocumentLang(model);
@@ -3318,9 +3652,31 @@
       lines.push(
         `Author: ${[model.author.name, model.author.handle].filter(Boolean).map(markdownLineText).join(' ')}`
       );
+    } else {
+      // Author metadata was not captured from the DOM; fall back to the @handle in the source URL
+      // so the reader at least knows who posted it. Flagged as derived to stay honest.
+      const derived = handleFromSourceUrl(model.sourceUrl);
+      if (derived)
+        lines.push(
+          `Author: ${derived} (handle derived from the source URL; display name not captured)`
+        );
     }
+    const companionNote = llmMediaFiles
+      ? 'The images and video poster frames are included as separate files in the media/ folder next to this markdown. Attach them to your LLM together with this file. Full videos are NOT included (an LLM cannot watch them); each video provides its poster frame and source link instead.'
+      : llmCompanionHtml
+        ? `The media bytes are embedded (base64) inside the companion file ${llmCompanionHtml}, downloaded alongside this markdown. If you also have that file, the media is available there; if you only have this markdown, it is not.`
+        : 'This was a Markdown-only export, so the media bytes were not saved to any file. Only the metadata and the original source URLs below remain; use those URLs to retrieve the media from the source.';
     lines.push(
       'Capture note: This file preserves content visible to the logged-in user at export time. It may not include unavailable, private, deleted, failed, or unloaded content.',
+      '',
+      '## What This File Is',
+      '',
+      'This is the text + metadata companion (a .llm.md file). Reading only this file, an agent or LLM has access to:',
+      '- The full article/post text and embedded-post text (in the sections below).',
+      '- A metadata-only inventory of every image and video: type, dimensions, duration, original source URL, byte size, and SHA-256.',
+      '',
+      'This file does NOT contain the media itself: no image pixels, no video or audio bytes, no transcripts, and no visual descriptions. From this file alone you cannot view the images or play/transcribe the videos.',
+      companionNote,
       '',
       '## Capture Summary',
       '',
@@ -3637,6 +3993,168 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       URL.revokeObjectURL(url);
       a.remove();
     }, 1500);
+  }
+
+  // ===========================================================================
+  // Library settings + persistent root folder (browser-only)
+  // ---------------------------------------------------------------------------
+  // "Save to library" writes each export into a folder the user picks once. The
+  // folder handle is persisted in IndexedDB (handles are structured-clonable;
+  // localStorage cannot hold them). Two small prefs (layout, contents) live in
+  // localStorage and are toggled from the userscript-manager menu - no in-app UI.
+  // ===========================================================================
+  const PREFS_KEY = 'sourcecapsule.prefs';
+  const IDB_NAME = 'sourcecapsule';
+  const IDB_STORE = 'handles';
+  const ROOT_HANDLE_KEY = 'rootDir';
+
+  function getPrefs() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}');
+      return {
+        layout: parsed.layout === 'flat' ? 'flat' : 'date',
+        contents: parsed.contents === 'lean' ? 'lean' : 'full',
+        // The page-level draggable floating button is OFF by default; the inline per-post /
+        // article-header Export buttons are the primary entry point.
+        floatingButton: parsed.floatingButton === true,
+      };
+    } catch {
+      return { layout: 'date', contents: 'full', floatingButton: false };
+    }
+  }
+
+  function setPrefs(patch) {
+    const next = { ...getPrefs(), ...patch };
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify(next));
+    } catch (e) {
+      errlog(e);
+    }
+    return next;
+  }
+
+  function idbOpen() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  function idbRun(mode, fn) {
+    return idbOpen().then(
+      (db) =>
+        new Promise((resolve, reject) => {
+          const tx = db.transaction(IDB_STORE, mode);
+          const store = tx.objectStore(IDB_STORE);
+          const req = fn(store);
+          tx.oncomplete = () => resolve(req && req.result);
+          tx.onerror = () => reject(tx.error);
+        })
+    );
+  }
+
+  const idbGet = (key) => idbRun('readonly', (s) => s.get(key));
+  const idbSet = (key, val) => idbRun('readwrite', (s) => s.put(val, key));
+
+  // showDirectoryPicker may live on the sandbox window, the page window (unsafeWindow), or
+  // globalThis depending on the userscript manager. Firefox/Safari expose it nowhere (-> zip).
+  function fsaWindow() {
+    const candidates = [
+      typeof window !== 'undefined' ? window : null,
+      typeof unsafeWindow !== 'undefined' ? unsafeWindow : null,
+      typeof globalThis !== 'undefined' ? globalThis : null,
+    ];
+    for (const c of candidates) {
+      if (c && typeof c.showDirectoryPicker === 'function') return c;
+    }
+    return null;
+  }
+
+  async function verifyPermission(handle) {
+    if (!handle || typeof handle.queryPermission !== 'function') return true;
+    const opts = { mode: 'readwrite' };
+    if ((await handle.queryPermission(opts)) === 'granted') return true;
+    if ((await handle.requestPermission(opts)) === 'granted') return true;
+    return false;
+  }
+
+  /**
+   * Resolve the root export directory handle. Reuses the persisted one (re-confirming write
+   * permission, which the browser may prompt for ~once per session) unless `forcePick`. Returns
+   * null when the File System Access API is unavailable (caller falls back to a zip) or the user
+   * cancels the picker.
+   */
+  async function getRootDir({ forcePick = false } = {}) {
+    const win = fsaWindow();
+    if (!win) return null;
+    if (!forcePick) {
+      try {
+        const saved = await idbGet(ROOT_HANDLE_KEY);
+        if (saved && (await verifyPermission(saved))) return saved;
+      } catch (e) {
+        errlog(e);
+      }
+    }
+    let handle;
+    try {
+      handle = await win.showDirectoryPicker({ id: 'sourcecapsule', mode: 'readwrite' });
+    } catch {
+      return null; // user cancelled the picker
+    }
+    if (!(await verifyPermission(handle))) return null;
+    try {
+      await idbSet(ROOT_HANDLE_KEY, handle);
+    } catch (e) {
+      errlog(e);
+    }
+    return handle;
+  }
+
+  let menuCommandIds = [];
+  function registerSettingsMenu() {
+    if (typeof GM_registerMenuCommand !== 'function') return;
+    if (typeof GM_unregisterMenuCommand === 'function') {
+      menuCommandIds.forEach((id) => {
+        try {
+          GM_unregisterMenuCommand(id);
+        } catch {
+          /* manager may not support re-labelling; harmless */
+        }
+      });
+    }
+    menuCommandIds = [];
+    const prefs = getPrefs();
+    const reg = (label, fn) => {
+      const id = GM_registerMenuCommand(label, fn);
+      if (id !== undefined && id !== null) menuCommandIds.push(id);
+    };
+    const layoutText = (p) => (p === 'flat' ? 'flat' : 'by date');
+    const contentsText = (p) => (p === 'lean' ? 'lean (md + media)' : 'full (HTML + bundle)');
+    reg(`${APP}: Layout - ${layoutText(prefs.layout)} (click to switch)`, () => {
+      const next = setPrefs({ layout: prefs.layout === 'flat' ? 'date' : 'flat' });
+      showToast(`Library layout: ${layoutText(next.layout)}`);
+      registerSettingsMenu();
+    });
+    reg(`${APP}: Contents - ${contentsText(prefs.contents)} (click to switch)`, () => {
+      const next = setPrefs({ contents: prefs.contents === 'lean' ? 'full' : 'lean' });
+      showToast(`Library contents: ${contentsText(next.contents)}`);
+      registerSettingsMenu();
+    });
+    reg(
+      `${APP}: Floating button - ${prefs.floatingButton ? 'on' : 'off'} (click to switch)`,
+      () => {
+        const next = setPrefs({ floatingButton: !prefs.floatingButton });
+        showToast(`Floating button: ${next.floatingButton ? 'on' : 'off'}`);
+        registerSettingsMenu();
+        ensureButton();
+      }
+    );
+    reg(`${APP}: Change export folder...`, async () => {
+      const handle = await getRootDir({ forcePick: true });
+      showToast(handle ? `Export folder set: ${handle.name}` : 'Export folder unchanged');
+    });
   }
 
   // ===========================================================================
@@ -4336,8 +4854,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return model;
   }
 
-  // The three export choices offered by every Export control.
+  // The export choices offered by every Export control. "Save to library" is the primary,
+  // organized path (per-post folder under a root you pick once); the rest are loose downloads.
   const EXPORT_TYPES = [
+    { key: 'library', label: 'Save to library' },
     { key: 'both', label: 'HTML + Markdown' },
     { key: 'html', label: 'HTML only' },
     { key: 'md', label: 'Markdown only' },
@@ -4501,9 +5021,86 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return { wrap, trigger };
   }
 
+  function libraryReadme() {
+    return [
+      `${APP} export bundle`,
+      '',
+      'How to use with an AI assistant / agent:',
+      '- Attach the .llm.md file together with the image files in the media/ folder.',
+      '- The .llm.md is the readable text plus a metadata inventory; the media/ files are the',
+      '  actual images and video poster frames it references.',
+      '',
+      'Full videos are NOT included (an LLM cannot watch video). Each video provides a poster',
+      'still frame plus its original source link. The full self-contained .html (when present in',
+      'this folder) embeds the complete media, including playable video, for offline viewing.',
+      '',
+      `Generated by ${APP} v${VERSION}.`,
+      '',
+    ].join('\n');
+  }
+
+  // Write one file (relative name may include subfolders like "media/x.jpg") into a dir handle.
+  async function writeFileInDir(dir, relName, data) {
+    const parts = relName.split('/');
+    const fileName = parts.pop();
+    let target = dir;
+    for (const part of parts) target = await target.getDirectoryHandle(part, { create: true });
+    const fileHandle = await target.getFileHandle(fileName, { create: true });
+    const writable = await fileHandle.createWritable();
+    await writable.write(data instanceof Uint8Array ? data : String(data));
+    await writable.close();
+  }
+
+  async function writeEntriesToDir(rootDir, segments, entries) {
+    let dir = rootDir;
+    for (const seg of segments) dir = await dir.getDirectoryHandle(seg, { create: true });
+    for (const entry of entries) await writeFileInDir(dir, entry.name, entry.bytes || entry.text);
+  }
+
+  /**
+   * "Save to library": write this export into a per-post folder under the user's chosen root
+   * (File System Access API). `root` is the directory handle resolved by the caller while the user
+   * gesture was still live (null on browsers without the API -> single .zip fallback). The raw
+   * video bytes are never included - images + poster stills only - so the bundle stays small.
+   */
+  async function saveToLibrary(model, debugJson, root) {
+    const prefs = getPrefs();
+    prepareArchiveModel(model);
+    const { files, pathById } = collectBundleMediaFiles(model);
+    const markdown = renderLlmMarkdown(model, debugJson, { mediaFiles: pathById });
+    const paths = bundlePaths(model, prefs, localDateStamp());
+
+    // Relative names inside the per-post folder.
+    const entries = [
+      { name: `${paths.postName}.llm.md`, text: markdown },
+      { name: 'README.txt', text: libraryReadme() },
+      ...files.map((f) => ({ name: f.name, bytes: f.bytes })),
+    ];
+    if (prefs.contents === 'full') {
+      entries.unshift({ name: `${paths.postName}.html`, text: assembleHtml(model, debugJson) });
+    }
+
+    if (root) {
+      await writeEntriesToDir(root, paths.segments, entries);
+      showToast(`Saved to ${[root.name, ...paths.segments].join('/')}`);
+      return;
+    }
+    // No handle => the browser lacks the File System Access API (the caller already handled a
+    // user-cancelled picker). Fall back to a single .zip. Files sit at the ZIP ROOT (no inner
+    // folder): extracting "<name>.zip" already creates a "<name>/" folder, so an internal prefix
+    // would double-nest (<name>/<name>/...). The dated name keeps zips sortable and unique.
+    const zipName = [paths.dateFolder, paths.postName].filter(Boolean).join('_') || paths.postName;
+    const zipEntries = entries.map((e) => ({
+      name: e.name,
+      bytes: e.bytes || new TextEncoder().encode(e.text),
+    }));
+    downloadBlob(`${zipName}.zip`, new Blob([buildZip(zipEntries)], { type: 'application/zip' }));
+    showToast(`Folder save not supported in this browser; saved ${zipName}.zip`);
+  }
+
   /**
    * Build and download the requested artifact(s) for the page (or a specific post).
-   * @param exportType 'html' | 'md' | 'both'
+   * @param exportType 'library' | 'html' | 'md' | 'both'
    * @param targetTweetEl when set, export exactly that post (per-post button); else the page.
    * @param trigger the clicked button, for busy-state feedback.
    */
@@ -4518,6 +5115,19 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     };
     setBusy(true);
     try {
+      // Resolve the export folder FIRST, while we still hold the click's transient user
+      // activation - showDirectoryPicker / requestPermission require it, and the media loading
+      // below can easily outlast the ~5s activation window. Reused (already-granted) handles
+      // resolve without a prompt. null + FSA available means the user cancelled -> abort early
+      // (before the expensive media work); null + no FSA means we'll zip later.
+      let libraryRoot = null;
+      if (exportType === 'library') {
+        libraryRoot = await getRootDir();
+        if (!libraryRoot && fsaWindow()) {
+          showToast('Export folder not set; export cancelled', { error: true });
+          return;
+        }
+      }
       resetMediaState();
       if (CONFIG.forceLoad) {
         showToast('Loading media...', { sticky: true });
@@ -4559,17 +5169,24 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       });
 
       showToast('Assembling files...', { sticky: true });
+      if (exportType === 'library') {
+        await saveToLibrary(model, debugJson, libraryRoot);
+        return;
+      }
       const basename = `${slugify(model.title)}.${nowStamp()}`;
+      const htmlFilename = `${basename}.html`;
       const saved = [];
       if (exportType === 'html' || exportType === 'both') {
         const html = assembleHtml(model, debugJson);
-        const htmlFilename = `${basename}.html`;
         downloadHtml(htmlFilename, html);
         saved.push(htmlFilename);
         log('html', htmlFilename, humanBytes(html.length));
       }
       if (exportType === 'md' || exportType === 'both') {
-        const markdown = renderLlmMarkdown(model, debugJson);
+        // Only name the companion when the HTML is actually being saved in this same export;
+        // a Markdown-only export has no companion on disk, so the markdown must not claim one.
+        const companionHtmlFilename = exportType === 'both' ? htmlFilename : '';
+        const markdown = renderLlmMarkdown(model, debugJson, { companionHtmlFilename });
         const markdownFilename = `${basename}.llm.md`;
         downloadBlob(
           markdownFilename,
@@ -4674,7 +5291,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       return;
     }
     ensureStyle();
-    ensureFloatingControl(type);
+    // The floating control is opt-in (default off); inline buttons are the primary entry point.
+    if (getPrefs().floatingButton) ensureFloatingControl(type);
+    else if (existing) existing.remove();
     if (type === 'post') ensurePerPostControls();
     else if (type === 'article') ensureArticleHeaderControl();
   }
@@ -5014,6 +5633,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     // X mutates the DOM heavily; a coarse observer keeps the button in sync.
     const obs = new MutationObserver(() => scheduleEnsure());
     obs.observe(document.body, { childList: true, subtree: true });
+    registerSettingsMenu();
     ensureButton();
     log(`${APP} v${VERSION} ready`);
   }
@@ -5036,6 +5656,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       renderLlmMarkdown,
       renderBlock,
       slugify,
+      // Library/bundle engine (pure pieces; browser-only delivery is not unit-tested).
+      buildZip,
+      crc32,
+      base64ToBytes,
+      dataUriToBytes,
+      mimeToExt,
+      bundlePaths,
+      collectBundleMediaFiles,
+      handleFromSourceUrl,
       escapeHtml,
       safeUrl,
       highResImageUrl,
@@ -5050,6 +5679,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       // Extraction layer (exported for the jsdom DOM test).
       buildModelForPost,
       buildModelForArticle,
+      articleListType,
       inlineHtmlFromTweetText,
       detectPageType,
       extractAuthor,

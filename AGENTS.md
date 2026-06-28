@@ -31,14 +31,31 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
    `cdn.syndication.twimg.com/tweet-result` and its quote card is rebuilt from that
    authoritative data (`enrichQuotesViaSyndication` → `syndicationToQuoteBlock`). This
    bypasses the DOM's virtualization/attribution mess for quote content.
-3. **Stable layer**: `GM_xmlhttpRequest` fetch (bypasses CORS) → base64 → `assembleHtml()`
-   → download. Touches only the model, never the DOM.
+3. **Stable layer**: `GM_xmlhttpRequest` fetch (bypasses CORS) → base64 → `assembleHtml()` /
+   `renderLlmMarkdown()` → download. Touches only the model, never the DOM.
 4. The model is the contract, so X's frequent DOM churn rarely hits the engine.
+
+## Export modes
+
+- Menu offers **Save to library** (primary), **HTML + Markdown**, **HTML only**, **Markdown only**.
+- **Save to library** (`saveToLibrary`) writes each export into a per-post folder under a root the
+  user picks once: `<root>/<date>/<handle>-<id>/{post.html?, post.llm.md, media/}`. It uses the
+  **File System Access API** (`getRootDir` persists the `FileSystemDirectoryHandle` in IndexedDB;
+  the browser may re-confirm write permission ~once per session). Chromium only; **non-Chromium
+  falls back to a single `.zip`** of the same per-post tree via the built-in store-only writer
+  (`buildZip`/`crc32`). The `media/` files are images + video **poster stills only** — raw video
+  bytes are never bundled (an LLM cannot watch video), so the bundle stays small.
+- The `.llm.md` is honest about itself: a `## What This File Is` header states it is text +
+  metadata; in bundle mode it references the real `media/...` files (`collectBundleMediaFiles` →
+  `pathById` → `renderLlmMarkdown(..., { mediaFiles })`); it never names a file that is not on disk.
+- Two prefs (`layout` date|flat, `contents` full|lean) live in `localStorage`; toggled via
+  userscript-manager **menu commands** (`registerSettingsMenu`), not an in-app panel.
 
 ## Gotchas
 
 - **CORS is the whole reason it's a userscript.** Media bytes from `pbs.twimg.com` /
-  `video.twimg.com` can only be read via `GM_xmlhttpRequest` with the `@connect` grants.
+  `video.twimg.com` can only be read via `GM_xmlhttpRequest` with the `@connect` grants. The
+  library settings menu also needs `@grant GM_registerMenuCommand` / `GM_unregisterMenuCommand`.
 - **Selectors break periodically** when X reships its markup → fix in `CONFIG`, keep old
   selectors as fallbacks. Misses log `[SourceCapsule] …` warnings, never crash.
 - **Video preservation is best-effort.** Full MP4s inline when X exposes them (no size cap,
@@ -57,5 +74,7 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
 
 ## Out of scope (v1)
 
-Threads, batch export, settings UI, MV3 extension, HLS reassembly, OCR/transcripts, and
-full long-form ("note") post text retrieval (preview-only, flagged truncated).
+Threads, batch export, **in-app settings panel** (manager menu commands only — see Export modes),
+MV3 extension, HLS reassembly, OCR/transcripts, AI-generated media descriptions, a top-level
+library catalog/index file, and full long-form ("note") post text retrieval (preview-only,
+flagged truncated).

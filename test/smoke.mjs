@@ -186,7 +186,12 @@ const html = engine.assembleHtml(sampleModel);
 const debugJson = JSON.parse(
   html.match(/<script id="sourcecapsule-debug" type="application\/json">([\s\S]*?)<\/script>/)[1]
 );
-const markdown = engine.renderLlmMarkdown(sampleModel);
+const markdown = engine.renderLlmMarkdown(sampleModel, '', {
+  companionHtmlFilename: 'sample-export.html',
+});
+const markdownMdOnly = engine.renderLlmMarkdown(sampleModel);
+const bundle = engine.collectBundleMediaFiles(sampleModel);
+const markdownBundle = engine.renderLlmMarkdown(sampleModel, '', { mediaFiles: bundle.pathById });
 
 check('produces a valid HTML5 document', () => {
   assert.ok(html.startsWith('<!doctype html>'), 'missing doctype');
@@ -276,7 +281,7 @@ check('renders clean LLM Markdown from the archive model', () => {
   assert.ok(markdown.includes('- Incomplete media: 3'));
   assert.ok(
     markdown.includes(
-      'Video video-004 is preserved offline in archive.html, but no transcript or visual description is available in llm.md.'
+      'Video video-004 bytes are embedded in the companion file sample-export.html; this markdown holds only metadata (no video bytes, transcript, or visual description).'
     )
   );
   assert.ok(
@@ -318,6 +323,167 @@ check('renders clean LLM Markdown from the archive model', () => {
   assert.ok(markdown.includes('quoted-post: 7'));
   assert.ok(markdown.includes('## Source Links'));
   assert.ok(markdown.includes('https://example.com'));
+});
+
+check('llm.md is honest about what it does and does not contain', () => {
+  // The reader (an agent/LLM) must know up front that this file is text + metadata only.
+  assert.ok(markdown.includes('## What This File Is'));
+  assert.ok(
+    markdown.includes(
+      'This file does NOT contain the media itself: no image pixels, no video or audio bytes, no transcripts, and no visual descriptions.'
+    )
+  );
+  // "both" export: the companion is named with the real filename, never the fictional archive.html.
+  assert.ok(
+    markdown.includes(
+      'The media bytes are embedded (base64) inside the companion file sample-export.html, downloaded alongside this markdown.'
+    )
+  );
+  assert.ok(!markdown.includes('archive.html'), 'must not reference a nonexistent archive.html');
+  assert.ok(
+    markdown.includes(
+      'Bytes location: embedded in companion file sample-export.html (not in this markdown)'
+    )
+  );
+  assert.ok(
+    markdown.includes(
+      'Pixels location: embedded in companion file sample-export.html (not in this markdown)'
+    )
+  );
+
+  // Markdown-only export: there is no companion on disk, so the file must not claim one.
+  assert.ok(!markdownMdOnly.includes('archive.html'));
+  assert.ok(!markdownMdOnly.includes('companion file'));
+  assert.ok(
+    markdownMdOnly.includes(
+      'This was a Markdown-only export, so the media bytes were not saved to any file.'
+    )
+  );
+  assert.ok(
+    markdownMdOnly.includes(
+      'Video video-004 bytes were captured but not saved in this Markdown-only export; only metadata is available here (no playable file, transcript, or visual description).'
+    )
+  );
+  assert.ok(
+    markdownMdOnly.includes(
+      'Bytes location: captured but not saved (Markdown-only export); metadata only'
+    )
+  );
+});
+
+check('store-only ZIP writer produces a structurally valid archive', () => {
+  // CRC32("hello") is a well-known constant; locks the implementation.
+  assert.equal(engine.crc32(new TextEncoder().encode('hello')), 0x3610a686);
+  const zip = engine.buildZip([
+    { name: 'a.txt', bytes: new TextEncoder().encode('hi') },
+    { name: 'media/b.bin', bytes: new Uint8Array([1, 2, 3]) },
+  ]);
+  assert.ok(zip instanceof Uint8Array && zip.length > 0);
+  // Local file header signature PK\x03\x04 at the start.
+  assert.deepEqual(Array.from(zip.slice(0, 4)), [0x50, 0x4b, 0x03, 0x04]);
+  // End-of-central-directory signature PK\x05\x06 at the end.
+  assert.deepEqual(Array.from(zip.slice(-22, -18)), [0x50, 0x4b, 0x05, 0x06]);
+  const text = new TextDecoder('latin1').decode(zip);
+  assert.ok(text.includes('a.txt') && text.includes('media/b.bin'));
+});
+
+check(
+  'collectBundleMediaFiles yields image + poster files, skips missing, excludes video bytes',
+  () => {
+    const ids = bundle.files.map((f) => f.name).sort();
+    assert.deepEqual(ids, [
+      'media/image-001.png',
+      'media/image-008.png',
+      'media/video-003.poster.png',
+      'media/video-004.poster.png',
+    ]);
+    bundle.files.forEach((f) => assert.ok(f.bytes instanceof Uint8Array && f.bytes.length > 0));
+    // Missing image (image-002) is skipped; videos contribute posters only (no raw .mp4 bytes).
+    assert.ok(!bundle.pathById.has('image-002'));
+    assert.equal(bundle.pathById.get('video-004'), 'media/video-004.poster.png');
+    assert.ok(!bundle.files.some((f) => f.name.endsWith('.mp4')));
+  }
+);
+
+check('bundlePaths honors the date vs flat layout preference', () => {
+  const byDate = engine.bundlePaths(sampleModel, { layout: 'date' }, '2026-06-28');
+  assert.deepEqual(byDate.segments, ['2026-06-28', 'ada-12345']);
+  assert.equal(byDate.postFolder, 'ada-12345');
+  const flat = engine.bundlePaths(sampleModel, { layout: 'flat' }, '2026-06-28');
+  assert.deepEqual(flat.segments, ['2026-06-28_ada-12345']);
+});
+
+check('bundle markdown references real media/ files and excludes full video', () => {
+  assert.ok(markdownBundle.includes('media/image-001.png'));
+  assert.ok(markdownBundle.includes('![') && markdownBundle.includes('](media/'));
+  assert.ok(markdownBundle.includes('![Poster of video-004](media/video-004.poster.png)'));
+  assert.ok(
+    markdownBundle.includes(
+      'The images and video poster frames are included as separate files in the media/ folder'
+    )
+  );
+  assert.ok(markdownBundle.includes('File: media/image-001.png'));
+  assert.ok(markdownBundle.includes('Poster frame: media/video-004.poster.png'));
+  assert.ok(
+    markdownBundle.includes(
+      'Full video: not included in this bundle (an LLM cannot watch video); see source link'
+    )
+  );
+  assert.ok(!markdownBundle.includes('archive.html'));
+});
+
+check('handleFromSourceUrl derives @handle from post/article URLs, skips reserved paths', () => {
+  assert.equal(
+    engine.handleFromSourceUrl('https://x.com/dingyi/status/2070029723673981185'),
+    '@dingyi'
+  );
+  assert.equal(
+    engine.handleFromSourceUrl('https://twitter.com/Ada_Lovelace/article/55'),
+    '@Ada_Lovelace'
+  );
+  assert.equal(engine.handleFromSourceUrl('https://x.com/i/article/123'), ''); // reserved /i/
+  assert.equal(engine.handleFromSourceUrl('https://x.com/home'), '');
+  assert.equal(engine.handleFromSourceUrl(''), '');
+});
+
+check('llm.md falls back to the URL @handle when author metadata is missing', () => {
+  const md = engine.renderLlmMarkdown({
+    type: 'article',
+    title: 'No author here',
+    sourceUrl: 'https://x.com/dingyi/status/2070029723673981185',
+    exportedAt: new Date('2026-06-28T08:25:15Z').toISOString(),
+    blocks: [{ kind: 'paragraph', html: 'Body text.' }],
+  });
+  assert.ok(
+    md.includes('Author: @dingyi (handle derived from the source URL; display name not captured)')
+  );
+});
+
+check('self-numbered list items are not double-numbered (no "1. 2.")', () => {
+  const model = {
+    type: 'article',
+    title: 'List numbering',
+    sourceUrl: 'https://x.com/ada/article/9',
+    exportedAt: new Date('2026-06-28T00:00:00Z').toISOString(),
+    blocks: [
+      // X split a manually-numbered list around an embedded post: a single-item ordered list
+      // whose text already carries the author's "2.", here wrapped in <strong>.
+      { kind: 'list', ordered: true, items: ['<strong>2. Optimus</strong> details'] },
+      // A genuine ordered list with no author numbering must still auto-number.
+      { kind: 'list', ordered: true, items: ['apple', 'banana'] },
+    ],
+  };
+  const md = engine.renderLlmMarkdown(model);
+  assert.ok(md.includes('2. Optimus details'));
+  assert.ok(!md.includes('1. 2. Optimus'), 'must not double-number the author item');
+  assert.ok(md.includes('1. apple') && md.includes('2. banana'), 'plain list still auto-numbers');
+
+  const html = engine.assembleHtml(model);
+  assert.ok(
+    html.includes('<ol style="list-style:none;padding-inline-start:0"><li><strong>2. Optimus'),
+    'self-numbered <ol> suppresses its marker'
+  );
+  assert.ok(html.includes('<ol><li>apple</li><li>banana</li></ol>'), 'plain <ol> unchanged');
 });
 
 check('timeline source references resolve to the correct embedded post (no mis-mapping)', () => {

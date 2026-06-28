@@ -11,10 +11,13 @@ boundaries, media references, warnings, and source links, without base64, CSS, o
 
 - 🗂️ **Offline archive, zero dependencies** — successfully captured media is inlined into the HTML.
 - 🧠 **LLM Markdown companion** — clean context without base64, CSS, JavaScript, or media bytes.
+- 📁 **Save to library** — drop each export into its own dated, per-post folder (Markdown + the
+  actual image/poster files alongside) so you can point an agent at a folder and say _"summarize
+  today's exports."_ See [Save to library](#save-to-library-agent-ready-folders).
 - 💬 **Quoted posts are rebuilt as real, selectable HTML** — not screenshots.
 - 🎞️ **Honest media accounting** — offline videos, poster-only videos, failed downloads, and missing media are reported separately.
 - 🎯 **Per-post Export buttons** — export exactly the post you mean, not the wrong one.
-- 🎛️ **Choose your output** — HTML, Markdown, or both.
+- 🎛️ **Choose your output** — Save to library, HTML + Markdown, HTML only, or Markdown only.
 - 🌗 **Clean reader layout** with automatic light/dark mode.
 - 🔒 **Runs locally in your browser** on content _you_ can already see while logged in. See [Security & privacy](#security--privacy).
 
@@ -90,21 +93,78 @@ That's it. The script updates itself when new versions are published.
 
 1. Log in to **x.com** and open an **Article** (`x.com/i/article/…`) or a **single post**
    (`…/status/…`).
-2. Pick what to export:
-   - **A specific post** — hover the post and click its small **Export** button (top-right
-     of that post). This exports exactly that post, so you never grab the wrong tweet.
-   - **The whole article / focused post** — use the blue **Export** control pinned to the
-     **bottom-right** corner of the page.
-3. A menu opens with three choices: **HTML + Markdown** (default), **HTML only**, or
+2. Pick what to export, using the inline **Export** button in the post/article header:
+   - **A specific post** — each post carries its own **Export** button in its header, so you
+     export exactly that post and never grab the wrong tweet.
+   - **The whole article** — an **Export article** button sits in the article header.
+   - _Optional:_ a draggable page-level Export button (bottom-right) is available too, but it's
+     **off by default** — turn it on in the userscript-manager menu (see [Settings](#settings-in-the-userscript-manager-menu)).
+3. A menu opens with four choices: **Save to library**, **HTML + Markdown**, **HTML only**, or
    **Markdown only**. Click one.
 4. A small status message shows progress while it embeds the media, then your browser
-   downloads the file(s), named after the article/post.
+   downloads the file(s), named after the article/post. (For **Save to library**, see the
+   [next section](#save-to-library-agent-ready-folders).)
 5. Open the `.html` any time — even with the internet off.
 
 To confirm a media-complete export is truly self-contained: open the file, press
 <kbd>F12</kbd> → **Network** tab → set throttling to **Offline**, then reload. Everything
 that was preserved should still display. (Items shown as _incomplete media_ keep only a
 source link, which needs the internet — that's by design.)
+
+---
+
+## Save to library (agent-ready folders)
+
+**Save to library** is the option to use when you want exports an LLM or agent can actually read.
+Instead of dumping a 200 MB self-contained `.html` on a model, it writes a small, organized,
+per-post folder:
+
+```
+<your export folder>/            ← you pick this once; it's remembered
+  2026-06-28/                    ← grouped by export date
+    dingyi-2070029723673981185/  ← one folder per post (stable name; re-exporting overwrites)
+      post.html                  ← full offline archive (only in "full" mode)
+      post.llm.md                ← clean Markdown that references the media/ files
+      media/                     ← the actual images + video poster stills
+      README.txt                 ← how to hand the folder to an LLM
+```
+
+Then you can point an agent at, say, `…/2026-06-28/` and ask it to *"go through today's exports and
+summarize them"* — it reads each `post.llm.md` and sees the real images next to it.
+
+**Why it stays small:** the `media/` folder holds images and a **poster still** for each video —
+never the raw video bytes. An LLM can't watch a video anyway, so the one thing that makes archives
+huge is left out. (The full playable video still lives in `post.html` when you keep "full" mode.)
+
+### Folder vs. zip — browser support
+
+Writing directly into a folder uses the browser's **File System Access API**, which is **desktop
+Chromium only**. On everything else, Save to library produces one tidy **`.zip`** with the same
+per-post layout instead (extract it once and you have the same folder).
+
+| ✅ Writes a folder directly | ❌ Saves a `.zip` instead |
+| --- | --- |
+| **Chrome** 86+ | **Brave** (removed the API for privacy) |
+| **Edge** 86+ | **Firefox** (not implemented) |
+| **Opera** 72+ | **Safari** (no directory picker) |
+| **Vivaldi**, **Arc** | **All mobile browsers** |
+
+The first time you Save to library on a supported browser, it asks you to pick the export folder
+and grant write access (the browser may re-confirm that access about once per session — a security
+rule we can't bypass). After that, exports drop in automatically.
+
+### Settings (in the userscript-manager menu)
+
+There is no in-app settings panel. Two preferences live in your userscript manager's menu (click
+the **Tampermonkey/Violentmonkey icon** while on x.com):
+
+- **Layout** — `by date` (default, grouped into date folders) or `flat` (all post folders at the
+  top level, named `2026-06-28_<handle>-<id>`).
+- **Contents** — `full` (default, includes the heavy `post.html`) or `lean` (Markdown + media only,
+  for a small, fast, agent-friendly library).
+- **Change export folder…** — pick a different root folder.
+- **Floating button** — `off` by default; turn `on` to show the draggable page-level Export
+  button in addition to the inline header buttons.
 
 ---
 
@@ -145,16 +205,27 @@ manifest, so an archive can be audited offline without trusting any single label
 ## The LLM Markdown companion
 
 The `.llm.md` file is built from the same model as the HTML, but **never embeds media
-bytes**. It references each media item by ID and reports whether it was preserved offline,
-incomplete, missing, or unavailable — which is why the file stays small and why it doesn't
-claim to "understand" video. For example:
+bytes**. It opens with a `## What This File Is` header so any agent immediately knows what it
+does and does not contain, and it never names a file that isn't actually on disk. It references
+each media item and reports honestly where the bytes live — which is why the file stays small and
+why it doesn't claim to "understand" video. The exact wording adapts to how you exported:
 
 ```text
-[Video: video-002 - 14:45, 438x270, preserved offline in archive.html]
-[Video: video-003 - video file not preserved offline; poster captured; source link preserved]
+# Save to library (bundle): media are real files next to the markdown
+![A chart (image-001)](media/image-001.jpg)
+![Poster of video-002](media/video-002.poster.jpg)
+[Video: video-002 - 0:32, 3404x2130, full video not included in this bundle, poster frame media/video-002.poster.jpg, source link preserved]
+
+# HTML + Markdown: media live in the companion .html that downloaded alongside
+- Bytes location: embedded in companion file dingyi-….html (not in this markdown)
+
+# Markdown only: nothing was saved, only metadata + the original source URL
+- Bytes location: captured but not saved (Markdown-only export); metadata only
 ```
 
-It contains **no** base64, data URLs, CSS, or scripts by design.
+When author metadata can't be read from the page, the Markdown falls back to the `@handle` in the
+source URL (flagged as derived) so the reader still knows who posted it. It contains **no** base64,
+data URLs, CSS, or scripts by design.
 
 ---
 
@@ -200,7 +271,8 @@ Deliberately not built yet:
 - **HLS video** download/reassembly
 - full **long-form (note) post** text retrieval (needs X's authenticated API; previews are flagged as truncated instead)
 - a packaged browser **extension**
-- an in-app **settings UI**
+- an in-app **settings panel** (preferences live in the userscript-manager menu instead)
+- a top-level library **catalog/index** file (agents can walk the date folder directly)
 
 In short: videos may be saved as playable files, but the LLM still does not understand their
 contents.

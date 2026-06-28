@@ -18,7 +18,8 @@ The userscript metadata block requests:
 | Grant | Why |
 | --- | --- |
 | `GM_xmlhttpRequest` | Fetch media **bytes** from `*.twimg.com` to base64-inline them. A normal page fetch can't read these cross-origin bytes; this is the whole reason it's a userscript. |
-| `unsafeWindow` | Read X's own API/GraphQL responses **in your browser** to discover the full MP4 URL behind a video. No page data is injected back; only response bodies are inspected locally. |
+| `unsafeWindow` | Read X's own API/GraphQL responses **in your browser** to discover the full MP4 URL behind a video. No page data is injected back; only response bodies are inspected locally. Also used to reach the File System Access API (`showDirectoryPicker`) for **Save to library**. |
+| `GM_registerMenuCommand`, `GM_unregisterMenuCommand` | Add the **Save to library** settings (layout / contents / change folder) to the userscript-manager menu. No page or network access. |
 | `@connect twimg.com`, `cdn.syndication.twimg.com` | Allow the media fetch to reach X's media/syndication hosts. |
 | `@connect x.com`, `twitter.com` | Resolve canonical post URLs/metadata. |
 | `@run-at document-start` | Install the video-discovery hook before X's own scripts run, so early API responses aren't missed. |
@@ -32,6 +33,17 @@ The userscript metadata block requests:
 - X's own `fetch`/XHR API responses, read only to extract MP4 video variants. This is the
   same data the page already loaded for you.
 - The DOM of the article/post you choose to export.
+
+**Local storage and file writing (Save to library):**
+
+- **Writes export files to a folder you explicitly pick** via the browser's File System Access
+  API. The script only writes the export's own files (`post.html`/`post.llm.md`/`media/`) into
+  that chosen folder and its dated subfolders; it never reads your existing files, and it cannot
+  access any location you didn't grant. On browsers without that API it instead triggers a normal
+  `.zip` download. **No new network access** — this is local disk only.
+- **IndexedDB** stores the chosen folder's handle so you don't re-pick it each time; **`localStorage`**
+  stores two small preferences (layout, contents). Both are on the `x.com` origin, local to your
+  browser, and never transmitted.
 
 **Never:**
 
