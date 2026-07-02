@@ -41,12 +41,12 @@ On an X post or Article:
 
 - Click **Save thread** or **Save article** for the default quick-save flow.
 - Click **...** beside it for:
-  - Save with note and tags
-  - Save locally + share with AI
   - Save this post only
+  - Save with note and tags
   - Copy clean Markdown
   - Share with AI
-  - HTML + Markdown, HTML only, or Markdown only
+  - Save locally + share with AI
+  - Download HTML + Markdown
 
 The first library save asks you to choose a root folder. Desktop Chromium writes folders directly.
 Browsers without the File System Access API receive a zip with the same structure.

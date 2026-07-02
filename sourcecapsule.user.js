@@ -91,6 +91,11 @@
       ],
       // Video container within a tweet.
       videoPlayer: ['div[data-testid="videoPlayer"]', 'div[data-testid="videoComponent"]'],
+      // External link-preview card within a tweet (the payload of a link post).
+      card: ['div[data-testid="card.wrapper"]', 'a[data-testid="card.wrapper"]'],
+      // "Show more" link X renders on long-form (note) posts in timeline views;
+      // its presence means the visible text is only a preview.
+      showMore: ['[data-testid="tweet-text-show-more-link"]'],
       // Time element (carries the canonical permalink).
       timeLink: ['a[href*="/status/"] time'],
       // Long-form Article rich-text root.
@@ -2042,6 +2047,38 @@
   }
 
   /** Build a partial model (author + content blocks) from one tweet element. */
+  /**
+   * Extract a link-preview card (X's rendering of an external link). For a link
+   * post the card IS the payload - X strips the URL from the visible text, so
+   * dropping the card loses the very link the post exists to share. The href is
+   * often the t.co short form here; syndication enrichment upgrades it to the
+   * expanded URL when available.
+   */
+  function extractLinkCard(tweetEl, quoteEls, sourceUrl) {
+    const cardEl = pickAllMatchesIncludingRoot(tweetEl, CONFIG.selectors.card).find(
+      (el) => !quoteEls.some((quoteEl) => quoteEl.contains(el))
+    );
+    if (!cardEl) return null;
+    const anchor = cardEl.matches('a[href]') ? cardEl : cardEl.querySelector('a[href]');
+    const url = anchor ? safeUrl(anchor.href) : '';
+    if (!url) return null;
+    // Leaf-element texts (innerText line splitting is unreliable across DOMs).
+    const lines = Array.from(cardEl.querySelectorAll('span,div'))
+      .filter((el) => !el.children.length)
+      .map((el) => (el.textContent || '').trim())
+      .filter(Boolean);
+    const domainLine = lines.find((line) => /^from\s+\S/i.test(line)) || '';
+    const title =
+      lines.filter((line) => line !== domainLine).sort((a, b) => b.length - a.length)[0] || '';
+    return {
+      kind: 'link-card',
+      url,
+      title,
+      domain: domainLine.replace(/^from\s+/i, ''),
+      sourceUrl,
+    };
+  }
+
   function buildTweetBlocks(tweetEl, { quoteDepth = 2 } = {}) {
     const quoteEls = quoteDepth > 0 ? findQuotedTweetEls(tweetEl) : [];
     const blocks = [];
@@ -2061,6 +2098,15 @@
     // was virtualized out of the DOM by extraction time.
     harvestedImagesForStatus(tweetStatusId(tweetEl)).forEach((b) => blocks.push(b));
 
+    const card = extractLinkCard(tweetEl, quoteEls, sourceUrl);
+    if (card) blocks.push(card);
+
+    // A "Show more" link on the post's own text means X is only showing a
+    // long-form preview; the export must say so rather than pass it off as full.
+    const textTruncated = pickAllMatchesIncludingRoot(tweetEl, CONFIG.selectors.showMore).some(
+      (el) => !quoteEls.some((quoteEl) => quoteEl.contains(el))
+    );
+
     quoteEls.forEach((quoteEl) => {
       const qAuthor = extractAuthor(quoteEl);
       const qBlocks = buildTweetBlocks(quoteEl, { quoteDepth: quoteDepth - 1 }).blocks;
@@ -2074,7 +2120,7 @@
       });
     });
 
-    return { author: extractAuthor(tweetEl), blocks };
+    return { author: extractAuthor(tweetEl), blocks, textTruncated };
   }
 
   /** Build the model for a single post page. */
@@ -2160,6 +2206,12 @@
         });
       }
       combinedBlocks.push(...part.blocks);
+      if (part.textTruncated) {
+        combinedBlocks.push({
+          kind: 'truncation-notice',
+          sourceUrl: threadPosts[index].sourceUrl,
+        });
+      }
     });
     const blocks = dedupeQuoteCards(combinedBlocks);
     if (!blocks.some((b) => b.kind === 'paragraph')) {
@@ -2917,6 +2969,21 @@
             : ''
         }${published}</div>`;
       }
+      case 'link-card': {
+        const cardUrl = safeUrl(b.url);
+        if (!cardUrl) return '';
+        const domain = b.domain || urlHostname(cardUrl);
+        const title = b.title && b.title !== domain ? b.title : '';
+        return `<a class="xa-card-link" href="${escapeAttr(cardUrl)}" target="_blank" rel="noopener noreferrer"><span class="xa-card-title">${escapeHtml(
+          title || domain || cardUrl
+        )}</span><span class="xa-card-domain">${escapeHtml(domain || cardUrl)} &rarr;</span></a>`;
+      }
+      case 'truncation-notice':
+        return `<p class="xa-truncated" data-xa-truncated="1">&#9888; Long-form post &mdash; only the preview above was available at export; X did not expose the full text.${
+          safeUrl(b.sourceUrl)
+            ? ` <a href="${escapeHtml(safeUrl(b.sourceUrl))}" target="_blank" rel="noopener noreferrer">Read the full post on X &rarr;</a>`
+            : ''
+        }</p>`;
       case 'code':
         return `<pre class="xa-code"><code>${escapeHtml(b.text)}</code></pre>`;
       case 'blockquote':
@@ -3382,6 +3449,8 @@
       (blocks || []).forEach((b) => {
         if (b.kind === 'thread-marker') {
           add(b.sourceUrl);
+        } else if (b.kind === 'link-card') {
+          add(b.url);
         } else if (b.kind === 'paragraph') {
           hrefsFromHtml(b.html).forEach(add);
         } else if (b.kind === 'list') {
@@ -3670,6 +3739,13 @@
               return selfNumbered ? item : `${index + 1}. ${item}`;
             })
             .join('\n')
+        );
+      } else if (b.kind === 'link-card') {
+        const label = b.title || b.domain || b.url;
+        lines.push(`[Link card] ${markdownLineText(label)}: ${b.url}`);
+      } else if (b.kind === 'truncation-notice') {
+        lines.push(
+          'Warning: This is a long-form post and only its preview text was available at export time. The full text is NOT included; open the post source URL above to read it in full.'
         );
       } else if (b.kind === 'blockquote') {
         const inner = renderLlmBlocks(b.blocks, options);
@@ -4180,6 +4256,11 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
   background:rgba(255,180,0,.12);border:1px solid rgba(255,180,0,.35);color:var(--fg)}
 .xa-truncated a{color:var(--accent);text-decoration:none}
 .xa-quote-time{display:block;margin-top:8px;font-size:13px;color:var(--muted)}
+.xa-card-link{display:flex;flex-direction:column;gap:2px;margin:10px 0;padding:10px 14px;
+  border:1px solid var(--quoteline);border-radius:12px;background:var(--card);text-decoration:none;color:var(--fg)}
+.xa-card-link:hover{border-color:var(--accent)}
+.xa-card-title{font-weight:600;font-size:14px;word-break:break-word}
+.xa-card-domain{font-size:13px;color:var(--accent)}
 .xa-thread-marker{display:flex;align-items:center;gap:12px;margin:28px 0 12px;padding-top:18px;
   border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
 .xa-thread-marker:first-child{margin-top:8px;border-top:0;padding-top:0}
@@ -4637,6 +4718,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
 .xa-ctl-item{display:block;width:100%;text-align:left;padding:9px 12px;border:none;border-radius:8px;
   background:transparent;color:#0f1419;font:500 13px/1.2 inherit;cursor:pointer;white-space:nowrap}
 .xa-ctl-item:hover{background:#e8f5fd;color:#1d9bf0}
+.xa-ctl-sep{height:1px;margin:5px 10px;background:rgba(15,20,25,.12)}
 .xa-ctl-floating .xa-ctl-menu{right:0;bottom:calc(100% + 8px)}
 /* Per-post control. Primary placement is inline in the header, beside X's "..." menu /
    Subscribe; it falls back to an absolute overlay only when that header anchor isn't found. */
@@ -4658,6 +4740,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   .xa-ctl-menu{background:#1f2733}
   .xa-ctl-item{color:#e7e9ea}
   .xa-ctl-item:hover{background:#16202b;color:#1d9bf0}
+  .xa-ctl-sep{background:rgba(231,233,234,.14)}
 }
 #${CONFIG.toastId}{position:fixed;right:20px;bottom:74px;z-index:99999;max-width:280px;
   padding:12px 14px;border-radius:12px;background:rgba(15,20,25,.95);color:#fff;
@@ -5490,20 +5573,33 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return '';
   }
 
+  function urlHostname(url) {
+    try {
+      return new URL(url).hostname.replace(/^www\./, '');
+    } catch {
+      return '';
+    }
+  }
+
+  /** True for x.com / twitter.com status permalinks (post references, not external links). */
+  function isStatusPermalink(url) {
+    return /^https?:\/\/(?:mobile\.)?(?:x|twitter)\.com\/[^/]+\/status\/\d+/i.test(
+      String(url || '')
+    );
+  }
+
   /**
    * Thread capture races X's lazy loading: a post cloned before its image ever
    * loaded has no media in the DOM at all, so the miss is invisible to the
    * accounting (a real 36-post thread silently lost 7 of 27 photos this way).
    * Recover by asking the syndication endpoint - the same authoritative source
-   * quote cards use - for each captured post's media and appending whatever the
-   * DOM missed. Must run before inlineMedia so recovered blocks are downloaded
-   * and counted like any other media. Per-post failures keep the DOM capture.
+   * quote cards use - for each captured post's: media the DOM missed, external
+   * links (upgrading t.co card hrefs to their expanded URLs), and the note_tweet
+   * long-form signal, which gets an honest truncation notice. Must run before
+   * inlineMedia so recovered blocks are downloaded and counted like any other
+   * media. Per-post failures keep the DOM capture as-is.
    */
-  async function enrichThreadMediaViaSyndication(
-    model,
-    onProgress,
-    fetchTweet = fetchTweetSyndication
-  ) {
+  async function enrichThreadViaSyndication(model, onProgress, fetchTweet = fetchTweetSyndication) {
     const markers = [];
     model.blocks.forEach((block, index) => {
       if (block.kind === 'thread-marker' && block.statusId) markers.push({ block, index });
@@ -5511,6 +5607,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (!markers.length) return model;
     let done = 0;
     let recovered = 0;
+    let truncatedPosts = 0;
     onProgress && onProgress(0, markers.length);
     // Walk backwards so insertions never shift the indices of unprocessed segments.
     for (let i = markers.length - 1; i >= 0; i--) {
@@ -5519,43 +5616,100 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       try {
         const data = await fetchTweet(marker.statusId);
         if (data && (data.__typename === 'Tweet' || data.text != null)) {
-          const have = new Set(model.blocks.slice(index + 1, end).map(blockMediaKey));
-          const missing = syndicationMediaBlocks(data, marker.sourceUrl).filter((candidate) => {
+          const segment = model.blocks.slice(index + 1, end);
+          const additions = [];
+
+          const have = new Set(segment.map(blockMediaKey));
+          syndicationMediaBlocks(data, marker.sourceUrl).forEach((candidate) => {
             const key = blockMediaKey(candidate);
-            return key && !have.has(key);
+            if (key && !have.has(key)) additions.push(candidate);
           });
-          if (missing.length) {
-            model.blocks.splice(end, 0, ...missing);
-            recovered += missing.length;
+          recovered += additions.length;
+
+          // External links: X strips a card's URL from the visible text, so a
+          // lazily-lost card means the link exists ONLY in entities.urls.
+          const segmentHrefs = new Set();
+          segment.forEach((b) => {
+            if (b.kind === 'paragraph') hrefsFromHtml(b.html).forEach((h) => segmentHrefs.add(h));
+            else if (b.kind === 'link-card' && b.url) segmentHrefs.add(b.url);
+          });
+          (data.entities && data.entities.urls ? data.entities.urls : []).forEach((u) => {
+            const expanded = safeUrl(u.expanded_url || u.url);
+            if (!expanded || isStatusPermalink(expanded)) return;
+            const card = segment.find(
+              (b) => b.kind === 'link-card' && (b.url === u.url || b.url === expanded)
+            );
+            if (card) {
+              // Upgrade a DOM-captured card that kept the opaque t.co form.
+              card.url = expanded;
+              if (!card.domain) card.domain = urlHostname(expanded);
+              if (!card.title && u.display_url) card.title = u.display_url;
+              return;
+            }
+            if (segmentHrefs.has(expanded) || (u.url && segmentHrefs.has(u.url))) return;
+            additions.push({
+              kind: 'link-card',
+              url: expanded,
+              title: u.display_url || '',
+              domain: urlHostname(expanded),
+              sourceUrl: marker.sourceUrl,
+            });
+          });
+
+          // Long-form (note) post: syndication only ever has the preview text.
+          if (data.note_tweet && !segment.some((b) => b.kind === 'truncation-notice')) {
+            additions.push({ kind: 'truncation-notice', sourceUrl: marker.sourceUrl });
+            truncatedPosts++;
+          }
+
+          if (additions.length) {
+            // Keep a DOM-detected truncation notice as the segment's last word.
+            let insertAt = end;
+            while (
+              insertAt > index + 1 &&
+              model.blocks[insertAt - 1].kind === 'truncation-notice'
+            ) {
+              insertAt--;
+            }
+            model.blocks.splice(insertAt, 0, ...additions);
           }
         }
       } catch (e) {
-        warn('thread media check failed for post', marker.statusId, '-', e.message);
+        warn('thread syndication check failed for post', marker.statusId, '-', e.message);
       }
       done++;
       onProgress && onProgress(done, markers.length);
     }
-    if (recovered && model.thread) {
-      model.thread.mediaRecovered = recovered;
-      log(`recovered ${recovered} media item(s) that lazy loading hid from the DOM capture`);
+    if (model.thread) {
+      // Count DOM-detected notices too, not only the ones this pass added.
+      const totalTruncated = model.blocks.filter((b) => b.kind === 'truncation-notice').length;
+      if (recovered) model.thread.mediaRecovered = recovered;
+      if (totalTruncated) model.thread.truncatedPosts = totalTruncated;
+      if (recovered || truncatedPosts) {
+        log(
+          `syndication pass: recovered ${recovered} media item(s), flagged ${truncatedPosts} long-form post(s)`
+        );
+      }
     }
     return model;
   }
 
-  // The export choices offered by every Export control. "Save to library" is the primary,
-  // organized path (per-post folder under a root you pick once); the rest are loose downloads.
+  // The export choices offered by every Export control, grouped: save variants,
+  // then share/clipboard, then loose file downloads. The primary trigger button
+  // already quick-saves, so the menu holds only the variants - and the single
+  // "HTML + Markdown" download covers the removed HTML-only/Markdown-only modes
+  // (the engine still supports the 'html' and 'md' keys).
   const EXPORT_TYPES = [
     { key: 'library', label: 'Save to library' },
     { key: 'library-note', label: 'Save with note / tags' },
-    { key: 'library-share', label: 'Save locally + share with AI' },
+    { divider: true },
     { key: 'copy', label: 'Copy clean Markdown' },
     { key: 'share', label: 'Share with AI' },
-    { key: 'both', label: 'HTML + Markdown' },
-    { key: 'html', label: 'HTML only' },
-    { key: 'md', label: 'Markdown only' },
+    { key: 'library-share', label: 'Save locally + share with AI' },
+    { divider: true },
+    { key: 'both', label: 'Download HTML + Markdown' },
   ];
   const POST_EXPORT_TYPES = [
-    { key: 'library', label: 'Save full thread to library' },
     { key: 'library-single', label: 'Save this post only' },
     ...EXPORT_TYPES.filter((item) => item.key !== 'library'),
   ];
@@ -5641,7 +5795,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       document.addEventListener('click', onDocClick, true);
     };
 
-    menuItems.forEach(({ key, label }) => {
+    menuItems.forEach((entry) => {
+      if (entry.divider) {
+        const sep = document.createElement('div');
+        sep.className = 'xa-ctl-sep';
+        menu.appendChild(sep);
+        return;
+      }
+      const { key, label } = entry;
       const item = document.createElement('button');
       item.type = 'button';
       item.className = 'xa-ctl-item';
@@ -5925,7 +6086,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           })
         );
         if (model.thread) {
-          await enrichThreadMediaViaSyndication(model, (done, total) =>
+          await enrichThreadViaSyndication(model, (done, total) =>
             showToast(total ? `Verifying thread media... ${done}/${total}` : 'Reading page...', {
               sticky: true,
             })
@@ -6534,7 +6695,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       syndicationToQuoteBlock,
       syndicationMediaBlocks,
       mediaKeyFromUrl,
-      enrichThreadMediaViaSyndication,
+      enrichThreadViaSyndication,
+      extractLinkCard,
+      buildTweetBlocks,
     };
   }
 })();

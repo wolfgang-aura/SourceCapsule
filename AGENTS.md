@@ -37,7 +37,9 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
 
 ## Export modes
 
-- Menu offers **Save to library** (primary), **HTML + Markdown**, **HTML only**, **Markdown only**.
+- Menu offers **Save to library** (primary), **Save with note / tags**, **Copy clean Markdown**,
+  **Share with AI**, **Save locally + share with AI**, and **Download HTML + Markdown** (the
+  engine still supports the `html`/`md` single-file keys; they are just no longer menu items).
 - **Save to library** (`saveToLibrary`) writes each export into a per-post folder under a root the
   user picks once: `<root>/<date>/<handle>-<id>/{<handle>-<id>.html?, <handle>-<id>.llm.md, media/}`. It uses the
   **File System Access API** (`getRootDir` persists the `FileSystemDirectoryHandle` in IndexedDB;
