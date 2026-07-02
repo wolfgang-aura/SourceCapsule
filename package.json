@@ -27,9 +27,11 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "node test/smoke.mjs && node test/dom.test.mjs && node test/share-worker.test.mjs",
+    "test": "node test/smoke.mjs && node test/dom.test.mjs && node test/share-worker.test.mjs && node test/x-api-probe.test.mjs",
     "test:dom": "node test/dom.test.mjs",
     "test:share": "node test/share-worker.test.mjs",
+    "test:x-probe": "node test/x-api-probe.test.mjs",
+    "probe:x": "node scripts/probe-x-mobile.mjs",
     "build:extension": "node scripts/build-extension.mjs",
     "dev:share": "wrangler dev --config share-worker/wrangler.toml --local --port 8787"
   },
