@@ -66,9 +66,20 @@ Thread capture is deliberately honest: it includes same-author posts visible dur
 scroll, marks post boundaries, and records `best-effort` completeness in the manifest. X can
 virtualize or withhold posts, so this is not yet a guarantee of every reply in very long threads.
 
-## Test Share with AI locally
+## Share with AI
 
-The userscript defaults to `http://127.0.0.1:8787` while v1.2 is under development.
+The userscript ships pointing at the hosted share service
+(`https://sourcecapsule-share.wolfgang-aura.workers.dev`): a Cloudflare Worker + R2 backend with
+per-IP rate limiting on link creation, a 25 MB package cap, and 1/7/30-day expiry with daily
+cleanup. To try it:
+
+1. Open a post on x.com and click **...** beside the SourceCapsule button.
+2. Click **Share with AI**.
+3. Keep **7 days**, or choose 1/30 days.
+4. Confirm. The resulting URL is copied to your clipboard.
+5. Paste the URL into a new tab. Add `.md` to the capsule URL for the clean Markdown endpoint.
+
+### Develop against a local share service
 
 ```powershell
 cd C:\Users\cheon\Desktop\Projects\eXportArticle
@@ -76,24 +87,16 @@ npm.cmd install
 npm.cmd run dev:share
 ```
 
-Leave that PowerShell window open. Then:
+Leave that PowerShell window open, then open Tampermonkey while on x.com and set
+**SourceCapsule: Share service URL** to `http://127.0.0.1:8787`. Other hosts also need an
+`@connect` grant in the userscript header (and a `host_permissions` entry in the extension
+manifest).
 
-1. Refresh x.com.
-2. Click **...** beside the SourceCapsule button.
-3. Click **Share with AI**.
-4. Keep **7 days**, or choose 1/30 days.
-5. Confirm. The resulting URL is copied to your clipboard.
-6. Paste the URL into a new tab. Add `.md` to the capsule URL for the clean Markdown endpoint.
-
-To use another endpoint, open Tampermonkey while on x.com and click
-**SourceCapsule: Share service URL**.
-
-### Deploy the share service
+### Self-host the share service
 
 The backend is a small Cloudflare Worker with an R2 bucket. Deployment details are in
-[`share-worker/README.md`](share-worker/README.md). Before a public launch, add rate limiting or
-Turnstile, bind the purchased domain, and run the real upload/expiry test. Accounts, billing, and
-permanent-link quotas are intentionally not part of this first share release.
+[`share-worker/README.md`](share-worker/README.md). Accounts, billing, and permanent-link quotas
+are intentionally not part of this first share release.
 
 ## Test the experimental Chrome extension
 

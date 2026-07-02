@@ -23,6 +23,7 @@
 // @connect      127.0.0.1
 // @connect      localhost
 // @connect      share.sourcecapsule.app
+// @connect      sourcecapsule-share.wolfgang-aura.workers.dev
 // @run-at       document-start
 // @noframes
 // @downloadURL  https://raw.githubusercontent.com/wolfgang-aura/SourceCapsule/main/sourcecapsule.user.js
@@ -142,9 +143,10 @@
     // virtualized article DOM. This is what makes quote media reliably correct.
     useSyndication: true,
     share: {
-      // Local by default until the hosted service is deployed. Change this through the
-      // userscript-manager menu or replace it with the production domain before release.
-      defaultApiBase: 'http://127.0.0.1:8787',
+      // Hosted share service (Cloudflare Worker + R2). Point this at a local
+      // `npm run dev:share` (http://127.0.0.1:8787) through the userscript-manager
+      // menu when developing; new hosts also need an @connect grant above.
+      defaultApiBase: 'https://sourcecapsule-share.wolfgang-aura.workers.dev',
       maxBytes: 25 * 1024 * 1024,
       expiryDays: [1, 7, 30],
       defaultExpiryDays: 7,

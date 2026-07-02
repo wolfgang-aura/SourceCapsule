@@ -12,6 +12,7 @@
     "https://*.twimg.com/*",
     "https://cdn.syndication.twimg.com/*",
     "https://share.sourcecapsule.app/*",
+    "https://sourcecapsule-share.wolfgang-aura.workers.dev/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],
