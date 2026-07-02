@@ -121,6 +121,47 @@ const image = await worker.fetch(new Request(`${created.viewUrl}/media/image-001
 assert.equal(image.status, 200);
 assert.equal((await image.arrayBuffer()).byteLength, 3);
 
+{
+  const limitedEnv = {
+    CAPSULES: env.CAPSULES,
+    CREATE_LIMITER: { limit: async () => ({ success: false }) },
+  };
+  const limited = await worker.fetch(
+    new Request('https://share.example/api/capsules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.9' },
+      body: JSON.stringify({ expiryDays: 7 }),
+    }),
+    limitedEnv,
+    ctx
+  );
+  assert.equal(limited.status, 429);
+
+  const openEnv = {
+    CAPSULES: env.CAPSULES,
+    CREATE_LIMITER: { limit: async () => ({ success: true }) },
+  };
+  const allowed = await worker.fetch(
+    new Request('https://share.example/api/capsules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'CF-Connecting-IP': '203.0.113.9' },
+      body: JSON.stringify({ expiryDays: 1 }),
+    }),
+    openEnv,
+    ctx
+  );
+  assert.equal(allowed.status, 201);
+  const allowedCapsule = await allowed.json();
+  await worker.fetch(
+    new Request(allowedCapsule.deleteUrl, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${allowedCapsule.deleteToken}` },
+    }),
+    env,
+    ctx
+  );
+}
+
 const deleted = await worker.fetch(
   new Request(created.deleteUrl, {
     method: 'DELETE',

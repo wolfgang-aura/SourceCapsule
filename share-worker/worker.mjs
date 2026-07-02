@@ -234,11 +234,26 @@ async function serveCapsule(request, env, ctx, id, path) {
   return new Response(request.method === 'HEAD' ? null : object.body, { headers });
 }
 
+async function createAllowed(request, env) {
+  // CREATE_LIMITER is a Workers rate-limiting binding; absent in local dev and tests.
+  if (!env.CREATE_LIMITER) return true;
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+  const { success } = await env.CREATE_LIMITER.limit({ key: ip });
+  return success;
+}
+
 async function handleRequest(request, env, ctx) {
   if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders(request) });
   const url = new URL(request.url);
   const segments = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
   if (request.method === 'POST' && url.pathname === '/api/capsules') {
+    if (!(await createAllowed(request, env))) {
+      return json(
+        request,
+        { error: 'Too many new share links from this address. Try again in a minute.' },
+        429
+      );
+    }
     return createCapsule(request, env);
   }
   if (segments[0] === 'api' && segments[1] === 'capsules' && validId(segments[2])) {
