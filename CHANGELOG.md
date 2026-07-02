@@ -6,6 +6,30 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-07-02
+
+### Added
+
+- One-click library save, with full same-author thread capture enabled by default on status pages.
+- Explicit thread boundaries and best-effort completeness metadata in HTML, Markdown, and manifest.
+- Optional “saved because” note and tags, plus a root `_sourcecapsule-index.md` updated on save.
+- Copy-clean-Markdown action for pasting context directly into an agent or LLM.
+- Expiring “Share with AI” links with 1, 7, or 30 day expiry, clean HTML/Markdown endpoints,
+  manifest, and real image/poster files. The deployable Cloudflare Worker + R2 service is included.
+- Experimental Manifest V3 Chrome extension package generated from the userscript source of truth.
+
+### Changed
+
+- The primary inline control now saves immediately; secondary export choices live under `...`.
+- Thread capture performs a progressive top-to-bottom scan before building the model.
+- Shared capsules exclude raw video and enforce a 25 MB upload cap.
+
+### Security
+
+- Sharing is explicit, time-limited, and uses high-entropy capsule IDs.
+- Shared responses use no-index and restrictive content-security headers.
+- The Worker validates upload paths, expiry choices, and deletion/finalization tokens.
+
 ## [1.1.0] - 2026-06-28
 
 ### Added
