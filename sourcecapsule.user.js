@@ -4691,16 +4691,16 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     }
   }
 
-  function promptCaptureOptions({ share = false } = {}) {
+  function promptCaptureOptions({ share = false, saveLocal = false } = {}) {
     ensureStyle();
     return new Promise((resolve) => {
       const backdrop = document.createElement('div');
       backdrop.className = 'xa-modal-backdrop';
       backdrop.innerHTML = `<form class="xa-modal" role="dialog" aria-modal="true" aria-labelledby="xa-modal-title">
-        <h2 id="xa-modal-title">${share ? 'Share with AI' : 'Add context'}</h2>
+        <h2 id="xa-modal-title">${share ? (saveLocal ? 'Save + share with AI' : 'Share with AI') : 'Add context'}</h2>
         <p>${
           share
-            ? 'This creates an unlisted public link. Anyone with the link can view it. Full video files are not uploaded.'
+            ? `${saveLocal ? 'A local library copy is saved first. ' : ''}This also creates an unlisted public link. Anyone with the link can view it. Full video files are not uploaded.`
             : 'Optional: record why this source matters so you and your agents remember later.'
         }</p>
         <label for="xa-note">Why are you saving this?</label>
@@ -5394,6 +5394,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   const EXPORT_TYPES = [
     { key: 'library', label: 'Save to library' },
     { key: 'library-note', label: 'Save with note / tags' },
+    { key: 'library-share', label: 'Save locally + share with AI' },
     { key: 'copy', label: 'Copy clean Markdown' },
     { key: 'share', label: 'Share with AI' },
     { key: 'both', label: 'HTML + Markdown' },
@@ -5689,7 +5690,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 
   /**
    * Build and download the requested artifact(s) for the page (or a specific post).
-   * @param exportType 'library' | 'html' | 'md' | 'both'
+   * @param exportType 'library' | 'library-share' | 'share' | 'copy' | 'html' | 'md' | 'both'
    * @param targetTweetEl when set, export exactly that post (per-post button); else the page.
    * @param trigger the clicked button, for busy-state feedback.
    */
@@ -5711,8 +5712,13 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     setBusy(true);
     try {
       let metadata = {};
-      if (exportType === 'library-note' || exportType === 'share') {
-        metadata = await promptCaptureOptions({ share: exportType === 'share' });
+      const needsShare = exportType === 'share' || exportType === 'library-share';
+      const needsLibrary = exportType === 'library-share' || exportType.startsWith('library');
+      if (exportType === 'library-note' || needsShare) {
+        metadata = await promptCaptureOptions({
+          share: needsShare,
+          saveLocal: exportType === 'library-share',
+        });
         if (!metadata) return;
       }
       const outputType = exportType === 'library-note' ? 'library' : exportType;
@@ -5722,7 +5728,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       // resolve without a prompt. null + FSA available means the user cancelled -> abort early
       // (before the expensive media work); null + no FSA means we'll zip later.
       let libraryRoot = null;
-      if (outputType === 'library') {
+      if (needsLibrary) {
         libraryRoot = await getRootDir();
         if (!libraryRoot && fsaWindow()) {
           showToast('Export folder not set; export cancelled', { error: true });
@@ -5776,6 +5782,30 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       });
 
       showToast('Assembling files...', { sticky: true });
+      const publishAndCopyShare = async () => {
+        const created = await createShareLink(
+          model,
+          debugJson,
+          metadata.expiryDays || CONFIG.share.defaultExpiryDays,
+          (message, done, total) =>
+            showToast(total ? `[${Math.min(done + 1, total)}/${total}] ${message}` : message, {
+              sticky: true,
+            })
+        );
+        await copyText(created.viewUrl);
+        rememberShareLink(created, model);
+        showToast(`Share link copied; expires ${readableUtcTime(created.expiresAt)}`);
+      };
+      if (outputType === 'library-share') {
+        await saveToLibrary(model, debugJson, libraryRoot);
+        try {
+          await publishAndCopyShare();
+        } catch (shareError) {
+          errlog(shareError);
+          showToast(`Saved locally, but link failed: ${shareError.message}`, { error: true });
+        }
+        return;
+      }
       if (outputType === 'library') {
         await saveToLibrary(model, debugJson, libraryRoot);
         return;
@@ -5789,18 +5819,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         return;
       }
       if (outputType === 'share') {
-        const created = await createShareLink(
-          model,
-          debugJson,
-          metadata.expiryDays || CONFIG.share.defaultExpiryDays,
-          (message, done, total) =>
-            showToast(total ? `[${Math.min(done + 1, total)}/${total}] ${message}` : message, {
-              sticky: true,
-            })
-        );
-        await copyText(created.viewUrl);
-        rememberShareLink(created, model);
-        showToast(`Share link copied; expires ${readableUtcTime(created.expiresAt)}`);
+        await publishAndCopyShare();
         return;
       }
       const basename = `${slugify(model.title)}.${nowStamp()}`;
@@ -6315,6 +6334,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       renderLibraryIndexItem,
       updateLibraryIndexText,
       renderArchiveManifestJson,
+      EXPORT_TYPES,
       handleFromSourceUrl,
       escapeHtml,
       safeUrl,

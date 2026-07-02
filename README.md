@@ -21,8 +21,9 @@ temporary link you can give to an LLM.
   engine without Tampermonkey.
 
 The product remains local-first. Nothing is uploaded until you explicitly choose **Share with AI**
-and confirm the expiry. Shared capsules exclude raw video, are capped at 25 MB, and retain source
-links when media cannot be included.
+or **Save locally + share with AI** and confirm the expiry. In the combined flow, the local copy is
+completed first, so an upload failure cannot take it away. Shared capsules exclude raw video, are
+capped at 25 MB, and retain source links when media cannot be included.
 
 ## Install the userscript
 
@@ -41,6 +42,7 @@ On an X post or Article:
 - Click **Save thread** or **Save article** for the default quick-save flow.
 - Click **...** beside it for:
   - Save with note and tags
+  - Save locally + share with AI
   - Save this post only
   - Copy clean Markdown
   - Share with AI

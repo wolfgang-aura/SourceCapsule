@@ -19,6 +19,13 @@ const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
 const engine = require(join(here, '..', 'sourcecapsule.user.js'));
 
+assert.ok(
+  engine.EXPORT_TYPES.some(
+    (item) => item.key === 'library-share' && item.label === 'Save locally + share with AI'
+  ),
+  'combined local-save and share action is available'
+);
+
 // A 1x1 transparent PNG, already base64-inlined — stands in for fetched media.
 const PNG =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
