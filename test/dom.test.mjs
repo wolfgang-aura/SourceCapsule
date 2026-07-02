@@ -155,6 +155,18 @@ check('buildModelForPost captures same-author thread continuations only', () => 
   assert.ok(!paragraphs.some((html) => html.includes('Nested unrelated text should not export.')));
 });
 
+check('full-thread mode is explicit for a clicked post and adds post boundaries', () => {
+  const focused = Array.from(document.querySelectorAll('article[data-testid="tweet"]')).find(
+    (tweet) => tweet.textContent.includes('mstr')
+  );
+  const single = engine.buildModelForPost(focused);
+  assert.equal(single.thread, undefined);
+  const fullThread = engine.buildModelForPost(focused, { includeThread: true });
+  assert.equal(fullThread.thread.capturedPosts, 2);
+  assert.equal(model.thread.capturedPosts, 2);
+  assert.equal(model.blocks.filter((block) => block.kind === 'thread-marker').length, 2);
+});
+
 check('buildModelForPost uses the focused post permalink as sourceUrl', () => {
   assert.equal(model.sourceUrl, STATUS_URL);
   assert.equal(model.publishedAt, '2026-06-25T12:00:00.000Z');
