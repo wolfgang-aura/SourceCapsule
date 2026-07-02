@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="generator" content="SourceCapsule v1.1.1">
+<meta name="generator" content="SourceCapsule v1.2.0">
 <title>How we built a self-contained exporter - a &quot;test&quot; &amp; demo</title>
 <style>
 
@@ -80,6 +80,12 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
   background:rgba(255,180,0,.12);border:1px solid rgba(255,180,0,.35);color:var(--fg)}
 .xa-truncated a{color:var(--accent);text-decoration:none}
 .xa-quote-time{display:block;margin-top:8px;font-size:13px;color:var(--muted)}
+.xa-thread-marker{display:flex;align-items:center;gap:12px;margin:28px 0 12px;padding-top:18px;
+  border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
+.xa-thread-marker:first-child{margin-top:8px;border-top:0;padding-top:0}
+.xa-thread-marker a{color:var(--accent);text-decoration:none}.xa-thread-marker time{margin-left:auto}
+.xa-saved-context{display:grid;gap:8px;margin-top:16px;padding:12px 14px;border:1px solid var(--line);
+  border-radius:12px;background:var(--card);font-size:14px}.xa-saved-context p{margin:3px 0 0;color:var(--muted)}
 .xa-footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
 .xa-footer h2{font-size:15px;line-height:1.3;margin:0 0 10px;color:var(--fg)}
 .xa-footer dl{display:grid;gap:8px;margin:0 0 14px}
@@ -110,6 +116,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       <span>&middot; Published <time datetime="2026-06-24T09:30:00.000Z">2026-06-24 09:30:00 UTC</time></span>
       <span>&middot; Exported <time datetime="2026-06-25T10:00:00.000Z">2026-06-25 10:00:00 UTC</time></span>
     </div>
+
   </header>
   <details class="xa-capture"><summary>Capture summary</summary><dl><div><dt>Main text</dt><dd>Captured</dd></div><div><dt>Embedded posts</dt><dd>4</dd></div><div><dt>Images</dt><dd>3</dd></div><div><dt>Videos found</dt><dd>5</dd></div><div><dt>Videos preserved offline</dt><dd>2</dd></div><div><dt>Video posters captured</dt><dd>2</dd></div><div><dt>Incomplete media</dt><dd>3</dd></div><div><dt>Hashed media</dt><dd>4/8</dd></div><div><dt>Duplicate groups</dt><dd>1</dd></div><div><dt>Missing media</dt><dd>6</dd></div><div><dt>Source links</dt><dd>13</dd></div></dl></details>
   <article class="xa-body">
@@ -137,7 +144,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       <div><dt>Original URL</dt><dd><a href="https://x.com/ada/article/12345" target="_blank" rel="noopener noreferrer">https://x.com/ada/article/12345</a></dd></div>
       <div><dt>Published at</dt><dd><time datetime="2026-06-24T09:30:00.000Z">2026-06-24 09:30:00 UTC</time></dd></div>
       <div><dt>Exported at</dt><dd><time datetime="2026-06-25T10:00:00.000Z">2026-06-25 10:00:00 UTC</time></dd></div>
-      <div><dt>Exporter</dt><dd>SourceCapsule v1.1.1</dd></div>
+      <div><dt>Exporter</dt><dd>SourceCapsule v1.2.0</dd></div>
     </dl>
     <p class="xa-disclaimer">This archive preserves content visible to the logged-in user at export time. It may not include content that was unavailable, private, deleted, or failed to load during capture.</p>
   </footer>
@@ -179,7 +186,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
   "schemaVersion": "1.0",
   "exporter": {
     "name": "SourceCapsule",
-    "version": "1.1.1"
+    "version": "1.2.0"
   },
   "capture": {
     "sourceUrl": "https://x.com/ada/article/12345",
@@ -201,7 +208,11 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     "missingMedia": 6,
     "hashedMedia": 4,
     "duplicateMedia": 1,
-    "sourceLinks": 13
+    "sourceLinks": 13,
+    "threadPosts": 1,
+    "threadCompleteness": "single-post",
+    "note": "",
+    "tags": []
   },
   "media": [
     {

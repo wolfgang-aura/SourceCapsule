@@ -19,6 +19,13 @@ const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
 const engine = require(join(here, '..', 'sourcecapsule.user.js'));
 
+assert.ok(
+  engine.EXPORT_TYPES.some(
+    (item) => item.key === 'library-share' && item.label === 'Save locally + share with AI'
+  ),
+  'combined local-save and share action is available'
+);
+
 // A 1x1 transparent PNG, already base64-inlined — stands in for fetched media.
 const PNG =
   'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
@@ -411,6 +418,58 @@ check('bundlePaths honors the date vs flat layout preference', () => {
   assert.equal(byDate.postFolder, 'ada-12345');
   const flat = engine.bundlePaths(sampleModel, { layout: 'flat' }, '2026-06-28');
   assert.deepEqual(flat.segments, ['2026-06-28_ada-12345']);
+});
+
+check('capture metadata normalizes tags and appears in the local library index', () => {
+  const modelWithContext = structuredClone(sampleModel);
+  engine.applyCaptureMetadata(modelWithContext, {
+    note: 'Compare this with our Malaysia pricing research',
+    tags: ' FinTech, #Malaysia, fintech, pricing strategy ',
+  });
+  assert.equal(modelWithContext.userNote, 'Compare this with our Malaysia pricing research');
+  assert.deepEqual(modelWithContext.tags, ['FinTech', 'Malaysia', 'pricing-strategy']);
+  const paths = engine.bundlePaths(modelWithContext, { layout: 'date' }, '2026-07-02');
+  const entry = engine.libraryIndexEntry(modelWithContext, paths, {
+    images: 2,
+    videos: 1,
+    incompleteMedia: 1,
+    missingMedia: 0,
+  });
+  const first = engine.updateLibraryIndexText('', entry);
+  assert.ok(first.includes('# SourceCapsule Library Index'));
+  assert.ok(first.includes('Saved because: Compare this with our Malaysia pricing research'));
+  assert.ok(first.includes('Tags: FinTech, Malaysia, pricing-strategy'));
+  const updated = engine.updateLibraryIndexText(first, { ...entry, note: 'Updated reason' });
+  assert.equal((updated.match(/<!-- sourcecapsule:item:/g) || []).length, 1);
+  assert.ok(updated.includes('Saved because: Updated reason'));
+});
+
+check('capture note, tags, and thread metadata render in HTML, Markdown, and manifest', () => {
+  const contextual = structuredClone(sampleModel);
+  contextual.type = 'post';
+  contextual.thread = {
+    capturedPosts: 2,
+    sourcePostIds: ['12345', '12346'],
+    completeness: 'best-effort',
+  };
+  contextual.userNote = 'Use this in the launch memo';
+  contextual.tags = ['launch', 'research'];
+  contextual.blocks.unshift({
+    kind: 'thread-marker',
+    index: 1,
+    total: 2,
+    sourceUrl: contextual.sourceUrl,
+    publishedAt: contextual.publishedAt,
+  });
+  const html = engine.assembleHtml(contextual);
+  const md = engine.renderLlmMarkdown(contextual);
+  const manifest = JSON.parse(engine.renderArchiveManifestJson(contextual));
+  assert.ok(html.includes('X Thread'));
+  assert.ok(html.includes('Saved because'));
+  assert.ok(md.includes('## Full Thread'));
+  assert.ok(md.includes('Saved because: Use this in the launch memo'));
+  assert.equal(manifest.capture.threadPosts, 2);
+  assert.deepEqual(manifest.capture.tags, ['launch', 'research']);
 });
 
 check('bundle markdown references real media/ files and excludes full video', () => {

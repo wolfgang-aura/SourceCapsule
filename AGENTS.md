@@ -39,7 +39,7 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
 
 - Menu offers **Save to library** (primary), **HTML + Markdown**, **HTML only**, **Markdown only**.
 - **Save to library** (`saveToLibrary`) writes each export into a per-post folder under a root the
-  user picks once: `<root>/<date>/<handle>-<id>/{post.html?, post.llm.md, media/}`. It uses the
+  user picks once: `<root>/<date>/<handle>-<id>/{<handle>-<id>.html?, <handle>-<id>.llm.md, media/}`. It uses the
   **File System Access API** (`getRootDir` persists the `FileSystemDirectoryHandle` in IndexedDB;
   the browser may re-confirm write permission ~once per session). Chromium only; **non-Chromium
   falls back to a single `.zip`** of the same per-post tree via the built-in store-only writer
@@ -50,6 +50,15 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
   `pathById` → `renderLlmMarkdown(..., { mediaFiles })`); it never names a file that is not on disk.
 - Two prefs (`layout` date|flat, `contents` full|lean) live in `localStorage`; toggled via
   userscript-manager **menu commands** (`registerSettingsMenu`), not an in-app panel.
+- Status-page quick save captures the visible same-author thread by default. It progressively
+  scrolls from the top and keeps cloned tweet nodes so X virtualization does not erase earlier
+  posts. Capture remains best-effort and is labelled as such.
+- **Share with AI** uploads only after confirmation to the configured share Worker, with a default
+  7-day expiry (1/30 days optional), a 25 MB cap, and no raw video. The Cloudflare Worker + R2
+  implementation lives in `share-worker/`.
+- `npm run build:extension` generates an experimental MV3 package in
+  `dist/sourcecapsule-extension/` using the same userscript source plus a thin GM compatibility
+  layer.
 
 ## Gotchas
 
@@ -74,7 +83,8 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
 
 ## Out of scope (v1)
 
-Threads, batch export, **in-app settings panel** (manager menu commands only — see Export modes),
-MV3 extension, HLS reassembly, OCR/transcripts, AI-generated media descriptions, a top-level
-library catalog/index file, and full long-form ("note") post text retrieval (preview-only,
+Batch/bookmark export, **in-app settings panel** (manager menu commands only — see Export modes),
+HLS reassembly, OCR/transcripts, AI-generated summaries/media descriptions, hosted dashboard,
+accounts/billing/permanent-link quotas, Chrome Web Store publication, guaranteed complete capture
+of arbitrarily long threads, and full long-form (“note”) post text retrieval (preview-only,
 flagged truncated).

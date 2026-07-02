@@ -104,6 +104,18 @@ check('detectPageType() recognizes a status page as a post', () => {
   assert.equal(engine.detectPageType(), 'post');
 });
 
+check('share success remains visible when automatic clipboard copy is blocked', () => {
+  const viewUrl = 'http://127.0.0.1:8787/c/1234567890abcdef';
+  engine.showShareResult({ viewUrl }, { copied: false });
+  const result = document.querySelector('.xa-share-result');
+  assert.ok(result, 'share result dialog should be visible');
+  assert.equal(result.querySelector('#xa-share-url').value, viewUrl);
+  assert.match(result.querySelector('.xa-share-status').textContent, /could not copy/i);
+  assert.equal(result.querySelector('.xa-modal-open').href, viewUrl);
+  result.querySelector('.xa-modal-cancel').click();
+  assert.equal(document.querySelector('.xa-share-result'), null);
+});
+
 check('inlineHtmlFromTweetText captures nested-span text', () => {
   const el = dom.window.document.querySelectorAll('div[data-testid="tweetText"]')[1];
   const html = engine.inlineHtmlFromTweetText(el);
@@ -153,6 +165,18 @@ check('buildModelForPost captures same-author thread continuations only', () => 
   assert.ok(paragraphs.some((html) => html.includes('Second quoted video should export.')));
   assert.ok(!paragraphs.some((html) => html.includes('Unrelated reply should not export.')));
   assert.ok(!paragraphs.some((html) => html.includes('Nested unrelated text should not export.')));
+});
+
+check('full-thread mode is explicit for a clicked post and adds post boundaries', () => {
+  const focused = Array.from(document.querySelectorAll('article[data-testid="tweet"]')).find(
+    (tweet) => tweet.textContent.includes('mstr')
+  );
+  const single = engine.buildModelForPost(focused);
+  assert.equal(single.thread, undefined);
+  const fullThread = engine.buildModelForPost(focused, { includeThread: true });
+  assert.equal(fullThread.thread.capturedPosts, 2);
+  assert.equal(model.thread.capturedPosts, 2);
+  assert.equal(model.blocks.filter((block) => block.kind === 'thread-marker').length, 2);
 });
 
 check('buildModelForPost uses the focused post permalink as sourceUrl', () => {
@@ -728,6 +752,129 @@ check('syndicationToken is a non-empty token without zero-runs or dots', () => {
   assert.equal(typeof tok, 'string');
   assert.ok(tok.length > 0);
   assert.ok(!/[.]/.test(tok) && !/00/.test(tok), `token shape: ${tok}`);
+});
+
+async function checkAsync(name, fn) {
+  try {
+    await fn();
+    console.log(`  ✓ ${name}`);
+  } catch (e) {
+    failures++;
+    console.error(`  ✗ ${name}\n    ${e.message}`);
+  }
+}
+
+check('mediaKeyFromUrl canonicalizes DOM and syndication URL shapes to one key', () => {
+  const domShape = engine.mediaKeyFromUrl(
+    'https://pbs.twimg.com/media/GxAbC123_x?format=jpg&name=small'
+  );
+  const synShape = engine.mediaKeyFromUrl('https://pbs.twimg.com/media/GxAbC123_x.jpg');
+  assert.equal(domShape, 'media:GxAbC123_x');
+  assert.equal(domShape, synShape);
+  assert.equal(
+    engine.mediaKeyFromUrl('https://pbs.twimg.com/ext_tw_video_thumb/123456/pu/img/x.jpg'),
+    'video:123456'
+  );
+  assert.equal(engine.mediaKeyFromUrl('https://pbs.twimg.com/profile_images/1/a.jpg'), '');
+});
+
+await checkAsync(
+  'thread media enrichment recovers lazy-load losses into the right post, no dupes',
+  async () => {
+    const model = {
+      type: 'post',
+      blocks: [
+        {
+          kind: 'thread-marker',
+          statusId: '111',
+          sourceUrl: 'https://x.com/a/status/111',
+          index: 1,
+          total: 2,
+        },
+        { kind: 'paragraph', html: 'first post, its image was lost to lazy loading' },
+        {
+          kind: 'thread-marker',
+          statusId: '222',
+          sourceUrl: 'https://x.com/a/status/222',
+          index: 2,
+          total: 2,
+        },
+        { kind: 'paragraph', html: 'second post, image already captured from the DOM' },
+        {
+          kind: 'image',
+          url: 'https://pbs.twimg.com/media/KEEP22?format=jpg&name=small',
+          alt: '',
+        },
+      ],
+      thread: { capturedPosts: 2, sourcePostIds: ['111', '222'], completeness: 'best-effort' },
+    };
+    const syndication = {
+      111: {
+        __typename: 'Tweet',
+        text: 'first',
+        mediaDetails: [
+          { type: 'photo', media_url_https: 'https://pbs.twimg.com/media/LOST11.jpg' },
+        ],
+      },
+      222: {
+        __typename: 'Tweet',
+        text: 'second',
+        // Same asset the DOM already captured, in syndication's URL shape: must NOT duplicate.
+        mediaDetails: [
+          { type: 'photo', media_url_https: 'https://pbs.twimg.com/media/KEEP22.jpg' },
+        ],
+      },
+    };
+    await engine.enrichThreadMediaViaSyndication(model, null, async (id) => {
+      if (!syndication[id]) throw new Error('unexpected fetch ' + id);
+      return syndication[id];
+    });
+    const images = model.blocks.filter((b) => b.kind === 'image');
+    assert.equal(images.length, 2, 'one recovered + one kept, no duplicates');
+    const marker2 = model.blocks.findIndex(
+      (b) => b.kind === 'thread-marker' && b.statusId === '222'
+    );
+    const recovered = model.blocks.findIndex((b) => b.kind === 'image' && /LOST11/.test(b.url));
+    assert.ok(recovered !== -1, 'missing image was recovered from syndication');
+    assert.ok(recovered < marker2, 'recovered image belongs to post 1, before the post 2 marker');
+    assert.equal(model.thread.mediaRecovered, 1);
+  }
+);
+
+await checkAsync('thread media enrichment survives per-post syndication failures', async () => {
+  const model = {
+    type: 'post',
+    blocks: [
+      { kind: 'thread-marker', statusId: '111', sourceUrl: 'https://x.com/a/status/111' },
+      { kind: 'paragraph', html: 'one' },
+      { kind: 'thread-marker', statusId: '222', sourceUrl: 'https://x.com/a/status/222' },
+      { kind: 'paragraph', html: 'two' },
+    ],
+    thread: { capturedPosts: 2, sourcePostIds: ['111', '222'], completeness: 'best-effort' },
+  };
+  await engine.enrichThreadMediaViaSyndication(model, null, async (id) => {
+    if (id === '111') throw new Error('syndication: HTTP 404');
+    return {
+      __typename: 'Tweet',
+      text: 'two',
+      mediaDetails: [
+        {
+          type: 'video',
+          media_url_https: 'https://pbs.twimg.com/ext_tw_video_thumb/999/pu/img/p.jpg',
+          video_info: {
+            duration_millis: 5000,
+            variants: [
+              { content_type: 'video/mp4', bitrate: 832000, url: 'https://video.twimg.com/v.mp4' },
+            ],
+          },
+        },
+      ],
+    };
+  });
+  const videos = model.blocks.filter((b) => b.kind === 'video');
+  assert.equal(videos.length, 1, 'post 2 video recovered despite post 1 failure');
+  assert.equal(videos[0].mp4Url, 'https://video.twimg.com/v.mp4');
+  assert.equal(model.thread.mediaRecovered, 1);
 });
 
 if (failures) {

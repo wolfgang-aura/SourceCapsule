@@ -1,6 +1,8 @@
 node_modules/
 *.export.html
 exports/
+dist/
+share-worker/.wrangler/
 examples/sample-export.html
 
 # Markdown is hand-formatted (tables, wrapping); don't let Prettier reflow it.
