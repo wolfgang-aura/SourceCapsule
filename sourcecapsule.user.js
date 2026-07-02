@@ -5471,6 +5471,77 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return model;
   }
 
+  /** Canonical identity for an X media URL, tolerant of format/size/extension variants
+   *  (DOM src `.../media/XXX?format=jpg&name=small` and syndication `.../media/XXX.jpg`
+   *  are the same asset). */
+  function mediaKeyFromUrl(url) {
+    const value = String(url || '');
+    let match = value.match(/\/media\/([A-Za-z0-9_-]+)/);
+    if (match) return `media:${match[1]}`;
+    match = value.match(/\/(?:ext_tw_video_thumb|amplify_video_thumb|tweet_video_thumb)\/(\d+)\//);
+    if (match) return `video:${match[1]}`;
+    return '';
+  }
+
+  function blockMediaKey(block) {
+    if (!block) return '';
+    if (block.kind === 'image') return mediaKeyFromUrl(block.url);
+    if (block.kind === 'video') return mediaKeyFromUrl(block.posterUrl || block.mp4Url);
+    return '';
+  }
+
+  /**
+   * Thread capture races X's lazy loading: a post cloned before its image ever
+   * loaded has no media in the DOM at all, so the miss is invisible to the
+   * accounting (a real 36-post thread silently lost 7 of 27 photos this way).
+   * Recover by asking the syndication endpoint - the same authoritative source
+   * quote cards use - for each captured post's media and appending whatever the
+   * DOM missed. Must run before inlineMedia so recovered blocks are downloaded
+   * and counted like any other media. Per-post failures keep the DOM capture.
+   */
+  async function enrichThreadMediaViaSyndication(
+    model,
+    onProgress,
+    fetchTweet = fetchTweetSyndication
+  ) {
+    const markers = [];
+    model.blocks.forEach((block, index) => {
+      if (block.kind === 'thread-marker' && block.statusId) markers.push({ block, index });
+    });
+    if (!markers.length) return model;
+    let done = 0;
+    let recovered = 0;
+    onProgress && onProgress(0, markers.length);
+    // Walk backwards so insertions never shift the indices of unprocessed segments.
+    for (let i = markers.length - 1; i >= 0; i--) {
+      const { block: marker, index } = markers[i];
+      const end = i + 1 < markers.length ? markers[i + 1].index : model.blocks.length;
+      try {
+        const data = await fetchTweet(marker.statusId);
+        if (data && (data.__typename === 'Tweet' || data.text != null)) {
+          const have = new Set(model.blocks.slice(index + 1, end).map(blockMediaKey));
+          const missing = syndicationMediaBlocks(data, marker.sourceUrl).filter((candidate) => {
+            const key = blockMediaKey(candidate);
+            return key && !have.has(key);
+          });
+          if (missing.length) {
+            model.blocks.splice(end, 0, ...missing);
+            recovered += missing.length;
+          }
+        }
+      } catch (e) {
+        warn('thread media check failed for post', marker.statusId, '-', e.message);
+      }
+      done++;
+      onProgress && onProgress(done, markers.length);
+    }
+    if (recovered && model.thread) {
+      model.thread.mediaRecovered = recovered;
+      log(`recovered ${recovered} media item(s) that lazy loading hid from the DOM capture`);
+    }
+    return model;
+  }
+
   // The export choices offered by every Export control. "Save to library" is the primary,
   // organized path (per-post folder under a root you pick once); the rest are loose downloads.
   const EXPORT_TYPES = [
@@ -5853,6 +5924,13 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             sticky: true,
           })
         );
+        if (model.thread) {
+          await enrichThreadMediaViaSyndication(model, (done, total) =>
+            showToast(total ? `Verifying thread media... ${done}/${total}` : 'Reading page...', {
+              sticky: true,
+            })
+          );
+        }
         log('model after syndication', model);
       }
 
@@ -6454,6 +6532,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       // Syndication transforms (pure; network call is not unit-tested).
       syndicationToken,
       syndicationToQuoteBlock,
+      syndicationMediaBlocks,
+      mediaKeyFromUrl,
+      enrichThreadMediaViaSyndication,
     };
   }
 })();
