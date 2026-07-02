@@ -4717,7 +4717,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
                 .join('')}</select>`
             : ''
         }
-        <div class="xa-modal-actions"><button type="button" class="xa-modal-cancel">Cancel</button><button type="submit" class="xa-modal-submit">${share ? 'Create link' : 'Continue'}</button></div>
+        <div class="xa-modal-actions"><button type="button" class="xa-modal-cancel">Cancel</button><button type="submit" class="xa-modal-submit">${share ? (saveLocal ? 'Save + create link' : 'Create link') : 'Continue'}</button></div>
       </form>`;
       const form = backdrop.querySelector('form');
       const note = backdrop.querySelector('#xa-note');
