@@ -104,6 +104,18 @@ check('detectPageType() recognizes a status page as a post', () => {
   assert.equal(engine.detectPageType(), 'post');
 });
 
+check('share success remains visible when automatic clipboard copy is blocked', () => {
+  const viewUrl = 'http://127.0.0.1:8787/c/1234567890abcdef';
+  engine.showShareResult({ viewUrl }, { copied: false });
+  const result = document.querySelector('.xa-share-result');
+  assert.ok(result, 'share result dialog should be visible');
+  assert.equal(result.querySelector('#xa-share-url').value, viewUrl);
+  assert.match(result.querySelector('.xa-share-status').textContent, /could not copy/i);
+  assert.equal(result.querySelector('.xa-modal-open').href, viewUrl);
+  result.querySelector('.xa-modal-cancel').click();
+  assert.equal(document.querySelector('.xa-share-result'), null);
+});
+
 check('inlineHtmlFromTweetText captures nested-span text', () => {
   const el = dom.window.document.querySelectorAll('div[data-testid="tweetText"]')[1];
   const html = engine.inlineHtmlFromTweetText(el);
