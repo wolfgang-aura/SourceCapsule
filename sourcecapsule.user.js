@@ -4226,16 +4226,21 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
 
   async function copyText(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(text);
-      return;
+      try {
+        await navigator.clipboard.writeText(text);
+        return;
+      } catch (error) {
+        warn('navigator clipboard unavailable; trying selection fallback:', error.message);
+      }
     }
     const area = document.createElement('textarea');
     area.value = text;
     area.style.position = 'fixed';
     area.style.opacity = '0';
     document.body.appendChild(area);
+    area.focus();
     area.select();
-    const ok = document.execCommand('copy');
+    const ok = typeof document.execCommand === 'function' && document.execCommand('copy');
     area.remove();
     if (!ok) throw new Error('Clipboard access was denied.');
   }
@@ -4666,7 +4671,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   border:1px solid #cfd9de;border-radius:9px;background:#fff;color:#0f1419;font:inherit}
 .xa-modal textarea{min-height:82px;resize:vertical}.xa-modal-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:18px}
 .xa-modal button{padding:9px 14px;border:0;border-radius:999px;font:650 14px/1 inherit;cursor:pointer}
-.xa-modal-cancel{background:#eff3f4;color:#0f1419}.xa-modal-submit{background:#1d9bf0;color:#fff}
+.xa-modal-cancel{background:#eff3f4;color:#0f1419}.xa-modal-submit,.xa-modal-open{background:#1d9bf0;color:#fff}
+.xa-modal-open{display:inline-flex;align-items:center;padding:9px 14px;border-radius:999px;
+  font:650 14px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;text-decoration:none}
+.xa-share-url{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.xa-share-status{min-height:20px}
 @media (prefers-color-scheme:dark){.xa-modal{background:#15202b;color:#e7e9ea}.xa-modal p{color:#8b98a5}
   .xa-modal input,.xa-modal textarea,.xa-modal select{background:#1f2733;color:#e7e9ea;border-color:#536471}
   .xa-modal-cancel{background:#273340;color:#e7e9ea}}
@@ -4689,6 +4697,77 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (!sticky) {
       t._timer = setTimeout(() => t.classList.remove('show'), error ? 6000 : 3500);
     }
+  }
+
+  function showShareResult(created, { copied = false } = {}) {
+    const viewUrl = safeUrl(created && created.viewUrl);
+    if (!viewUrl) throw new Error('Share service returned an invalid public link.');
+    ensureStyle();
+    const existing = document.querySelector('.xa-share-result');
+    if (existing) existing.remove();
+
+    const backdrop = document.createElement('div');
+    backdrop.className = 'xa-modal-backdrop xa-share-result';
+    const modal = document.createElement('div');
+    modal.className = 'xa-modal';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-labelledby', 'xa-share-title');
+    const title = document.createElement('h2');
+    title.id = 'xa-share-title';
+    title.textContent = 'Share link ready';
+    const status = document.createElement('p');
+    status.className = 'xa-share-status';
+    status.textContent = copied
+      ? 'Copied to your clipboard.'
+      : 'Chrome could not copy automatically. Use Copy link below.';
+    const label = document.createElement('label');
+    label.setAttribute('for', 'xa-share-url');
+    label.textContent = 'SourceCapsule link';
+    const input = document.createElement('input');
+    input.id = 'xa-share-url';
+    input.className = 'xa-share-url';
+    input.type = 'text';
+    input.readOnly = true;
+    input.value = viewUrl;
+    const actions = document.createElement('div');
+    actions.className = 'xa-modal-actions';
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'xa-modal-cancel';
+    closeButton.textContent = 'Close';
+    const copyButton = document.createElement('button');
+    copyButton.type = 'button';
+    copyButton.className = 'xa-share-copy';
+    copyButton.textContent = 'Copy link';
+    const openLink = document.createElement('a');
+    openLink.className = 'xa-modal-open';
+    openLink.href = viewUrl;
+    openLink.target = '_blank';
+    openLink.rel = 'noopener';
+    openLink.textContent = 'Open link';
+    actions.append(closeButton, copyButton, openLink);
+    modal.append(title, status, label, input, actions);
+    backdrop.appendChild(modal);
+
+    const close = () => backdrop.remove();
+    closeButton.addEventListener('click', close);
+    copyButton.addEventListener('click', async () => {
+      try {
+        await copyText(viewUrl);
+        status.textContent = 'Copied to your clipboard.';
+      } catch {
+        input.focus();
+        input.select();
+        status.textContent = 'Copy was blocked. The link is selected; press Ctrl+C.';
+      }
+    });
+    backdrop.addEventListener('click', (event) => {
+      if (event.target === backdrop) close();
+    });
+    document.body.appendChild(backdrop);
+    input.focus();
+    input.select();
   }
 
   function promptCaptureOptions({ share = false, saveLocal = false } = {}) {
@@ -5792,9 +5871,18 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
               sticky: true,
             })
         );
-        await copyText(created.viewUrl);
         rememberShareLink(created, model);
-        showToast(`Share link copied; expires ${readableUtcTime(created.expiresAt)}`);
+        let copied = false;
+        try {
+          await copyText(created.viewUrl);
+          copied = true;
+        } catch (copyError) {
+          warn('share link created but automatic clipboard copy failed:', copyError.message);
+        }
+        showShareResult(created, { copied });
+        showToast(
+          `Share link ready; expires ${readableUtcTime(created.expiresAt)}${copied ? ' (copied)' : ''}`
+        );
       };
       if (outputType === 'library-share') {
         await saveToLibrary(model, debugJson, libraryRoot);
@@ -6335,6 +6423,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       updateLibraryIndexText,
       renderArchiveManifestJson,
       EXPORT_TYPES,
+      showShareResult,
       handleFromSourceUrl,
       escapeHtml,
       safeUrl,
