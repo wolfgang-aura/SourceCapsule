@@ -4276,7 +4276,8 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
             reject(new Error(`Share service returned HTTP ${response.status}.`));
           }
         },
-        onerror: () => reject(new Error('Share service network error.')),
+        onerror: (event) =>
+          reject(new Error((event && event.error) || 'Share service network error.')),
         ontimeout: () => reject(new Error(`Share service timed out after ${timeoutMs}ms.`)),
       });
     });
