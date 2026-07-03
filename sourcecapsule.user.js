@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         SourceCapsule - X Article/Post -> self-contained HTML
+// @name         SourceCapsule - Save X/Twitter Threads & Articles as Markdown for LLMs + Offline HTML
 // @namespace    https://github.com/wolfgang-aura/SourceCapsule
 // @version      1.2.0
-// @description  Save a full X thread, Article, or post as an offline archive, agent-ready Markdown, or an expiring share link. Media and quoted posts are preserved with honest completeness reporting.
+// @description  One click saves an X (Twitter) thread, Article, or post as clean Markdown for LLM context (Claude, ChatGPT) plus a self-contained offline HTML archive - images, video, and quoted posts embedded, with honest completeness reporting. Local-first, with optional expiring share links.
 // @author       wolfgang-aura
 // @license      MIT
 // @match        https://x.com/*
