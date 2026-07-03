@@ -1,11 +1,39 @@
 # SourceCapsule
 
-Save an X post, thread, or Article as a durable offline archive, an agent-ready folder, or a
-temporary link you can give to an LLM.
+**Save X/Twitter threads & Articles as clean Markdown for LLMs — plus a one-file offline HTML
+archive.**
 
-> Development status: **v1.2.0 is ready for local testing.** The public install link still follows
-> the latest version on `main`; do not publish this release until the manual X and Chrome checks
-> below pass.
+One click on a post, thread, or Article produces an agent-ready folder: a clean `.llm.md` you can
+paste straight into Claude or ChatGPT, the real image files it references, and a self-contained
+`.html` that opens fully offline with media and quoted posts inlined. No screenshots, no
+copy-paste mangling, no dead links when the thread disappears.
+
+<!-- TODO(demo): 20-second demo GIF goes here. Flow: open a thread -> click "Save thread" ->
+     show the saved folder -> drag the .llm.md into Claude. Save the recording as docs/demo.gif
+     and replace this comment with:
+![Demo: X thread to LLM-ready context in one click](docs/demo.gif)
+-->
+
+**Why this instead of copy-paste or screenshots?**
+
+- **LLMs read text, not pixels.** You get Markdown in reading order with author, timestamps, and
+  the source URL — plus real image files an agent can actually look at.
+- **Threads resist copying.** X virtualizes long threads and lazy-loads media; SourceCapsule
+  scrolls, captures, and reports honestly what it got (and what it could not get).
+- **It archives, not just extracts.** The same click yields a self-contained offline HTML file
+  with images, inline video, and quoted posts embedded — still readable in ten years.
+
+## Install (30 seconds)
+
+1. Install [Tampermonkey](https://www.tampermonkey.net/) or Violentmonkey.
+2. Install SourceCapsule from
+   [Greasy Fork](https://greasyfork.org/en/scripts/584577-sourcecapsule-x-article-post-self-contained-html)
+   (auto-updates), or open
+   [sourcecapsule.user.js](https://raw.githubusercontent.com/wolfgang-aura/SourceCapsule/main/sourcecapsule.user.js)
+   and click **Install**.
+3. Open any post, thread, or Article on x.com and click **Save thread** / **Save article**.
+
+The source file is also the shipped artifact: plain JavaScript, no production build step.
 
 ## What is new in v1.2
 
@@ -24,16 +52,6 @@ The product remains local-first. Nothing is uploaded until you explicitly choose
 or **Save locally + share with AI** and confirm the expiry. In the combined flow, the local copy is
 completed first, so an upload failure cannot take it away. Shared capsules exclude raw video, are
 capped at 25 MB, and retain source links when media cannot be included.
-
-## Install the userscript
-
-1. Install Tampermonkey or Violentmonkey.
-2. Open
-   [sourcecapsule.user.js](https://raw.githubusercontent.com/wolfgang-aura/SourceCapsule/main/sourcecapsule.user.js).
-3. Click **Install**.
-4. Open a post, thread, or Article on x.com.
-
-The source file is also the shipped artifact: plain JavaScript, no production build step.
 
 ## Use it
 
