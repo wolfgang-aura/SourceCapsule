@@ -14,6 +14,10 @@ Thumbs.db
 # Local exports produced while testing the userscript
 *.export.html
 exports/
+dist/
+share-worker/.wrangler/
+probe-results/
+.env.local
 
 # Local cross-session working notes (kept on-machine, not published)
 SESSION_HANDOFF.md

@@ -6,7 +6,34 @@ const globals = require('globals');
 module.exports = [
   {
     // Ignore dependency + generated output.
-    ignores: ['node_modules/**', '*.export.html', 'exports/**'],
+    ignores: [
+      'node_modules/**',
+      'dist/**',
+      'share-worker/.wrangler/**',
+      '*.export.html',
+      'exports/**',
+    ],
+  },
+  {
+    // Chrome extension source uses both web page and WebExtension APIs.
+    files: ['extension-src/**/*.js'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'script',
+      globals: {
+        ...globals.browser,
+        ...globals.webextensions,
+      },
+    },
+  },
+  {
+    // Cloudflare Workers expose service-worker style Web APIs.
+    files: ['share-worker/**/*.mjs'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'module',
+      globals: { ...globals.serviceworker },
+    },
   },
   js.configs.recommended,
   {
@@ -46,7 +73,7 @@ module.exports = [
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'module',
-      globals: { ...globals.node },
+      globals: { ...globals.node, ...globals.browser },
     },
   },
 ];
