@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         SourceCapsule - X Article/Post -> self-contained HTML
+// @name         SourceCapsule - Save X/Twitter Threads & Articles as Markdown for LLMs + Offline HTML
 // @namespace    https://github.com/wolfgang-aura/SourceCapsule
-// @version      1.1.1
-// @description  Export an X (Twitter) Article or post to a self-contained, fully-offline HTML file (images, inline videos, quoted tweets embedded) plus a clean LLM-readable Markdown companion. Per-post Export buttons; choose HTML, Markdown, or both.
+// @version      1.2.0
+// @description  One click saves an X (Twitter) thread, Article, or post as clean Markdown for LLM context (Claude, ChatGPT) plus a self-contained offline HTML archive - images, video, and quoted posts embedded, with honest completeness reporting. Local-first, with optional expiring share links.
 // @author       wolfgang-aura
 // @license      MIT
 // @match        https://x.com/*
@@ -20,6 +20,10 @@
 // @connect      cdn.syndication.twimg.com
 // @connect      x.com
 // @connect      twitter.com
+// @connect      127.0.0.1
+// @connect      localhost
+// @connect      share.sourcecapsule.app
+// @connect      sourcecapsule-share.wolfgang-aura.workers.dev
 // @run-at       document-start
 // @noframes
 // @downloadURL  https://raw.githubusercontent.com/wolfgang-aura/SourceCapsule/main/sourcecapsule.user.js
@@ -87,6 +91,11 @@
       ],
       // Video container within a tweet.
       videoPlayer: ['div[data-testid="videoPlayer"]', 'div[data-testid="videoComponent"]'],
+      // External link-preview card within a tweet (the payload of a link post).
+      card: ['div[data-testid="card.wrapper"]', 'a[data-testid="card.wrapper"]'],
+      // "Show more" link X renders on long-form (note) posts in timeline views;
+      // its presence means the visible text is only a preview.
+      showMore: ['[data-testid="tweet-text-show-more-link"]'],
       // Time element (carries the canonical permalink).
       timeLink: ['a[href*="/status/"] time'],
       // Long-form Article rich-text root.
@@ -138,10 +147,19 @@
     // to get its authoritative text + media, instead of scraping the fragile,
     // virtualized article DOM. This is what makes quote media reliably correct.
     useSyndication: true,
+    share: {
+      // Hosted share service (Cloudflare Worker + R2). Point this at a local
+      // `npm run dev:share` (http://127.0.0.1:8787) through the userscript-manager
+      // menu when developing; new hosts also need an @connect grant above.
+      defaultApiBase: 'https://sourcecapsule-share.wolfgang-aura.workers.dev',
+      maxBytes: 25 * 1024 * 1024,
+      expiryDays: [1, 7, 30],
+      defaultExpiryDays: 7,
+    },
   };
 
   const APP = 'SourceCapsule';
-  const VERSION = '1.1.1';
+  const VERSION = '1.2.0';
 
   // ===========================================================================
   // Small utilities
@@ -775,6 +793,86 @@
     return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   }
 
+  function normalizeTags(value) {
+    const input = Array.isArray(value) ? value : String(value || '').split(',');
+    const seen = new Set();
+    return input
+      .map((tag) =>
+        String(tag || '')
+          .trim()
+          .replace(/^#+/, '')
+          .replace(/\s+/g, '-')
+      )
+      .filter((tag) => {
+        const key = tag.toLowerCase();
+        if (!tag || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .slice(0, 20);
+  }
+
+  function applyCaptureMetadata(model, metadata = {}) {
+    model.userNote = String(metadata.note || '')
+      .trim()
+      .slice(0, 2000);
+    model.tags = normalizeTags(metadata.tags);
+    return model;
+  }
+
+  function libraryIndexEntry(model, paths, stats) {
+    const id = statusIdFromSourceUrl(model.sourceUrl) || slugify(model.title || 'capture');
+    const relativePath = [...paths.segments, `${paths.postName}.llm.md`].join('/');
+    return {
+      id,
+      title: markdownLineText(model.heading || model.title || 'X capture'),
+      author: markdownLineText(
+        [model.author && model.author.name, model.author && model.author.handle]
+          .filter(Boolean)
+          .join(' ')
+      ),
+      type: model.thread ? `thread (${model.thread.capturedPosts} posts)` : model.type || 'post',
+      sourceUrl: model.sourceUrl || '',
+      savedAt: safeIsoTime(model.exportedAt),
+      path: relativePath,
+      note: markdownLineText(model.userNote || ''),
+      tags: normalizeTags(model.tags),
+      capture: `${stats.images} image(s), ${stats.videos} video(s), ${stats.incompleteMedia} incomplete, ${stats.missingMedia} missing`,
+    };
+  }
+
+  function renderLibraryIndexItem(entry) {
+    const lines = [
+      `<!-- sourcecapsule:item:${entry.id} -->`,
+      `## ${entry.title || 'X capture'}`,
+      '',
+      `- ID: ${entry.id}`,
+      `- Type: ${entry.type}`,
+      `- Author: ${entry.author || 'Unknown'}`,
+      `- Source: ${entry.sourceUrl}`,
+      `- Saved: ${entry.savedAt}`,
+      `- File: ${entry.path}`,
+      `- Capture: ${entry.capture}`,
+    ];
+    if (entry.tags && entry.tags.length) lines.push(`- Tags: ${entry.tags.join(', ')}`);
+    if (entry.note) lines.push(`- Saved because: ${entry.note}`);
+    lines.push('', `<!-- /sourcecapsule:item:${entry.id} -->`);
+    return lines.join('\n');
+  }
+
+  function updateLibraryIndexText(existing, entry) {
+    const header = '# SourceCapsule Library Index\n\n<!-- sourcecapsule:index:v1 -->\n';
+    const current = String(existing || '').trim() || header.trim();
+    const escapedId = String(entry.id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const pattern = new RegExp(
+      `<!-- sourcecapsule:item:${escapedId} -->[\\s\\S]*?<!-- /sourcecapsule:item:${escapedId} -->`,
+      'g'
+    );
+    const item = renderLibraryIndexItem(entry);
+    if (pattern.test(current)) return `${current.replace(pattern, item).trim()}\n`;
+    return `${current.trim()}\n\n${item}\n`;
+  }
+
   // ---------------------------------------------------------------------------
   // Store-only ZIP writer (no dependency). Used only as the fallback delivery on
   // browsers without the File System Access API. Media is already compressed, so
@@ -1314,9 +1412,26 @@
     };
   }
 
+  function threadTweetCandidates(column) {
+    const byId = new Map();
+    topLevelTweetEls(column).forEach((tweet) => {
+      const id = tweetStatusId(tweet);
+      if (id) byId.set(id, { tweet, y: absY(tweet) });
+    });
+    harvestedTweets.forEach((snapshot, id) => {
+      if (!byId.has(id)) byId.set(id, snapshot);
+    });
+    return Array.from(byId.values())
+      .sort((a, b) => a.y - b.y)
+      .map((item) => item.tweet);
+  }
+
   function buildTweetSequence(column, focusedTweet) {
-    const tweets = topLevelTweetEls(column);
-    const startIndex = tweets.indexOf(focusedTweet);
+    const tweets = threadTweetCandidates(column);
+    const focusedId = tweetStatusId(focusedTweet);
+    const startIndex = tweets.findIndex(
+      (tweet) => tweet === focusedTweet || (focusedId && tweetStatusId(tweet) === focusedId)
+    );
     if (startIndex < 0) return [focusedTweet];
 
     const focusedAuthor = extractAuthor(focusedTweet);
@@ -1932,6 +2047,38 @@
   }
 
   /** Build a partial model (author + content blocks) from one tweet element. */
+  /**
+   * Extract a link-preview card (X's rendering of an external link). For a link
+   * post the card IS the payload - X strips the URL from the visible text, so
+   * dropping the card loses the very link the post exists to share. The href is
+   * often the t.co short form here; syndication enrichment upgrades it to the
+   * expanded URL when available.
+   */
+  function extractLinkCard(tweetEl, quoteEls, sourceUrl) {
+    const cardEl = pickAllMatchesIncludingRoot(tweetEl, CONFIG.selectors.card).find(
+      (el) => !quoteEls.some((quoteEl) => quoteEl.contains(el))
+    );
+    if (!cardEl) return null;
+    const anchor = cardEl.matches('a[href]') ? cardEl : cardEl.querySelector('a[href]');
+    const url = anchor ? safeUrl(anchor.href) : '';
+    if (!url) return null;
+    // Leaf-element texts (innerText line splitting is unreliable across DOMs).
+    const lines = Array.from(cardEl.querySelectorAll('span,div'))
+      .filter((el) => !el.children.length)
+      .map((el) => (el.textContent || '').trim())
+      .filter(Boolean);
+    const domainLine = lines.find((line) => /^from\s+\S/i.test(line)) || '';
+    const title =
+      lines.filter((line) => line !== domainLine).sort((a, b) => b.length - a.length)[0] || '';
+    return {
+      kind: 'link-card',
+      url,
+      title,
+      domain: domainLine.replace(/^from\s+/i, ''),
+      sourceUrl,
+    };
+  }
+
   function buildTweetBlocks(tweetEl, { quoteDepth = 2 } = {}) {
     const quoteEls = quoteDepth > 0 ? findQuotedTweetEls(tweetEl) : [];
     const blocks = [];
@@ -1951,6 +2098,15 @@
     // was virtualized out of the DOM by extraction time.
     harvestedImagesForStatus(tweetStatusId(tweetEl)).forEach((b) => blocks.push(b));
 
+    const card = extractLinkCard(tweetEl, quoteEls, sourceUrl);
+    if (card) blocks.push(card);
+
+    // A "Show more" link on the post's own text means X is only showing a
+    // long-form preview; the export must say so rather than pass it off as full.
+    const textTruncated = pickAllMatchesIncludingRoot(tweetEl, CONFIG.selectors.showMore).some(
+      (el) => !quoteEls.some((quoteEl) => quoteEl.contains(el))
+    );
+
     quoteEls.forEach((quoteEl) => {
       const qAuthor = extractAuthor(quoteEl);
       const qBlocks = buildTweetBlocks(quoteEl, { quoteDepth: quoteDepth - 1 }).blocks;
@@ -1964,7 +2120,7 @@
       });
     });
 
-    return { author: extractAuthor(tweetEl), blocks };
+    return { author: extractAuthor(tweetEl), blocks, textTruncated };
   }
 
   /** Build the model for a single post page. */
@@ -2016,17 +2172,48 @@
   // `targetTweetEl` lets a per-post Export button export exactly the post it sits on
   // (and that post's own nested quotes) instead of the page's focused status. Without it,
   // behavior is unchanged: find the focused status and include its same-author thread run.
-  function buildModelForPost(targetTweetEl = null) {
+  function buildModelForPost(targetTweetEl = null, { includeThread = !targetTweetEl } = {}) {
     capturedImageUrls = new Set();
     const column = pick(document, CONFIG.selectors.primaryColumn) || document.body;
-    const tweetEl = targetTweetEl || findTweetForCurrentStatus(column);
+    const targetStatusId = targetTweetEl ? tweetStatusId(targetTweetEl) : currentStatusId();
+    const candidates = includeThread ? threadTweetCandidates(column) : [];
+    const tweetEl =
+      (targetStatusId && candidates.find((tweet) => tweetStatusId(tweet) === targetStatusId)) ||
+      targetTweetEl ||
+      findTweetForCurrentStatus(column);
     if (!tweetEl) {
       throw new Error('Could not find the post on this page (selector miss).');
     }
-    const tweetEls = targetTweetEl ? [tweetEl] : buildTweetSequence(column, tweetEl);
+    const tweetEls = includeThread ? buildTweetSequence(column, tweetEl) : [tweetEl];
     const tweetParts = tweetEls.map((t) => buildTweetBlocks(t, { quoteDepth: 2 }));
     const author = tweetParts[0].author;
-    const blocks = dedupeQuoteCards(tweetParts.flatMap((part) => part.blocks));
+    const threadPosts = tweetEls.map((tweet, index) => {
+      const statusId = tweetStatusId(tweet);
+      return {
+        index: index + 1,
+        statusId,
+        sourceUrl: canonicalUrl(tweet, statusId),
+        publishedAt: publishedAtFromElement(tweet, statusId),
+      };
+    });
+    const combinedBlocks = [];
+    tweetParts.forEach((part, index) => {
+      if (tweetParts.length > 1) {
+        combinedBlocks.push({
+          kind: 'thread-marker',
+          ...threadPosts[index],
+          total: tweetParts.length,
+        });
+      }
+      combinedBlocks.push(...part.blocks);
+      if (part.textTruncated) {
+        combinedBlocks.push({
+          kind: 'truncation-notice',
+          sourceUrl: threadPosts[index].sourceUrl,
+        });
+      }
+    });
+    const blocks = dedupeQuoteCards(combinedBlocks);
     if (!blocks.some((b) => b.kind === 'paragraph')) {
       warn('post has no text paragraph - tweetText selector may be stale');
     }
@@ -2047,6 +2234,13 @@
       exportedAt: new Date().toISOString(),
       blocks,
     };
+    if (threadPosts.length > 1) {
+      model.thread = {
+        capturedPosts: threadPosts.length,
+        sourcePostIds: threadPosts.map((post) => post.statusId).filter(Boolean),
+        completeness: 'best-effort',
+      };
+    }
     if (CONFIG.debugEmbed) {
       model._debug = collectPostDebug(column, tweetEl, tweetEls, model);
     }
@@ -2761,6 +2955,35 @@
       }
       case 'divider':
         return '<hr class="xa-divider">';
+      case 'thread-marker': {
+        const source = safeUrl(b.sourceUrl || '');
+        const label = `Post ${b.index || '?'} of ${b.total || '?'}`;
+        const published = safeIsoTime(b.publishedAt)
+          ? `<time datetime="${escapeAttr(safeIsoTime(b.publishedAt))}">${escapeHtml(
+              readableUtcTime(b.publishedAt)
+            )}</time>`
+          : '';
+        return `<div class="xa-thread-marker"><strong>${escapeHtml(label)}</strong>${
+          source
+            ? `<a href="${escapeAttr(source)}" target="_blank" rel="noopener noreferrer">Open on X</a>`
+            : ''
+        }${published}</div>`;
+      }
+      case 'link-card': {
+        const cardUrl = safeUrl(b.url);
+        if (!cardUrl) return '';
+        const domain = b.domain || urlHostname(cardUrl);
+        const title = b.title && b.title !== domain ? b.title : '';
+        return `<a class="xa-card-link" href="${escapeAttr(cardUrl)}" target="_blank" rel="noopener noreferrer"><span class="xa-card-title">${escapeHtml(
+          title || domain || cardUrl
+        )}</span><span class="xa-card-domain">${escapeHtml(domain || cardUrl)} &rarr;</span></a>`;
+      }
+      case 'truncation-notice':
+        return `<p class="xa-truncated" data-xa-truncated="1">&#9888; Long-form post &mdash; only the preview above was available at export; X did not expose the full text.${
+          safeUrl(b.sourceUrl)
+            ? ` <a href="${escapeHtml(safeUrl(b.sourceUrl))}" target="_blank" rel="noopener noreferrer">Read the full post on X &rarr;</a>`
+            : ''
+        }</p>`;
       case 'code':
         return `<pre class="xa-code"><code>${escapeHtml(b.text)}</code></pre>`;
       case 'blockquote':
@@ -2898,6 +3121,8 @@
         if (b.kind === 'heading') {
           stats.headings += 1;
           stats.mainTextCaptured = stats.mainTextCaptured || !!String(b.text || '').trim();
+        } else if (b.kind === 'thread-marker') {
+          if (b.sourceUrl) stats.sourceLinks.add(b.sourceUrl);
         } else if (b.kind === 'paragraph') {
           stats.paragraphs += 1;
           stats.mainTextCaptured = stats.mainTextCaptured || !!textFromHtml(b.html);
@@ -3077,6 +3302,10 @@
         hashedMedia: stats.hashedMedia,
         duplicateMedia: stats.duplicateMedia.length,
         sourceLinks: stats.sourceLinks,
+        threadPosts: model.thread ? model.thread.capturedPosts : 1,
+        threadCompleteness: model.thread ? model.thread.completeness : 'single-post',
+        note: String(model.userNote || ''),
+        tags: Array.isArray(model.tags) ? model.tags : [],
       },
       media: stats.media,
       missing: stats.missing,
@@ -3218,7 +3447,11 @@
     add(model.sourceUrl);
     const walk = (blocks) => {
       (blocks || []).forEach((b) => {
-        if (b.kind === 'paragraph') {
+        if (b.kind === 'thread-marker') {
+          add(b.sourceUrl);
+        } else if (b.kind === 'link-card') {
+          add(b.url);
+        } else if (b.kind === 'paragraph') {
           hrefsFromHtml(b.html).forEach(add);
         } else if (b.kind === 'list') {
           (b.items || []).forEach((item) => hrefsFromHtml(item).forEach(add));
@@ -3480,6 +3713,11 @@
         }
       } else if (b.kind === 'divider') {
         lines.push('---');
+      } else if (b.kind === 'thread-marker') {
+        lines.push(markdownHeading(3, `Post ${b.index || '?'} of ${b.total || '?'}`));
+        if (b.sourceUrl) lines.push(`Source: ${b.sourceUrl}`);
+        if (safeIsoTime(b.publishedAt))
+          lines.push(`Published at: ${readableUtcTime(b.publishedAt)}`);
       } else if (b.kind === 'code') {
         lines.push(markdownFence(b.text, b.language));
       } else if (b.kind === 'list') {
@@ -3501,6 +3739,13 @@
               return selfNumbered ? item : `${index + 1}. ${item}`;
             })
             .join('\n')
+        );
+      } else if (b.kind === 'link-card') {
+        const label = b.title || b.domain || b.url;
+        lines.push(`[Link card] ${markdownLineText(label)}: ${b.url}`);
+      } else if (b.kind === 'truncation-notice') {
+        lines.push(
+          'Warning: This is a long-form post and only its preview text was available at export time. The full text is NOT included; open the post source URL above to read it in full.'
         );
       } else if (b.kind === 'blockquote') {
         const inner = renderLlmBlocks(b.blocks, options);
@@ -3697,11 +3942,16 @@
           `Author: ${derived} (handle derived from the source URL; display name not captured)`
         );
     }
-    const companionNote = llmMediaFiles
-      ? 'The images and video poster frames are included as separate files in the media/ folder next to this markdown. Attach them to your LLM together with this file. Full videos are NOT included (an LLM cannot watch them); each video provides its poster frame and source link instead.'
-      : llmCompanionHtml
-        ? `The media bytes are embedded (base64) inside the companion file ${llmCompanionHtml}, downloaded alongside this markdown. If you also have that file, the media is available there; if you only have this markdown, it is not.`
-        : 'This was a Markdown-only export, so the media bytes were not saved to any file. Only the metadata and the original source URLs below remain; use those URLs to retrieve the media from the source.';
+    if (model.userNote) lines.push(`Saved because: ${markdownLineText(model.userNote)}`);
+    if (Array.isArray(model.tags) && model.tags.length)
+      lines.push(`Tags: ${model.tags.map(markdownLineText).join(', ')}`);
+    const companionNote = options.sharedLink
+      ? 'The images and video poster frames are hosted at the absolute media URLs referenced below. Full videos are NOT uploaded; each video provides its poster frame and original source link instead.'
+      : llmMediaFiles
+        ? 'The images and video poster frames are included as separate files in the media/ folder next to this markdown. Attach them to your LLM together with this file. Full videos are NOT included (an LLM cannot watch them); each video provides its poster frame and source link instead.'
+        : llmCompanionHtml
+          ? `The media bytes are embedded (base64) inside the companion file ${llmCompanionHtml}, downloaded alongside this markdown. If you also have that file, the media is available there; if you only have this markdown, it is not.`
+          : 'This was a Markdown-only export, so the media bytes were not saved to any file. Only the metadata and the original source URLs below remain; use those URLs to retrieve the media from the source.';
     lines.push(
       'Capture note: This file preserves content visible to the logged-in user at export time. It may not include unavailable, private, deleted, failed, or unloaded content.',
       '',
@@ -3740,7 +3990,7 @@
       lines.push('  - None');
     }
 
-    lines.push('', '---', '', '## Main Article', '');
+    lines.push('', '---', '', model.thread ? '## Full Thread' : '## Main Article', '');
     lines.push(
       renderLlmBlocks(model.blocks, {
         includeMedia: true,
@@ -3828,7 +4078,9 @@ ${READER_CSS}
 <body>
 <main class="xa-doc">
   <header class="xa-header">
-    <div class="xa-kicker">${model.type === 'article' ? 'X Article' : 'X Post'}</div>
+    <div class="xa-kicker">${
+      model.type === 'article' ? 'X Article' : model.thread ? 'X Thread' : 'X Post'
+    }</div>
     ${model.heading ? `<h1 class="xa-title">${escapeHtml(model.heading)}</h1>` : ''}
     ${renderAuthorLine(model.author)}
     <div class="xa-meta">
@@ -3848,6 +4100,19 @@ ${READER_CSS}
         exportedReadable
       )}</time></span>
     </div>
+${
+  model.userNote || (Array.isArray(model.tags) && model.tags.length)
+    ? `<div class="xa-saved-context">${
+        model.userNote
+          ? `<div><strong>Saved because</strong><p>${escapeHtml(model.userNote)}</p></div>`
+          : ''
+      }${
+        Array.isArray(model.tags) && model.tags.length
+          ? `<div><strong>Tags</strong><p>${model.tags.map(escapeHtml).join(', ')}</p></div>`
+          : ''
+      }</div>`
+    : ''
+}
   </header>
   ${renderCaptureSummary(stats)}
   <article class="xa-body">
@@ -3991,6 +4256,17 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
   background:rgba(255,180,0,.12);border:1px solid rgba(255,180,0,.35);color:var(--fg)}
 .xa-truncated a{color:var(--accent);text-decoration:none}
 .xa-quote-time{display:block;margin-top:8px;font-size:13px;color:var(--muted)}
+.xa-card-link{display:flex;flex-direction:column;gap:2px;margin:10px 0;padding:10px 14px;
+  border:1px solid var(--quoteline);border-radius:12px;background:var(--card);text-decoration:none;color:var(--fg)}
+.xa-card-link:hover{border-color:var(--accent)}
+.xa-card-title{font-weight:600;font-size:14px;word-break:break-word}
+.xa-card-domain{font-size:13px;color:var(--accent)}
+.xa-thread-marker{display:flex;align-items:center;gap:12px;margin:28px 0 12px;padding-top:18px;
+  border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
+.xa-thread-marker:first-child{margin-top:8px;border-top:0;padding-top:0}
+.xa-thread-marker a{color:var(--accent);text-decoration:none}.xa-thread-marker time{margin-left:auto}
+.xa-saved-context{display:grid;gap:8px;margin-top:16px;padding:12px 14px;border:1px solid var(--line);
+  border-radius:12px;background:var(--card);font-size:14px}.xa-saved-context p{margin:3px 0 0;color:var(--muted)}
 .xa-footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
 .xa-footer h2{font-size:15px;line-height:1.3;margin:0 0 10px;color:var(--fg)}
 .xa-footer dl{display:grid;gap:8px;margin:0 0 14px}
@@ -4031,6 +4307,171 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     }, 1500);
   }
 
+  async function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return;
+      } catch (error) {
+        warn('navigator clipboard unavailable; trying selection fallback:', error.message);
+      }
+    }
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.focus();
+    area.select();
+    const ok = typeof document.execCommand === 'function' && document.execCommand('copy');
+    area.remove();
+    if (!ok) throw new Error('Clipboard access was denied.');
+  }
+
+  function renderArchiveManifestJson(model, debugJson = '') {
+    prepareArchiveModel(model);
+    const documentLang = inferDocumentLang(model);
+    const stats = archiveStats(model);
+    return `${JSON.stringify(buildArchiveManifest(model, debugJson, stats, documentLang), null, 2)}\n`;
+  }
+
+  function gmHttp({ method = 'GET', url, headers = {}, body = null, timeoutMs = 30000 }) {
+    return new Promise((resolve, reject) => {
+      if (typeof GM_xmlhttpRequest !== 'function') {
+        reject(new Error('Privileged request API unavailable.'));
+        return;
+      }
+      const data =
+        body instanceof Uint8Array
+          ? body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength)
+          : body;
+      GM_xmlhttpRequest({
+        method,
+        url,
+        headers,
+        data,
+        responseType: 'text',
+        timeout: timeoutMs,
+        onload: (response) => {
+          if (response.status >= 200 && response.status < 300) {
+            resolve(response.responseText || '');
+          } else {
+            reject(new Error(`Share service returned HTTP ${response.status}.`));
+          }
+        },
+        onerror: (event) =>
+          reject(new Error((event && event.error) || 'Share service network error.')),
+        ontimeout: () => reject(new Error(`Share service timed out after ${timeoutMs}ms.`)),
+      });
+    });
+  }
+
+  function encodeSharePath(path) {
+    return String(path)
+      .split('/')
+      .map((part) => encodeURIComponent(part))
+      .join('/');
+  }
+
+  function applySharedMediaUrls(model, urlById) {
+    const walk = (blocks) => {
+      (blocks || []).forEach((block) => {
+        const url = block._xaMediaId && urlById.get(block._xaMediaId);
+        if (block.kind === 'image') {
+          block.dataUri = url || '';
+        } else if (block.kind === 'video') {
+          block.dataUri = '';
+          block.videoFileCaptured = false;
+          block.mode = url ? 'poster-only' : block.mode;
+          block.posterDataUri = url || '';
+        } else if (block.kind === 'quote' || block.kind === 'blockquote') {
+          walk(block.blocks);
+        }
+      });
+    };
+    walk(model.blocks);
+    return model;
+  }
+
+  async function createShareLink(model, debugJson, expiryDays, onProgress) {
+    const apiBase = getPrefs().shareApiBase.replace(/\/$/, '');
+    const { files, pathById } = collectBundleMediaFiles(model);
+    const mediaBytes = files.reduce((sum, file) => sum + file.bytes.byteLength, 0);
+    if (mediaBytes > CONFIG.share.maxBytes) {
+      throw new Error(
+        `Share media is ${humanBytes(mediaBytes)}; the current limit is ${humanBytes(CONFIG.share.maxBytes)}. Use the local archive for this capture.`
+      );
+    }
+    onProgress && onProgress('Creating private upload session...', 0, files.length + 3);
+    const created = JSON.parse(
+      await gmHttp({
+        method: 'POST',
+        url: `${apiBase}/api/capsules`,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expiryDays }),
+      })
+    );
+    if (!created.uploadUrl || !created.uploadToken || !created.viewUrl) {
+      throw new Error('Share service returned an invalid upload session.');
+    }
+    const publicMedia = new Map();
+    pathById.forEach((path, mediaId) => {
+      publicMedia.set(mediaId, `${created.viewUrl}/${path}`);
+    });
+    applySharedMediaUrls(model, publicMedia);
+    const markdown = renderLlmMarkdown(model, debugJson, {
+      mediaFiles: publicMedia,
+      sharedLink: true,
+    });
+    const html = assembleHtml(model, debugJson);
+    const manifest = renderArchiveManifestJson(model, debugJson);
+    const uploads = [
+      { name: 'content.html', data: html, type: 'text/html;charset=utf-8' },
+      { name: 'content.md', data: markdown, type: 'text/markdown;charset=utf-8' },
+      { name: 'manifest.json', data: manifest, type: 'application/json;charset=utf-8' },
+      ...files.map((file) => ({
+        name: file.name,
+        data: file.bytes,
+        type: file.mime || 'application/octet-stream',
+      })),
+    ];
+    const totalBytes = uploads.reduce(
+      (sum, upload) =>
+        sum +
+        (upload.data instanceof Uint8Array
+          ? upload.data.byteLength
+          : new TextEncoder().encode(upload.data).byteLength),
+      0
+    );
+    if (totalBytes > CONFIG.share.maxBytes) {
+      throw new Error(
+        `Share package is ${humanBytes(totalBytes)}; the current limit is ${humanBytes(CONFIG.share.maxBytes)}.`
+      );
+    }
+    let done = 0;
+    for (const upload of uploads) {
+      onProgress && onProgress(`Uploading ${upload.name}...`, done, uploads.length);
+      await gmHttp({
+        method: 'PUT',
+        url: `${created.uploadUrl}/${encodeSharePath(upload.name)}`,
+        headers: {
+          Authorization: `Bearer ${created.uploadToken}`,
+          'Content-Type': upload.type,
+        },
+        body: upload.data,
+        timeoutMs: 60000,
+      });
+      done += 1;
+    }
+    onProgress && onProgress('Publishing link...', done, uploads.length);
+    await gmHttp({
+      method: 'POST',
+      url: `${created.finalizeUrl}`,
+      headers: { Authorization: `Bearer ${created.uploadToken}` },
+    });
+    return created;
+  }
+
   // ===========================================================================
   // Library settings + persistent root folder (browser-only)
   // ---------------------------------------------------------------------------
@@ -4040,6 +4481,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
   // localStorage and are toggled from the userscript-manager menu - no in-app UI.
   // ===========================================================================
   const PREFS_KEY = 'sourcecapsule.prefs';
+  const SHARES_KEY = 'sourcecapsule.shares';
   const IDB_NAME = 'sourcecapsule';
   const IDB_STORE = 'handles';
   const ROOT_HANDLE_KEY = 'rootDir';
@@ -4053,9 +4495,15 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
         // The page-level draggable floating button is OFF by default; the inline per-post /
         // article-header Export buttons are the primary entry point.
         floatingButton: parsed.floatingButton === true,
+        shareApiBase: String(parsed.shareApiBase || CONFIG.share.defaultApiBase).replace(/\/$/, ''),
       };
     } catch {
-      return { layout: 'date', contents: 'full', floatingButton: false };
+      return {
+        layout: 'date',
+        contents: 'full',
+        floatingButton: false,
+        shareApiBase: CONFIG.share.defaultApiBase,
+      };
     }
   }
 
@@ -4067,6 +4515,37 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       errlog(e);
     }
     return next;
+  }
+
+  function getShareLinks() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(SHARES_KEY) || '[]');
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function rememberShareLink(created, model) {
+    const record = {
+      id: created.id,
+      viewUrl: created.viewUrl,
+      markdownUrl: created.markdownUrl,
+      deleteUrl: created.deleteUrl,
+      deleteToken: created.deleteToken || created.uploadToken,
+      expiresAt: created.expiresAt,
+      title: model.heading || model.title || 'X capture',
+      sourceUrl: model.sourceUrl || '',
+    };
+    try {
+      const next = [record, ...getShareLinks().filter((item) => item.id !== record.id)].slice(
+        0,
+        50
+      );
+      localStorage.setItem(SHARES_KEY, JSON.stringify(next));
+    } catch (e) {
+      errlog(e);
+    }
   }
 
   function idbOpen() {
@@ -4191,6 +4670,19 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       const handle = await getRootDir({ forcePick: true });
       showToast(handle ? `Export folder set: ${handle.name}` : 'Export folder unchanged');
     });
+    reg(`${APP}: Share service - ${prefs.shareApiBase} (click to change)`, () => {
+      const value = window.prompt('SourceCapsule share service URL', prefs.shareApiBase);
+      if (!value) return;
+      try {
+        const url = new URL(value);
+        if (!/^https?:$/.test(url.protocol)) throw new Error('Use an http(s) URL.');
+        const next = setPrefs({ shareApiBase: url.href.replace(/\/$/, '') });
+        showToast(`Share service: ${next.shareApiBase}`);
+        registerSettingsMenu();
+      } catch (e) {
+        showToast(`Invalid share service URL: ${e.message}`, { error: true });
+      }
+    });
   }
 
   // ===========================================================================
@@ -4217,12 +4709,16 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
 .xa-ctl-trigger:hover{background:#1a8cd8}
 .xa-ctl-trigger:active{transform:scale(.97)}
 .xa-ctl-trigger[disabled]{opacity:.7;cursor:default}
+.xa-ctl-options{margin-left:4px;padding:8px 9px;border:0;border-radius:999px;background:#1d9bf0;color:#fff;
+  font:700 12px/1 inherit;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.2)}
+.xa-ctl-options:hover{background:#1a8cd8}.xa-ctl-options[disabled]{opacity:.7;cursor:default}
 .xa-ctl-menu{position:absolute;display:flex;flex-direction:column;min-width:164px;padding:6px;
   border-radius:12px;background:#fff;box-shadow:0 8px 28px rgba(0,0,0,.28);z-index:100000}
 .xa-ctl-menu[hidden]{display:none}
 .xa-ctl-item{display:block;width:100%;text-align:left;padding:9px 12px;border:none;border-radius:8px;
   background:transparent;color:#0f1419;font:500 13px/1.2 inherit;cursor:pointer;white-space:nowrap}
 .xa-ctl-item:hover{background:#e8f5fd;color:#1d9bf0}
+.xa-ctl-sep{height:1px;margin:5px 10px;background:rgba(15,20,25,.12)}
 .xa-ctl-floating .xa-ctl-menu{right:0;bottom:calc(100% + 8px)}
 /* Per-post control. Primary placement is inline in the header, beside X's "..." menu /
    Subscribe; it falls back to an absolute overlay only when that header anchor isn't found. */
@@ -4233,6 +4729,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
    sits left of the "..." menu. */
 .${CONFIG.postControlClass}.xa-ctl-inline{position:static;display:inline-flex;align-items:center;margin-right:8px}
 .${CONFIG.postControlClass}.xa-ctl-inline .xa-ctl-trigger{opacity:1;font-size:14px;padding:7px 16px}
+.${CONFIG.postControlClass}.xa-ctl-inline .xa-ctl-options{padding:7px 8px}
 /* Absolute fallback (no header caret found): hover-reveal overlay below the header row. */
 .${CONFIG.postControlClass}:not(.xa-ctl-inline){position:absolute;top:52px;right:10px;z-index:50}
 .${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger{opacity:0;pointer-events:none}
@@ -4243,6 +4740,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   .xa-ctl-menu{background:#1f2733}
   .xa-ctl-item{color:#e7e9ea}
   .xa-ctl-item:hover{background:#16202b;color:#1d9bf0}
+  .xa-ctl-sep{background:rgba(231,233,234,.14)}
 }
 #${CONFIG.toastId}{position:fixed;right:20px;bottom:74px;z-index:99999;max-width:280px;
   padding:12px 14px;border-radius:12px;background:rgba(15,20,25,.95);color:#fff;
@@ -4250,6 +4748,22 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   box-shadow:0 6px 24px rgba(0,0,0,.35);opacity:0;transform:translateY(8px);transition:opacity .2s,transform .2s}
 #${CONFIG.toastId}.show{opacity:1;transform:none}
 #${CONFIG.toastId}.error{background:#b00020}
+.xa-modal-backdrop{position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;
+  padding:20px;background:rgba(0,0,0,.62);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.xa-modal{width:min(480px,100%);padding:20px;border-radius:16px;background:#fff;color:#0f1419;
+  box-shadow:0 20px 70px rgba(0,0,0,.45)}.xa-modal h2{margin:0 0 8px;font-size:20px}
+.xa-modal p{margin:0 0 14px;color:#536471}.xa-modal label{display:block;margin:12px 0 5px;font-weight:650}
+.xa-modal input,.xa-modal textarea,.xa-modal select{box-sizing:border-box;width:100%;padding:10px 11px;
+  border:1px solid #cfd9de;border-radius:9px;background:#fff;color:#0f1419;font:inherit}
+.xa-modal textarea{min-height:82px;resize:vertical}.xa-modal-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:18px}
+.xa-modal button{padding:9px 14px;border:0;border-radius:999px;font:650 14px/1 inherit;cursor:pointer}
+.xa-modal-cancel{background:#eff3f4;color:#0f1419}.xa-modal-submit,.xa-modal-open{background:#1d9bf0;color:#fff}
+.xa-modal-open{display:inline-flex;align-items:center;padding:9px 14px;border-radius:999px;
+  font:650 14px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;text-decoration:none}
+.xa-share-url{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.xa-share-status{min-height:20px}
+@media (prefers-color-scheme:dark){.xa-modal{background:#15202b;color:#e7e9ea}.xa-modal p{color:#8b98a5}
+  .xa-modal input,.xa-modal textarea,.xa-modal select{background:#1f2733;color:#e7e9ea;border-color:#536471}
+  .xa-modal-cancel{background:#273340;color:#e7e9ea}}
 `;
     (document.head || document.documentElement).appendChild(s);
   }
@@ -4271,6 +4785,135 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     }
   }
 
+  function showShareResult(created, { copied = false } = {}) {
+    const viewUrl = safeUrl(created && created.viewUrl);
+    if (!viewUrl) throw new Error('Share service returned an invalid public link.');
+    ensureStyle();
+    const existing = document.querySelector('.xa-share-result');
+    if (existing) existing.remove();
+
+    const backdrop = document.createElement('div');
+    backdrop.className = 'xa-modal-backdrop xa-share-result';
+    const modal = document.createElement('div');
+    modal.className = 'xa-modal';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-labelledby', 'xa-share-title');
+    const title = document.createElement('h2');
+    title.id = 'xa-share-title';
+    title.textContent = 'Share link ready';
+    const status = document.createElement('p');
+    status.className = 'xa-share-status';
+    status.textContent = copied
+      ? 'Copied to your clipboard.'
+      : 'Chrome could not copy automatically. Use Copy link below.';
+    const label = document.createElement('label');
+    label.setAttribute('for', 'xa-share-url');
+    label.textContent = 'SourceCapsule link';
+    const input = document.createElement('input');
+    input.id = 'xa-share-url';
+    input.className = 'xa-share-url';
+    input.type = 'text';
+    input.readOnly = true;
+    input.value = viewUrl;
+    const actions = document.createElement('div');
+    actions.className = 'xa-modal-actions';
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'xa-modal-cancel';
+    closeButton.textContent = 'Close';
+    const copyButton = document.createElement('button');
+    copyButton.type = 'button';
+    copyButton.className = 'xa-share-copy';
+    copyButton.textContent = 'Copy link';
+    const openLink = document.createElement('a');
+    openLink.className = 'xa-modal-open';
+    openLink.href = viewUrl;
+    openLink.target = '_blank';
+    openLink.rel = 'noopener';
+    openLink.textContent = 'Open link';
+    actions.append(closeButton, copyButton, openLink);
+    modal.append(title, status, label, input, actions);
+    backdrop.appendChild(modal);
+
+    const close = () => backdrop.remove();
+    closeButton.addEventListener('click', close);
+    copyButton.addEventListener('click', async () => {
+      try {
+        await copyText(viewUrl);
+        status.textContent = 'Copied to your clipboard.';
+      } catch {
+        input.focus();
+        input.select();
+        status.textContent = 'Copy was blocked. The link is selected; press Ctrl+C.';
+      }
+    });
+    backdrop.addEventListener('click', (event) => {
+      if (event.target === backdrop) close();
+    });
+    document.body.appendChild(backdrop);
+    input.focus();
+    input.select();
+  }
+
+  function promptCaptureOptions({ share = false, saveLocal = false } = {}) {
+    ensureStyle();
+    return new Promise((resolve) => {
+      const backdrop = document.createElement('div');
+      backdrop.className = 'xa-modal-backdrop';
+      backdrop.innerHTML = `<form class="xa-modal" role="dialog" aria-modal="true" aria-labelledby="xa-modal-title">
+        <h2 id="xa-modal-title">${share ? (saveLocal ? 'Save + share with AI' : 'Share with AI') : 'Add context'}</h2>
+        <p>${
+          share
+            ? `${saveLocal ? 'A local library copy is saved first. ' : ''}This also creates an unlisted public link. Anyone with the link can view it. Full video files are not uploaded.`
+            : 'Optional: record why this source matters so you and your agents remember later.'
+        }</p>
+        <label for="xa-note">Why are you saving this?</label>
+        <textarea id="xa-note" maxlength="2000" placeholder="Example: Compare this with our Malaysia pricing research"></textarea>
+        <label for="xa-tags">Tags</label>
+        <input id="xa-tags" maxlength="300" placeholder="fintech, malaysia, pricing">
+        ${
+          share
+            ? `<label for="xa-expiry">Link expires after</label><select id="xa-expiry">${CONFIG.share.expiryDays
+                .map(
+                  (days) =>
+                    `<option value="${days}" ${days === CONFIG.share.defaultExpiryDays ? 'selected' : ''}>${days} day${days === 1 ? '' : 's'}</option>`
+                )
+                .join('')}</select>`
+            : ''
+        }
+        <div class="xa-modal-actions"><button type="button" class="xa-modal-cancel">Cancel</button><button type="submit" class="xa-modal-submit">${share ? (saveLocal ? 'Save + create link' : 'Create link') : 'Continue'}</button></div>
+      </form>`;
+      const form = backdrop.querySelector('form');
+      const note = backdrop.querySelector('#xa-note');
+      const tags = backdrop.querySelector('#xa-tags');
+      const finish = (value) => {
+        document.removeEventListener('keydown', onKeyDown, true);
+        backdrop.remove();
+        resolve(value);
+      };
+      const onKeyDown = (event) => {
+        if (event.key === 'Escape') finish(null);
+      };
+      backdrop.querySelector('.xa-modal-cancel').addEventListener('click', () => finish(null));
+      backdrop.addEventListener('click', (event) => {
+        if (event.target === backdrop) finish(null);
+      });
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        const expiry = backdrop.querySelector('#xa-expiry');
+        finish({
+          note: note.value,
+          tags: normalizeTags(tags.value),
+          expiryDays: expiry ? Number(expiry.value) : undefined,
+        });
+      });
+      document.addEventListener('keydown', onKeyDown, true);
+      document.body.appendChild(backdrop);
+      note.focus();
+    });
+  }
+
   // ===========================================================================
   // PROGRESSIVE MEDIA HARVEST
   // ---------------------------------------------------------------------------
@@ -4281,6 +4924,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   // owning tweet's status id, then merge that harvest back into the model.
   // ===========================================================================
   const harvestedMedia = new Map(); // url -> { url, ownerStatusId, alt, y }
+  const harvestedTweets = new Map(); // status id -> { tweet: detached clone, y }
   const harvestedVideoCandidates = [];
   const harvestedVideoUrls = new Set();
   const capturedNetworkVideoCandidates = [];
@@ -4304,6 +4948,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 
   function resetMediaState() {
     harvestedMedia.clear();
+    harvestedTweets.clear();
     harvestedVideoCandidates.length = 0;
     harvestedVideoUrls.clear();
     pageScriptVideoCandidatesScanned = false;
@@ -4366,6 +5011,20 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   }
 
   function harvestMediaNow() {
+    topLevelTweetEls(document).forEach((tweet) => {
+      const statusId = tweetStatusId(tweet);
+      if (!statusId) return;
+      const clone = tweet.cloneNode(true);
+      clone.querySelectorAll(`.${CONFIG.postControlClass}`).forEach((control) => control.remove());
+      const y = absY(tweet);
+      const existing = harvestedTweets.get(statusId);
+      if (
+        !existing ||
+        elementTextPreview(clone).length >= elementTextPreview(existing.tweet).length
+      ) {
+        harvestedTweets.set(statusId, { tweet: clone, y: existing ? Math.min(existing.y, y) : y });
+      }
+    });
     document.querySelectorAll('img').forEach((img) => {
       const src = img.currentSrc || img.src || '';
       if (!src.includes('pbs.twimg.com/media/')) return;
@@ -4596,11 +5255,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * content (article/column) so it does not drag into the replies/comments.
    * Best-effort; never throws.
    */
-  async function forceLoadMedia(container, onTick) {
+  async function forceLoadMedia(container, onTick, { fromTop = false } = {}) {
     try {
       const scroller = document.scrollingElement || document.documentElement;
       if (!scroller) return;
-      const startY = scroller.scrollTop;
+      const restoreY = scroller.scrollTop;
+      const startY = fromTop && container ? Math.max(0, absY(container) - 80) : restoreY;
       const viewport = window.innerHeight || 800;
       const step = Math.max(viewport * 0.8, 400);
       const docMax = () => Math.max(0, scroller.scrollHeight - scroller.clientHeight);
@@ -4612,6 +5272,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       let y = startY;
       let guard = 0;
       const deadline = Date.now() + CONFIG.forceLoadMaxMs;
+      if (fromTop) {
+        scroller.scrollTo(0, startY);
+        await sleep(150);
+      }
       harvestMediaNow();
       while (y < limit() && guard < 800 && Date.now() < deadline) {
         scroller.scrollTo(0, y);
@@ -4631,7 +5295,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const remainingMs = Math.max(0, deadline - Date.now());
       await waitForImagesToSettle(Math.min(CONFIG.forceLoadSettleMs, remainingMs));
       harvestMediaNow();
-      scroller.scrollTo(0, startY);
+      scroller.scrollTo(0, restoreY);
       await sleep(150);
       harvestMediaNow();
       log('harvested media urls:', harvestedMedia.size);
@@ -4890,13 +5554,164 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return model;
   }
 
-  // The export choices offered by every Export control. "Save to library" is the primary,
-  // organized path (per-post folder under a root you pick once); the rest are loose downloads.
+  /** Canonical identity for an X media URL, tolerant of format/size/extension variants
+   *  (DOM src `.../media/XXX?format=jpg&name=small` and syndication `.../media/XXX.jpg`
+   *  are the same asset). */
+  function mediaKeyFromUrl(url) {
+    const value = String(url || '');
+    let match = value.match(/\/media\/([A-Za-z0-9_-]+)/);
+    if (match) return `media:${match[1]}`;
+    match = value.match(/\/(?:ext_tw_video_thumb|amplify_video_thumb|tweet_video_thumb)\/(\d+)\//);
+    if (match) return `video:${match[1]}`;
+    return '';
+  }
+
+  function blockMediaKey(block) {
+    if (!block) return '';
+    if (block.kind === 'image') return mediaKeyFromUrl(block.url);
+    if (block.kind === 'video') return mediaKeyFromUrl(block.posterUrl || block.mp4Url);
+    return '';
+  }
+
+  function urlHostname(url) {
+    try {
+      return new URL(url).hostname.replace(/^www\./, '');
+    } catch {
+      return '';
+    }
+  }
+
+  /** True for x.com / twitter.com status permalinks (post references, not external links). */
+  function isStatusPermalink(url) {
+    return /^https?:\/\/(?:mobile\.)?(?:x|twitter)\.com\/[^/]+\/status\/\d+/i.test(
+      String(url || '')
+    );
+  }
+
+  /**
+   * Thread capture races X's lazy loading: a post cloned before its image ever
+   * loaded has no media in the DOM at all, so the miss is invisible to the
+   * accounting (a real 36-post thread silently lost 7 of 27 photos this way).
+   * Recover by asking the syndication endpoint - the same authoritative source
+   * quote cards use - for each captured post's: media the DOM missed, external
+   * links (upgrading t.co card hrefs to their expanded URLs), and the note_tweet
+   * long-form signal, which gets an honest truncation notice. Must run before
+   * inlineMedia so recovered blocks are downloaded and counted like any other
+   * media. Per-post failures keep the DOM capture as-is.
+   */
+  async function enrichThreadViaSyndication(model, onProgress, fetchTweet = fetchTweetSyndication) {
+    const markers = [];
+    model.blocks.forEach((block, index) => {
+      if (block.kind === 'thread-marker' && block.statusId) markers.push({ block, index });
+    });
+    if (!markers.length) return model;
+    let done = 0;
+    let recovered = 0;
+    let truncatedPosts = 0;
+    onProgress && onProgress(0, markers.length);
+    // Walk backwards so insertions never shift the indices of unprocessed segments.
+    for (let i = markers.length - 1; i >= 0; i--) {
+      const { block: marker, index } = markers[i];
+      const end = i + 1 < markers.length ? markers[i + 1].index : model.blocks.length;
+      try {
+        const data = await fetchTweet(marker.statusId);
+        if (data && (data.__typename === 'Tweet' || data.text != null)) {
+          const segment = model.blocks.slice(index + 1, end);
+          const additions = [];
+
+          const have = new Set(segment.map(blockMediaKey));
+          syndicationMediaBlocks(data, marker.sourceUrl).forEach((candidate) => {
+            const key = blockMediaKey(candidate);
+            if (key && !have.has(key)) additions.push(candidate);
+          });
+          recovered += additions.length;
+
+          // External links: X strips a card's URL from the visible text, so a
+          // lazily-lost card means the link exists ONLY in entities.urls.
+          const segmentHrefs = new Set();
+          segment.forEach((b) => {
+            if (b.kind === 'paragraph') hrefsFromHtml(b.html).forEach((h) => segmentHrefs.add(h));
+            else if (b.kind === 'link-card' && b.url) segmentHrefs.add(b.url);
+          });
+          (data.entities && data.entities.urls ? data.entities.urls : []).forEach((u) => {
+            const expanded = safeUrl(u.expanded_url || u.url);
+            if (!expanded || isStatusPermalink(expanded)) return;
+            const card = segment.find(
+              (b) => b.kind === 'link-card' && (b.url === u.url || b.url === expanded)
+            );
+            if (card) {
+              // Upgrade a DOM-captured card that kept the opaque t.co form.
+              card.url = expanded;
+              if (!card.domain) card.domain = urlHostname(expanded);
+              if (!card.title && u.display_url) card.title = u.display_url;
+              return;
+            }
+            if (segmentHrefs.has(expanded) || (u.url && segmentHrefs.has(u.url))) return;
+            additions.push({
+              kind: 'link-card',
+              url: expanded,
+              title: u.display_url || '',
+              domain: urlHostname(expanded),
+              sourceUrl: marker.sourceUrl,
+            });
+          });
+
+          // Long-form (note) post: syndication only ever has the preview text.
+          if (data.note_tweet && !segment.some((b) => b.kind === 'truncation-notice')) {
+            additions.push({ kind: 'truncation-notice', sourceUrl: marker.sourceUrl });
+            truncatedPosts++;
+          }
+
+          if (additions.length) {
+            // Keep a DOM-detected truncation notice as the segment's last word.
+            let insertAt = end;
+            while (
+              insertAt > index + 1 &&
+              model.blocks[insertAt - 1].kind === 'truncation-notice'
+            ) {
+              insertAt--;
+            }
+            model.blocks.splice(insertAt, 0, ...additions);
+          }
+        }
+      } catch (e) {
+        warn('thread syndication check failed for post', marker.statusId, '-', e.message);
+      }
+      done++;
+      onProgress && onProgress(done, markers.length);
+    }
+    if (model.thread) {
+      // Count DOM-detected notices too, not only the ones this pass added.
+      const totalTruncated = model.blocks.filter((b) => b.kind === 'truncation-notice').length;
+      if (recovered) model.thread.mediaRecovered = recovered;
+      if (totalTruncated) model.thread.truncatedPosts = totalTruncated;
+      if (recovered || truncatedPosts) {
+        log(
+          `syndication pass: recovered ${recovered} media item(s), flagged ${truncatedPosts} long-form post(s)`
+        );
+      }
+    }
+    return model;
+  }
+
+  // The export choices offered by every Export control, grouped: save variants,
+  // then share/clipboard, then loose file downloads. The primary trigger button
+  // already quick-saves, so the menu holds only the variants - and the single
+  // "HTML + Markdown" download covers the removed HTML-only/Markdown-only modes
+  // (the engine still supports the 'html' and 'md' keys).
   const EXPORT_TYPES = [
     { key: 'library', label: 'Save to library' },
-    { key: 'both', label: 'HTML + Markdown' },
-    { key: 'html', label: 'HTML only' },
-    { key: 'md', label: 'Markdown only' },
+    { key: 'library-note', label: 'Save with note / tags' },
+    { divider: true },
+    { key: 'copy', label: 'Copy clean Markdown' },
+    { key: 'share', label: 'Share with AI' },
+    { key: 'library-share', label: 'Save locally + share with AI' },
+    { divider: true },
+    { key: 'both', label: 'Download HTML + Markdown' },
+  ];
+  const POST_EXPORT_TYPES = [
+    { key: 'library-single', label: 'Save this post only' },
+    ...EXPORT_TYPES.filter((item) => item.key !== 'library'),
   ];
 
   // Only one export menu is open at a time; this closes the previous one.
@@ -4942,6 +5757,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     triggerTitle,
     className,
     onPick,
+    onQuick,
+    menuItems = EXPORT_TYPES,
     draggable = false,
   }) {
     const wrap = document.createElement('div');
@@ -4951,6 +5768,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     trigger.className = 'xa-ctl-trigger';
     trigger.textContent = triggerLabel;
     trigger.title = triggerTitle;
+    const options = document.createElement('button');
+    options.type = 'button';
+    options.className = 'xa-ctl-options';
+    options.textContent = '...';
+    options.title = 'More SourceCapsule actions';
+    options.setAttribute('aria-label', 'More SourceCapsule actions');
     const menu = document.createElement('div');
     menu.className = 'xa-ctl-menu';
     menu.hidden = true;
@@ -4972,7 +5795,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       document.addEventListener('click', onDocClick, true);
     };
 
-    EXPORT_TYPES.forEach(({ key, label }) => {
+    menuItems.forEach((entry) => {
+      if (entry.divider) {
+        const sep = document.createElement('div');
+        sep.className = 'xa-ctl-sep';
+        menu.appendChild(sep);
+        return;
+      }
+      const { key, label } = entry;
       const item = document.createElement('button');
       item.type = 'button';
       item.className = 'xa-ctl-item';
@@ -4993,6 +5823,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         suppressNextClick = false;
         return;
       }
+      if (typeof onQuick === 'function') {
+        closeMenu();
+        onQuick(trigger);
+      } else if (menu.hidden) openMenu();
+      else closeMenu();
+    });
+    options.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
       if (menu.hidden) openMenu();
       else closeMenu();
     });
@@ -5053,8 +5892,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     wrap.addEventListener('click', (e) => e.stopPropagation());
 
     wrap.appendChild(trigger);
+    wrap.appendChild(options);
     wrap.appendChild(menu);
-    return { wrap, trigger };
+    return { wrap, trigger, options };
   }
 
   function libraryReadme() {
@@ -5087,6 +5927,27 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     await writable.close();
   }
 
+  async function readTextFileInDir(dir, name) {
+    try {
+      const handle = await dir.getFileHandle(name);
+      return await (await handle.getFile()).text();
+    } catch {
+      return '';
+    }
+  }
+
+  let libraryIndexWriteQueue = Promise.resolve();
+  function updateLibraryIndex(root, entry) {
+    libraryIndexWriteQueue = libraryIndexWriteQueue
+      .catch(() => {})
+      .then(async () => {
+        const filename = '_sourcecapsule-index.md';
+        const current = await readTextFileInDir(root, filename);
+        await writeFileInDir(root, filename, updateLibraryIndexText(current, entry));
+      });
+    return libraryIndexWriteQueue;
+  }
+
   async function writeEntriesToDir(rootDir, segments, entries) {
     let dir = rootDir;
     for (const seg of segments) dir = await dir.getDirectoryHandle(seg, { create: true });
@@ -5105,6 +5966,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const { files, pathById } = collectBundleMediaFiles(model);
     const markdown = renderLlmMarkdown(model, debugJson, { mediaFiles: pathById });
     const paths = bundlePaths(model, prefs, localDateStamp());
+    const stats = archiveStats(model);
+    const indexEntry = libraryIndexEntry(model, paths, stats);
 
     // Relative names inside the per-post folder.
     const entries = [
@@ -5118,6 +5981,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 
     if (root) {
       await writeEntriesToDir(root, paths.segments, entries);
+      await updateLibraryIndex(root, indexEntry);
       showToast(`Saved to ${[root.name, ...paths.segments].join('/')}`);
       return;
     }
@@ -5130,17 +5994,24 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       name: e.name,
       bytes: e.bytes || new TextEncoder().encode(e.text),
     }));
+    zipEntries.push({
+      name: '_sourcecapsule-entry.md',
+      bytes: new TextEncoder().encode(`${renderLibraryIndexItem(indexEntry)}\n`),
+    });
     downloadBlob(`${zipName}.zip`, new Blob([buildZip(zipEntries)], { type: 'application/zip' }));
     showToast(`Folder save not supported in this browser; saved ${zipName}.zip`);
   }
 
   /**
    * Build and download the requested artifact(s) for the page (or a specific post).
-   * @param exportType 'library' | 'html' | 'md' | 'both'
+   * @param exportType 'library' | 'library-share' | 'share' | 'copy' | 'html' | 'md' | 'both'
    * @param targetTweetEl when set, export exactly that post (per-post button); else the page.
    * @param trigger the clicked button, for busy-state feedback.
    */
-  async function runExport(exportType, { targetTweetEl = null, trigger = null } = {}) {
+  async function runExport(
+    exportType,
+    { targetTweetEl = null, trigger = null, includeThread = true } = {}
+  ) {
     const type = targetTweetEl ? 'post' : detectPageType();
     if (!type) return;
     const restoreLabel = trigger ? trigger.textContent : '';
@@ -5148,16 +6019,30 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       if (!trigger) return;
       trigger.disabled = busy;
       trigger.textContent = busy ? 'Exporting...' : restoreLabel;
+      const options =
+        trigger.parentElement && trigger.parentElement.querySelector('.xa-ctl-options');
+      if (options) options.disabled = busy;
     };
     setBusy(true);
     try {
+      let metadata = {};
+      const needsShare = exportType === 'share' || exportType === 'library-share';
+      const needsLibrary = exportType === 'library-share' || exportType.startsWith('library');
+      if (exportType === 'library-note' || needsShare) {
+        metadata = await promptCaptureOptions({
+          share: needsShare,
+          saveLocal: exportType === 'library-share',
+        });
+        if (!metadata) return;
+      }
+      const outputType = exportType === 'library-note' ? 'library' : exportType;
       // Resolve the export folder FIRST, while we still hold the click's transient user
       // activation - showDirectoryPicker / requestPermission require it, and the media loading
       // below can easily outlast the ~5s activation window. Reused (already-granted) handles
       // resolve without a prompt. null + FSA available means the user cancelled -> abort early
       // (before the expensive media work); null + no FSA means we'll zip later.
       let libraryRoot = null;
-      if (exportType === 'library') {
+      if (needsLibrary) {
         libraryRoot = await getRootDir();
         if (!libraryRoot && fsaWindow()) {
           showToast('Export folder not set; export cancelled', { error: true });
@@ -5167,7 +6052,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       resetMediaState();
       if (CONFIG.forceLoad) {
         showToast('Loading media...', { sticky: true });
-        if (targetTweetEl) {
+        if (targetTweetEl && !includeThread) {
           // Per-post export: the clicked post is already on screen. Load its media IN PLACE
           // rather than scrolling the whole page - a full scroll can unmount the target under
           // X's virtualization, leaving us reading a stale/detached node.
@@ -5177,13 +6062,19 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             type === 'article'
               ? pick(document, CONFIG.selectors.articleRoot, { quiet: true })
               : pick(document, CONFIG.selectors.primaryColumn, { quiet: true });
-          await forceLoadMedia(container, (pct) =>
-            showToast(`Loading media... ${pct}%`, { sticky: true })
+          await forceLoadMedia(
+            container,
+            (pct) => showToast(`Loading thread and media... ${pct}%`, { sticky: true }),
+            { fromTop: type === 'post' && includeThread }
           );
         }
       }
       showToast('Reading page...', { sticky: true });
-      const model = type === 'article' ? buildModelForArticle() : buildModelForPost(targetTweetEl);
+      const model =
+        type === 'article'
+          ? buildModelForArticle()
+          : buildModelForPost(targetTweetEl, { includeThread });
+      applyCaptureMetadata(model, metadata);
       const debugJson = model._debug ? JSON.stringify(model._debug, null, 2) : '';
       delete model._debug;
       log('model', model);
@@ -5194,6 +6085,13 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             sticky: true,
           })
         );
+        if (model.thread) {
+          await enrichThreadViaSyndication(model, (done, total) =>
+            showToast(total ? `Verifying thread media... ${done}/${total}` : 'Reading page...', {
+              sticky: true,
+            })
+          );
+        }
         log('model after syndication', model);
       }
 
@@ -5205,23 +6103,68 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       });
 
       showToast('Assembling files...', { sticky: true });
-      if (exportType === 'library') {
+      const publishAndCopyShare = async () => {
+        const created = await createShareLink(
+          model,
+          debugJson,
+          metadata.expiryDays || CONFIG.share.defaultExpiryDays,
+          (message, done, total) =>
+            showToast(total ? `[${Math.min(done + 1, total)}/${total}] ${message}` : message, {
+              sticky: true,
+            })
+        );
+        rememberShareLink(created, model);
+        let copied = false;
+        try {
+          await copyText(created.viewUrl);
+          copied = true;
+        } catch (copyError) {
+          warn('share link created but automatic clipboard copy failed:', copyError.message);
+        }
+        showShareResult(created, { copied });
+        showToast(
+          `Share link ready; expires ${readableUtcTime(created.expiresAt)}${copied ? ' (copied)' : ''}`
+        );
+      };
+      if (outputType === 'library-share') {
         await saveToLibrary(model, debugJson, libraryRoot);
+        try {
+          await publishAndCopyShare();
+        } catch (shareError) {
+          errlog(shareError);
+          showToast(`Saved locally, but link failed: ${shareError.message}`, { error: true });
+        }
+        return;
+      }
+      if (outputType === 'library') {
+        await saveToLibrary(model, debugJson, libraryRoot);
+        return;
+      }
+      if (outputType === 'copy') {
+        const markdown = renderLlmMarkdown(model, debugJson);
+        await copyText(markdown);
+        showToast(
+          `Copied ${model.thread ? `full thread (${model.thread.capturedPosts} posts)` : type} as Markdown`
+        );
+        return;
+      }
+      if (outputType === 'share') {
+        await publishAndCopyShare();
         return;
       }
       const basename = `${slugify(model.title)}.${nowStamp()}`;
       const htmlFilename = `${basename}.html`;
       const saved = [];
-      if (exportType === 'html' || exportType === 'both') {
+      if (outputType === 'html' || outputType === 'both') {
         const html = assembleHtml(model, debugJson);
         downloadHtml(htmlFilename, html);
         saved.push(htmlFilename);
         log('html', htmlFilename, humanBytes(html.length));
       }
-      if (exportType === 'md' || exportType === 'both') {
+      if (outputType === 'md' || outputType === 'both') {
         // Only name the companion when the HTML is actually being saved in this same export;
         // a Markdown-only export has no companion on disk, so the markdown must not claim one.
-        const companionHtmlFilename = exportType === 'both' ? htmlFilename : '';
+        const companionHtmlFilename = outputType === 'both' ? htmlFilename : '';
         const markdown = renderLlmMarkdown(model, debugJson, { companionHtmlFilename });
         const markdownFilename = `${basename}.llm.md`;
         downloadBlob(
@@ -5248,16 +6191,22 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       // it's mid-export). Export itself re-checks the type at click time, so content is correct
       // regardless; this just keeps the label honest.
       const trig = existing.querySelector('.xa-ctl-trigger');
-      const label = type === 'article' ? 'Export article' : 'Export post';
+      const label = type === 'article' ? 'Save article' : 'Save thread';
       if (trig && !trig.disabled && trig.textContent !== label) trig.textContent = label;
       return;
     }
     ensureStyle();
     const { wrap } = createExportControl({
-      triggerLabel: type === 'article' ? 'Export article' : 'Export post',
-      triggerTitle: `Export this ${type} to a self-contained file (drag to move) (${APP})`,
+      triggerLabel: type === 'article' ? 'Save article' : 'Save thread',
+      triggerTitle: `Quick-save this ${type === 'article' ? 'article' : 'full thread'} to your SourceCapsule library (drag to move)`,
       className: 'xa-ctl xa-ctl-floating',
-      onPick: (exportType, trigger) => runExport(exportType, { trigger }),
+      menuItems: type === 'article' ? EXPORT_TYPES : POST_EXPORT_TYPES,
+      onQuick: (trigger) => runExport('library', { trigger, includeThread: true }),
+      onPick: (exportType, trigger) =>
+        runExport(exportType === 'library-single' ? 'library' : exportType, {
+          trigger,
+          includeThread: exportType !== 'library-single',
+        }),
       draggable: true,
     });
     wrap.id = CONFIG.buttonId;
@@ -5277,10 +6226,18 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       if (tweetEl.querySelector(`.${CONFIG.postControlClass}`)) return; // already has a control
       if (!tweetStatusId(tweetEl)) return; // only real posts (skip compose box / ads)
       const { wrap } = createExportControl({
-        triggerLabel: 'Export',
-        triggerTitle: `Export this post to a self-contained file (${APP})`,
+        triggerLabel: 'Save thread',
+        triggerTitle: `Quick-save this full thread to your SourceCapsule library`,
         className: `xa-ctl ${CONFIG.postControlClass}`,
-        onPick: (exportType, trigger) => runExport(exportType, { targetTweetEl: tweetEl, trigger }),
+        menuItems: POST_EXPORT_TYPES,
+        onQuick: (trigger) =>
+          runExport('library', { targetTweetEl: tweetEl, trigger, includeThread: true }),
+        onPick: (exportType, trigger) =>
+          runExport(exportType === 'library-single' ? 'library' : exportType, {
+            targetTweetEl: tweetEl,
+            trigger,
+            includeThread: exportType !== 'library-single',
+          }),
       });
       wrap.setAttribute(CONFIG.postControlFlag, '1');
       // Prefer placing the control inline in the header, right before X's "..." menu, so it
@@ -5309,9 +6266,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const caret = column.querySelector('[data-testid="caret"]'); // topmost = article header
     if (!caret || !caret.parentElement) return;
     const { wrap } = createExportControl({
-      triggerLabel: 'Export article',
-      triggerTitle: `Export this article to a self-contained file (${APP})`,
+      triggerLabel: 'Save article',
+      triggerTitle: `Quick-save this article to your SourceCapsule library`,
       className: `xa-ctl ${CONFIG.postControlClass}`,
+      onQuick: (trigger) => runExport('library', { trigger }),
       onPick: (exportType, trigger) => runExport(exportType, { trigger }),
     });
     wrap.classList.add('xa-ctl-inline');
@@ -5700,6 +6658,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       mimeToExt,
       bundlePaths,
       collectBundleMediaFiles,
+      normalizeTags,
+      applyCaptureMetadata,
+      libraryIndexEntry,
+      renderLibraryIndexItem,
+      updateLibraryIndexText,
+      renderArchiveManifestJson,
+      EXPORT_TYPES,
+      showShareResult,
       handleFromSourceUrl,
       escapeHtml,
       safeUrl,
@@ -5727,6 +6693,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       // Syndication transforms (pure; network call is not unit-tested).
       syndicationToken,
       syndicationToQuoteBlock,
+      syndicationMediaBlocks,
+      mediaKeyFromUrl,
+      enrichThreadViaSyndication,
+      extractLinkCard,
+      buildTweetBlocks,
     };
   }
 })();

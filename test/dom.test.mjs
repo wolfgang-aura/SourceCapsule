@@ -104,6 +104,18 @@ check('detectPageType() recognizes a status page as a post', () => {
   assert.equal(engine.detectPageType(), 'post');
 });
 
+check('share success remains visible when automatic clipboard copy is blocked', () => {
+  const viewUrl = 'http://127.0.0.1:8787/c/1234567890abcdef';
+  engine.showShareResult({ viewUrl }, { copied: false });
+  const result = document.querySelector('.xa-share-result');
+  assert.ok(result, 'share result dialog should be visible');
+  assert.equal(result.querySelector('#xa-share-url').value, viewUrl);
+  assert.match(result.querySelector('.xa-share-status').textContent, /could not copy/i);
+  assert.equal(result.querySelector('.xa-modal-open').href, viewUrl);
+  result.querySelector('.xa-modal-cancel').click();
+  assert.equal(document.querySelector('.xa-share-result'), null);
+});
+
 check('inlineHtmlFromTweetText captures nested-span text', () => {
   const el = dom.window.document.querySelectorAll('div[data-testid="tweetText"]')[1];
   const html = engine.inlineHtmlFromTweetText(el);
@@ -153,6 +165,18 @@ check('buildModelForPost captures same-author thread continuations only', () => 
   assert.ok(paragraphs.some((html) => html.includes('Second quoted video should export.')));
   assert.ok(!paragraphs.some((html) => html.includes('Unrelated reply should not export.')));
   assert.ok(!paragraphs.some((html) => html.includes('Nested unrelated text should not export.')));
+});
+
+check('full-thread mode is explicit for a clicked post and adds post boundaries', () => {
+  const focused = Array.from(document.querySelectorAll('article[data-testid="tweet"]')).find(
+    (tweet) => tweet.textContent.includes('mstr')
+  );
+  const single = engine.buildModelForPost(focused);
+  assert.equal(single.thread, undefined);
+  const fullThread = engine.buildModelForPost(focused, { includeThread: true });
+  assert.equal(fullThread.thread.capturedPosts, 2);
+  assert.equal(model.thread.capturedPosts, 2);
+  assert.equal(model.blocks.filter((block) => block.kind === 'thread-marker').length, 2);
 });
 
 check('buildModelForPost uses the focused post permalink as sourceUrl', () => {
@@ -728,6 +752,278 @@ check('syndicationToken is a non-empty token without zero-runs or dots', () => {
   assert.equal(typeof tok, 'string');
   assert.ok(tok.length > 0);
   assert.ok(!/[.]/.test(tok) && !/00/.test(tok), `token shape: ${tok}`);
+});
+
+async function checkAsync(name, fn) {
+  try {
+    await fn();
+    console.log(`  ✓ ${name}`);
+  } catch (e) {
+    failures++;
+    console.error(`  ✗ ${name}\n    ${e.message}`);
+  }
+}
+
+check('mediaKeyFromUrl canonicalizes DOM and syndication URL shapes to one key', () => {
+  const domShape = engine.mediaKeyFromUrl(
+    'https://pbs.twimg.com/media/GxAbC123_x?format=jpg&name=small'
+  );
+  const synShape = engine.mediaKeyFromUrl('https://pbs.twimg.com/media/GxAbC123_x.jpg');
+  assert.equal(domShape, 'media:GxAbC123_x');
+  assert.equal(domShape, synShape);
+  assert.equal(
+    engine.mediaKeyFromUrl('https://pbs.twimg.com/ext_tw_video_thumb/123456/pu/img/x.jpg'),
+    'video:123456'
+  );
+  assert.equal(engine.mediaKeyFromUrl('https://pbs.twimg.com/profile_images/1/a.jpg'), '');
+});
+
+await checkAsync(
+  'thread media enrichment recovers lazy-load losses into the right post, no dupes',
+  async () => {
+    const model = {
+      type: 'post',
+      blocks: [
+        {
+          kind: 'thread-marker',
+          statusId: '111',
+          sourceUrl: 'https://x.com/a/status/111',
+          index: 1,
+          total: 2,
+        },
+        { kind: 'paragraph', html: 'first post, its image was lost to lazy loading' },
+        {
+          kind: 'thread-marker',
+          statusId: '222',
+          sourceUrl: 'https://x.com/a/status/222',
+          index: 2,
+          total: 2,
+        },
+        { kind: 'paragraph', html: 'second post, image already captured from the DOM' },
+        {
+          kind: 'image',
+          url: 'https://pbs.twimg.com/media/KEEP22?format=jpg&name=small',
+          alt: '',
+        },
+      ],
+      thread: { capturedPosts: 2, sourcePostIds: ['111', '222'], completeness: 'best-effort' },
+    };
+    const syndication = {
+      111: {
+        __typename: 'Tweet',
+        text: 'first',
+        mediaDetails: [
+          { type: 'photo', media_url_https: 'https://pbs.twimg.com/media/LOST11.jpg' },
+        ],
+      },
+      222: {
+        __typename: 'Tweet',
+        text: 'second',
+        // Same asset the DOM already captured, in syndication's URL shape: must NOT duplicate.
+        mediaDetails: [
+          { type: 'photo', media_url_https: 'https://pbs.twimg.com/media/KEEP22.jpg' },
+        ],
+      },
+    };
+    await engine.enrichThreadViaSyndication(model, null, async (id) => {
+      if (!syndication[id]) throw new Error('unexpected fetch ' + id);
+      return syndication[id];
+    });
+    const images = model.blocks.filter((b) => b.kind === 'image');
+    assert.equal(images.length, 2, 'one recovered + one kept, no duplicates');
+    const marker2 = model.blocks.findIndex(
+      (b) => b.kind === 'thread-marker' && b.statusId === '222'
+    );
+    const recovered = model.blocks.findIndex((b) => b.kind === 'image' && /LOST11/.test(b.url));
+    assert.ok(recovered !== -1, 'missing image was recovered from syndication');
+    assert.ok(recovered < marker2, 'recovered image belongs to post 1, before the post 2 marker');
+    assert.equal(model.thread.mediaRecovered, 1);
+  }
+);
+
+await checkAsync('thread media enrichment survives per-post syndication failures', async () => {
+  const model = {
+    type: 'post',
+    blocks: [
+      { kind: 'thread-marker', statusId: '111', sourceUrl: 'https://x.com/a/status/111' },
+      { kind: 'paragraph', html: 'one' },
+      { kind: 'thread-marker', statusId: '222', sourceUrl: 'https://x.com/a/status/222' },
+      { kind: 'paragraph', html: 'two' },
+    ],
+    thread: { capturedPosts: 2, sourcePostIds: ['111', '222'], completeness: 'best-effort' },
+  };
+  await engine.enrichThreadViaSyndication(model, null, async (id) => {
+    if (id === '111') throw new Error('syndication: HTTP 404');
+    return {
+      __typename: 'Tweet',
+      text: 'two',
+      mediaDetails: [
+        {
+          type: 'video',
+          media_url_https: 'https://pbs.twimg.com/ext_tw_video_thumb/999/pu/img/p.jpg',
+          video_info: {
+            duration_millis: 5000,
+            variants: [
+              { content_type: 'video/mp4', bitrate: 832000, url: 'https://video.twimg.com/v.mp4' },
+            ],
+          },
+        },
+      ],
+    };
+  });
+  const videos = model.blocks.filter((b) => b.kind === 'video');
+  assert.equal(videos.length, 1, 'post 2 video recovered despite post 1 failure');
+  assert.equal(videos[0].mp4Url, 'https://video.twimg.com/v.mp4');
+  assert.equal(model.thread.mediaRecovered, 1);
+});
+
+check('extractLinkCard captures the card URL + title, skips cards inside quotes', () => {
+  const d = dom.window.document;
+  const make = (href) => {
+    const wrap = d.createElement('div');
+    wrap.innerHTML = `<div data-testid="card.wrapper"><a href="${href}"><span>explain-diff skill</span><span>From gist.github.com</span></a></div>`;
+    return wrap;
+  };
+  const tweetEl = make('https://t.co/AbC123');
+  const card = engine.extractLinkCard(tweetEl, [], 'https://x.com/a/status/1');
+  assert.ok(card, 'card extracted');
+  assert.equal(card.kind, 'link-card');
+  assert.equal(card.url, 'https://t.co/AbC123');
+  assert.equal(card.title, 'explain-diff skill');
+  assert.equal(card.domain, 'gist.github.com');
+  // The same card inside a quoted tweet belongs to the quote, not the main post.
+  const quoted = make('https://t.co/AbC123');
+  const outer = d.createElement('div');
+  outer.appendChild(quoted);
+  assert.equal(engine.extractLinkCard(outer, [quoted], 'https://x.com/a/status/1'), null);
+});
+
+check('buildTweetBlocks flags long-form previews and keeps the link card', () => {
+  const d = dom.window.document;
+  const tweetEl = d.createElement('article');
+  tweetEl.setAttribute('data-testid', 'tweet');
+  tweetEl.innerHTML = `
+    <div data-testid="User-Name"><a href="/longform"><span>Long Form</span></a><a href="/longform"><span>@longform</span></a></div>
+    <div data-testid="tweetText" lang="en"><span>Only the preview of this long post. I'm</span></div>
+    <div data-testid="tweet-text-show-more-link">Show more</div>
+    <div data-testid="card.wrapper"><a href="https://t.co/Xyz789"><span>a linked page</span><span>From example.com</span></a></div>
+    <a href="/longform/status/9999999999999999999"><time datetime="2026-07-02T03:26:39Z">Jul 2</time></a>`;
+  const { blocks, textTruncated } = engine.buildTweetBlocks(tweetEl);
+  assert.equal(textTruncated, true, 'Show more link marks the text as a preview');
+  const card = blocks.find((b) => b.kind === 'link-card');
+  assert.ok(card, 'link card captured alongside the text');
+  assert.equal(card.url, 'https://t.co/Xyz789');
+});
+
+await checkAsync(
+  'syndication pass recovers lost links, upgrades t.co cards, flags note posts',
+  async () => {
+    const model = {
+      type: 'post',
+      blocks: [
+        { kind: 'thread-marker', statusId: '111', sourceUrl: 'https://x.com/a/status/111' },
+        { kind: 'paragraph', html: 'post with a DOM-captured card kept as t.co' },
+        { kind: 'link-card', url: 'https://t.co/AbC123', title: '', domain: '' },
+        { kind: 'thread-marker', statusId: '222', sourceUrl: 'https://x.com/a/status/222' },
+        { kind: 'paragraph', html: 'long-form post whose card was lost to lazy loading' },
+      ],
+      thread: { capturedPosts: 2, sourcePostIds: ['111', '222'], completeness: 'best-effort' },
+    };
+    const syndication = {
+      111: {
+        __typename: 'Tweet',
+        text: 'one',
+        entities: {
+          urls: [
+            {
+              url: 'https://t.co/AbC123',
+              expanded_url: 'https://gist.github.com/g/1',
+              display_url: 'gist.github.com/g/1',
+            },
+          ],
+        },
+      },
+      222: {
+        __typename: 'Tweet',
+        text: 'two',
+        note_tweet: { id: 'NoteTweetResults:2' },
+        entities: {
+          urls: [
+            {
+              url: 'https://t.co/LoSt42',
+              expanded_url: 'https://example.com/paper',
+              display_url: 'example.com/paper',
+            },
+            // A status permalink is a post reference, never an external link card.
+            {
+              url: 'https://t.co/QuOte',
+              expanded_url: 'https://x.com/someone/status/12345',
+              display_url: 'x.com/someone/status/1...',
+            },
+          ],
+        },
+      },
+    };
+    await engine.enrichThreadViaSyndication(model, null, async (id) => syndication[id]);
+
+    const upgraded = model.blocks.find((b) => b.kind === 'link-card' && /gist\.github/.test(b.url));
+    assert.ok(upgraded, 'DOM card URL upgraded from t.co to the expanded URL');
+    assert.equal(upgraded.domain, 'gist.github.com');
+
+    const cards = model.blocks.filter((b) => b.kind === 'link-card');
+    assert.equal(cards.length, 2, 'lost card recovered; status permalink NOT turned into a card');
+    assert.ok(cards.some((b) => b.url === 'https://example.com/paper'));
+
+    const notice = model.blocks.findIndex((b) => b.kind === 'truncation-notice');
+    assert.ok(notice !== -1, 'note_tweet post got a truncation notice');
+    assert.equal(notice, model.blocks.length - 1, 'notice is the last word of its post segment');
+    assert.equal(model.thread.truncatedPosts, 1);
+  }
+);
+
+check('renderBlock renders link cards and truncation notices honestly', () => {
+  const cardHtml = engine.renderBlock({
+    kind: 'link-card',
+    url: 'https://gist.github.com/g/1',
+    title: 'explain-diff skill',
+    domain: 'gist.github.com',
+  });
+  assert.match(cardHtml, /href="https:\/\/gist\.github\.com\/g\/1"/);
+  assert.match(cardHtml, /explain-diff skill/);
+  assert.match(cardHtml, /rel="noopener noreferrer"/);
+
+  const noticeHtml = engine.renderBlock({
+    kind: 'truncation-notice',
+    sourceUrl: 'https://x.com/a/status/222',
+  });
+  assert.match(noticeHtml, /only the preview above was available at export/);
+  assert.match(noticeHtml, /href="https:\/\/x\.com\/a\/status\/222"/);
+  assert.match(noticeHtml, /data-xa-truncated="1"/);
+});
+
+check('LLM Markdown carries link cards and the long-form warning', () => {
+  const md = engine.renderLlmMarkdown(
+    {
+      type: 'post',
+      title: 'T on X',
+      author: { name: 'T', handle: '@t' },
+      sourceUrl: 'https://x.com/t/status/1',
+      exportedAt: '2026-07-02T00:00:00Z',
+      blocks: [
+        { kind: 'paragraph', html: 'text' },
+        {
+          kind: 'link-card',
+          url: 'https://gist.github.com/g/1',
+          title: 'explain-diff skill',
+          domain: 'gist.github.com',
+        },
+        { kind: 'truncation-notice', sourceUrl: 'https://x.com/t/status/1' },
+      ],
+    },
+    ''
+  );
+  assert.match(md, /\[Link card\] explain-diff skill: https:\/\/gist\.github\.com\/g\/1/);
+  assert.match(md, /long-form post and only its preview text was available/);
 });
 
 if (failures) {

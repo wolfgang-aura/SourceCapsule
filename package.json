@@ -1,6 +1,6 @@
 {
   "name": "sourcecapsule",
-  "version": "1.1.1",
+  "version": "1.2.0",
   "private": false,
   "description": "Export an X (Twitter) Article or post to a single self-contained, fully-offline HTML file with all media and quoted tweets embedded.",
   "keywords": [
@@ -27,8 +27,13 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "node test/smoke.mjs && node test/dom.test.mjs",
-    "test:dom": "node test/dom.test.mjs"
+    "test": "node test/smoke.mjs && node test/dom.test.mjs && node test/share-worker.test.mjs && node test/x-api-probe.test.mjs",
+    "test:dom": "node test/dom.test.mjs",
+    "test:share": "node test/share-worker.test.mjs",
+    "test:x-probe": "node test/x-api-probe.test.mjs",
+    "probe:x": "node scripts/probe-x-mobile.mjs",
+    "build:extension": "node scripts/build-extension.mjs",
+    "dev:share": "wrangler dev --config share-worker/wrangler.toml --local --port 8787"
   },
   "comment": "This package.json exists ONLY for lint/format tooling and CI. The shipped artifact is sourcecapsule.user.js, which has no build step.",
   "devDependencies": {
@@ -36,6 +41,7 @@
     "eslint": "^9.18.0",
     "globals": "^15.14.0",
     "jsdom": "^29.1.1",
-    "prettier": "^3.4.2"
+    "prettier": "^3.4.2",
+    "wrangler": "^4.106.0"
   }
 }
