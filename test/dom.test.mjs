@@ -1026,6 +1026,211 @@ check('LLM Markdown carries link cards and the long-form warning', () => {
   assert.match(md, /long-form post and only its preview text was available/);
 });
 
+// ---------------------------------------------------------------------------
+// Long-form (note) full-text recovery from passively captured GraphQL payloads
+// ---------------------------------------------------------------------------
+
+// A trimmed TweetDetail-shaped payload: the note text lives at
+// result.note_tweet.note_tweet_results.result.text, next to rest_id.
+const NOTE_FULL_TEXT =
+  'This is the full long-form text.\nIt has several paragraphs and a link https://t.co/NoTe1 at the end, and it is much longer than the preview X shows in threads.';
+const NOTE_GRAPHQL_BODY = JSON.stringify({
+  data: {
+    threaded_conversation_with_injections_v2: {
+      instructions: [
+        {
+          entries: [
+            {
+              content: {
+                itemContent: {
+                  tweet_results: {
+                    result: {
+                      rest_id: '888',
+                      note_tweet: {
+                        is_expandable: true,
+                        note_tweet_results: {
+                          result: {
+                            text: NOTE_FULL_TEXT,
+                            entity_set: {
+                              urls: [
+                                {
+                                  url: 'https://t.co/NoTe1',
+                                  expanded_url: 'https://example.com/full-paper',
+                                  display_url: 'example.com/full-paper',
+                                },
+                              ],
+                            },
+                          },
+                        },
+                      },
+                      legacy: { id_str: '888', full_text: 'This is the full long-form…' },
+                    },
+                  },
+                },
+              },
+            },
+          ],
+        },
+      ],
+    },
+  },
+});
+
+check('noteTweetsFromCapturedBody extracts id + full text + urls from TweetDetail JSON', () => {
+  const notes = engine.noteTweetsFromCapturedBody(NOTE_GRAPHQL_BODY);
+  assert.equal(notes.length, 1);
+  assert.equal(notes[0].id, '888');
+  assert.equal(notes[0].text, NOTE_FULL_TEXT);
+  assert.equal(notes[0].urls.length, 1);
+  // Non-JSON and note-free bodies are ignored quietly.
+  assert.equal(engine.noteTweetsFromCapturedBody('#EXTM3U\nvideo.twimg.com/x.m3u8').length, 0);
+  assert.equal(engine.noteTweetsFromCapturedBody('{"data":{"no_notes":true}}').length, 0);
+});
+
+check('noteTweetParagraphBlocks splits paragraphs, escapes, and linkifies t.co urls', () => {
+  const blocks = engine.noteTweetParagraphBlocks({
+    text: 'First <line> & escaped.\n\nSecond with https://t.co/NoTe1 link.',
+    urls: [
+      {
+        url: 'https://t.co/NoTe1',
+        expanded_url: 'https://example.com/full-paper',
+        display_url: 'example.com/full-paper',
+      },
+    ],
+  });
+  assert.equal(blocks.length, 2);
+  assert.match(blocks[0].html, /First &lt;line&gt; &amp; escaped\./);
+  assert.match(
+    blocks[1].html,
+    /<a href="https:\/\/example\.com\/full-paper">example\.com\/full-paper<\/a>/
+  );
+});
+
+await checkAsync(
+  'syndication pass swaps the note preview for network-captured full text',
+  async () => {
+    // Feed the captured GraphQL body through the real network-capture entry point,
+    // exactly as the page bridge delivers it.
+    engine.handleNetworkCapturePayload({
+      source: 'SourceCapsule:network-capture',
+      type: 'response',
+      url: 'https://x.com/i/api/graphql/abc/TweetDetail',
+      transport: 'fetch:test',
+      body: NOTE_GRAPHQL_BODY,
+    });
+    const model = {
+      type: 'post',
+      blocks: [
+        { kind: 'thread-marker', statusId: '888', sourceUrl: 'https://x.com/a/status/888' },
+        { kind: 'paragraph', html: 'This is the full long-form…' },
+        { kind: 'image', url: 'https://pbs.twimg.com/media/NoteImg?format=jpg&name=small' },
+      ],
+      thread: { capturedPosts: 1, sourcePostIds: ['888'], completeness: 'best-effort' },
+    };
+    await engine.enrichThreadViaSyndication(model, null, async () => ({
+      __typename: 'Tweet',
+      text: 'This is the full long-form…',
+      note_tweet: { id: 'NoteTweetResults:888' },
+    }));
+    const paragraphs = model.blocks.filter((b) => b.kind === 'paragraph');
+    assert.ok(paragraphs.length >= 2, 'full text split into paragraphs replaced the preview');
+    assert.match(paragraphs[0].html, /This is the full long-form text\./);
+    assert.ok(!paragraphs.some((b) => /long-form…/.test(b.html)), 'preview paragraph removed');
+    assert.ok(
+      model.blocks.some((b) => b.kind === 'image'),
+      'media blocks in the segment are kept'
+    );
+    assert.equal(
+      model.blocks.findIndex((b) => b.kind === 'truncation-notice'),
+      -1,
+      'no truncation notice when the full text was recovered'
+    );
+    assert.ok(
+      model.blocks.some((b) => b.kind === 'note-recovered'),
+      'provenance notice added'
+    );
+    assert.equal(model.thread.recoveredNotes, 1);
+    assert.ok(!model.thread.truncatedPosts, 'recovered post is not counted as truncated');
+  }
+);
+
+await checkAsync(
+  'syndication pass still flags a note post honestly when nothing was captured',
+  async () => {
+    const model = {
+      type: 'post',
+      blocks: [
+        { kind: 'thread-marker', statusId: '999', sourceUrl: 'https://x.com/a/status/999' },
+        { kind: 'paragraph', html: 'preview only' },
+      ],
+      thread: { capturedPosts: 1, sourcePostIds: ['999'], completeness: 'best-effort' },
+    };
+    await engine.enrichThreadViaSyndication(model, null, async () => ({
+      __typename: 'Tweet',
+      text: 'preview only',
+      note_tweet: { id: 'NoteTweetResults:999' },
+    }));
+    assert.ok(
+      model.blocks.some((b) => b.kind === 'truncation-notice'),
+      'falls back to the truncation notice'
+    );
+    assert.equal(model.thread.truncatedPosts, 1);
+    assert.ok(!model.thread.recoveredNotes);
+  }
+);
+
+check('recoverQuoteNoteText upgrades a truncated quote and keeps its media', () => {
+  const quote = {
+    kind: 'quote',
+    truncated: true,
+    blocks: [
+      { kind: 'paragraph', html: 'preview…' },
+      { kind: 'image', url: 'https://pbs.twimg.com/media/QNote?format=jpg&name=small' },
+    ],
+  };
+  const upgraded = engine.recoverQuoteNoteText(quote, {
+    id: '777',
+    text: 'Full quoted note text.\nSecond paragraph.',
+    urls: [],
+  });
+  assert.equal(upgraded, true);
+  assert.equal(quote.truncated, false);
+  assert.equal(quote.noteRecovered, true);
+  const kinds = quote.blocks.map((b) => b.kind);
+  assert.deepEqual(kinds, ['paragraph', 'paragraph', 'image']);
+  assert.match(quote.blocks[0].html, /Full quoted note text\./);
+  // No note available -> quote untouched, stays honestly truncated.
+  const untouched = { kind: 'quote', truncated: true, blocks: [] };
+  assert.equal(engine.recoverQuoteNoteText(untouched, null), false);
+  assert.equal(untouched.truncated, true);
+});
+
+check('renderBlock and LLM markdown report recovered long-form text honestly', () => {
+  const html = engine.renderBlock({
+    kind: 'note-recovered',
+    sourceUrl: 'https://x.com/a/status/888',
+  });
+  assert.match(html, /data-xa-note-recovered="1"/);
+  assert.match(html, /full text above was recovered/);
+
+  const md = engine.renderLlmMarkdown(
+    {
+      type: 'post',
+      title: 'T on X',
+      author: { name: 'T', handle: '@t' },
+      sourceUrl: 'https://x.com/t/status/1',
+      exportedAt: '2026-07-04T00:00:00Z',
+      blocks: [
+        { kind: 'paragraph', html: 'full note text here' },
+        { kind: 'note-recovered', sourceUrl: 'https://x.com/t/status/1' },
+      ],
+    },
+    ''
+  );
+  assert.match(md, /full text above was recovered from data X delivered to the browser/);
+  assert.ok(!/only its preview text was available/.test(md), 'no stale truncation warning');
+});
+
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);
   process.exit(1);

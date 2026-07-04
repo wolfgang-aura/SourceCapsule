@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SourceCapsule - Save X/Twitter Threads & Articles as Markdown for LLMs + Offline HTML
 // @namespace    https://github.com/wolfgang-aura/SourceCapsule
-// @version      1.2.0
+// @version      1.2.1
 // @description  One click saves an X (Twitter) thread, Article, or post as clean Markdown for LLM context (Claude, ChatGPT) plus a self-contained offline HTML archive - images, video, and quoted posts embedded, with honest completeness reporting. Local-first, with optional expiring share links.
 // @author       wolfgang-aura
 // @license      MIT
@@ -159,7 +159,7 @@
   };
 
   const APP = 'SourceCapsule';
-  const VERSION = '1.2.0';
+  const VERSION = '1.2.1';
 
   // ===========================================================================
   // Small utilities
@@ -2984,6 +2984,8 @@
             ? ` <a href="${escapeHtml(safeUrl(b.sourceUrl))}" target="_blank" rel="noopener noreferrer">Read the full post on X &rarr;</a>`
             : ''
         }</p>`;
+      case 'note-recovered':
+        return `<p class="xa-note-recovered" data-xa-note-recovered="1">&#10003; Long-form post &mdash; the full text above was recovered from data X delivered to this browser while the page was open.</p>`;
       case 'code':
         return `<pre class="xa-code"><code>${escapeHtml(b.text)}</code></pre>`;
       case 'blockquote':
@@ -3056,7 +3058,9 @@
                   ? ` <a href="${escapeHtml(safeUrl(b.sourceUrl))}" target="_blank" rel="noopener noreferrer">Read the full post on X &rarr;</a>`
                   : ''
               }</p>`
-            : ''
+            : b.noteRecovered
+              ? `<p class="xa-note-recovered" data-xa-note-recovered="1">&#10003; Long-form post &mdash; full text recovered from data X delivered to this browser.</p>`
+              : ''
         }${
           safeIsoTime(b.publishedAt)
             ? `<time class="xa-quote-time" datetime="${escapeAttr(safeIsoTime(b.publishedAt))}">${escapeHtml(
@@ -3625,7 +3629,9 @@
 
   function llmTruncationWarnings(model) {
     return allLlmQuotes(model.blocks)
-      .filter((quote) => quote.truncated || isPossiblyTruncatedPost(quote))
+      .filter(
+        (quote) => quote.truncated || (!quote.noteRecovered && isPossiblyTruncatedPost(quote))
+      )
       .map((quote) =>
         quote.truncated
           ? `${quoteLabel(quote)} is a long-form post; only its preview text was available at export (full text not included).`
@@ -3747,6 +3753,10 @@
         lines.push(
           'Warning: This is a long-form post and only its preview text was available at export time. The full text is NOT included; open the post source URL above to read it in full.'
         );
+      } else if (b.kind === 'note-recovered') {
+        lines.push(
+          'Note: This is a long-form post; its full text above was recovered from data X delivered to the browser while the page was open.'
+        );
       } else if (b.kind === 'blockquote') {
         const inner = renderLlmBlocks(b.blocks, options);
         if (inner) lines.push(markdownQuote(inner));
@@ -3789,6 +3799,10 @@
       lines.push(
         'Text status: truncated (long-form post)',
         'Warning: This is a long-form post and only its preview text was available at export time. The full text is NOT included; open the URL above to read it in full.'
+      );
+    } else if (block.noteRecovered) {
+      lines.push(
+        'Text status: full (long-form text recovered from data X delivered to the browser)'
       );
     } else if (isPossiblyTruncatedPost(block)) {
       lines.push(
@@ -4255,6 +4269,8 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
 .xa-truncated{margin:8px 0 0;padding:8px 10px;border-radius:8px;font-size:13px;line-height:1.4;
   background:rgba(255,180,0,.12);border:1px solid rgba(255,180,0,.35);color:var(--fg)}
 .xa-truncated a{color:var(--accent);text-decoration:none}
+.xa-note-recovered{margin:8px 0 0;padding:8px 10px;border-radius:8px;font-size:13px;line-height:1.4;
+  background:rgba(0,186,124,.10);border:1px solid rgba(0,186,124,.35);color:var(--fg)}
 .xa-quote-time{display:block;margin-top:8px;font-size:13px;color:var(--muted)}
 .xa-card-link{display:flex;flex-direction:column;gap:2px;margin:10px 0;padding:10px 14px;
   border:1px solid var(--quoteline);border-radius:12px;background:var(--card);text-decoration:none;color:var(--fg)}
@@ -4929,6 +4945,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   const harvestedVideoUrls = new Set();
   const capturedNetworkVideoCandidates = [];
   const capturedNetworkVideoUrls = new Set();
+  // Full long-form ("note") text passively captured from GraphQL responses X's own web
+  // app already fetched (TweetDetail etc.). Keyed by immutable status id, so unlike video
+  // candidate URLs (which expire and are page-scoped) this survives SPA navigations.
+  const capturedNoteTweets = new Map(); // status id -> { id, text, urls: [entity urls] }
+  const CAPTURED_NOTE_TWEETS_MAX = 300;
   const networkCaptureDiagnostics = {
     installed: false,
     mode: 'not-installed',
@@ -4939,6 +4960,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     interestingResponses: 0,
     messages: 0,
     candidates: 0,
+    noteTweets: 0,
     errors: [],
     lastUrls: [],
   };
@@ -5067,6 +5089,99 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     rememberVideoCandidate(record, 0);
   }
 
+  /**
+   * Pull full long-form ("note") tweet texts out of a captured GraphQL response body.
+   * X's own web app receives the complete note text in TweetDetail/TweetResultByRestId
+   * payloads (`result.note_tweet.note_tweet_results.result.text`) - data the browser
+   * already downloaded for the user; we just stop throwing it away. Returns
+   * [{ id, text, urls }] where `urls` are the note's t.co entity urls for linkification.
+   */
+  function noteTweetsFromCapturedBody(body) {
+    const raw = String(body || '').trim();
+    if (!raw || (raw[0] !== '{' && raw[0] !== '[') || !/note_tweet/.test(raw)) return [];
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+    const out = [];
+    const seen = new Set();
+    const walk = (item) => {
+      if (!item || typeof item !== 'object') return;
+      if (Array.isArray(item)) {
+        item.forEach(walk);
+        return;
+      }
+      if (item.note_tweet && typeof item.note_tweet === 'object') {
+        // GraphQL shape; tolerate the note object carrying `text` directly too.
+        const noteResult =
+          (item.note_tweet.note_tweet_results && item.note_tweet.note_tweet_results.result) ||
+          item.note_tweet;
+        const id = String(item.rest_id || (item.legacy && item.legacy.id_str) || '');
+        const text = noteResult && typeof noteResult.text === 'string' ? noteResult.text : '';
+        if (id && text && !seen.has(id)) {
+          seen.add(id);
+          const urls =
+            noteResult.entity_set && Array.isArray(noteResult.entity_set.urls)
+              ? noteResult.entity_set.urls
+              : [];
+          out.push({ id, text, urls });
+        }
+      }
+      Object.keys(item).forEach((key) => walk(item[key]));
+    };
+    walk(data);
+    return out;
+  }
+
+  function rememberCapturedNoteTweet(note) {
+    if (!note || !note.id || !note.text) return;
+    const existing = capturedNoteTweets.get(note.id);
+    if (existing && existing.text.length >= note.text.length) return;
+    if (!existing && capturedNoteTweets.size >= CAPTURED_NOTE_TWEETS_MAX) {
+      const oldest = capturedNoteTweets.keys().next().value;
+      capturedNoteTweets.delete(oldest);
+    }
+    capturedNoteTweets.set(note.id, note);
+    networkCaptureDiagnostics.noteTweets = capturedNoteTweets.size;
+  }
+
+  function getCapturedNoteTweet(statusId) {
+    return capturedNoteTweets.get(String(statusId || '')) || null;
+  }
+
+  /** Full note text -> paragraph blocks (escaped, t.co urls linkified, \n-split). */
+  function noteTweetParagraphBlocks(note) {
+    let html = escapeHtml(decodeBasicEntities(String(note.text || '').trim()));
+    (note.urls || []).forEach((u) => {
+      if (!u || !u.url) return;
+      const dest = safeUrl(u.expanded_url || u.url);
+      const label = escapeHtml(u.display_url || u.expanded_url || u.url);
+      const link = dest ? `<a href="${escapeHtml(dest)}">${label}</a>` : label;
+      html = html.split(escapeHtml(u.url)).join(link);
+    });
+    return html
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => ({ kind: 'paragraph', html: line }));
+  }
+
+  /**
+   * Swap a truncated quote's preview paragraphs for the captured full note text.
+   * Non-paragraph blocks (media, nested quotes, cards) are kept; the full text is
+   * inserted where the preview text sat. Returns true when the quote was upgraded.
+   */
+  function recoverQuoteNoteText(quote, note) {
+    if (!quote || !quote.truncated || !note || !note.text) return false;
+    const kept = (quote.blocks || []).filter((b) => b.kind !== 'paragraph');
+    quote.blocks = [...noteTweetParagraphBlocks(note), ...kept];
+    quote.truncated = false;
+    quote.noteRecovered = true;
+    return true;
+  }
+
   function videoCandidatesFromCapturedBody(body, source = 'network') {
     const out = [];
     const seen = new Set();
@@ -5109,6 +5224,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     );
     if (candidates.length) {
       log('captured video candidates from network response:', candidates.length, payload.url || '');
+    }
+    const notes = noteTweetsFromCapturedBody(payload.body || '');
+    if (notes.length) {
+      notes.forEach(rememberCapturedNoteTweet);
+      log('captured full long-form text for', notes.length, 'post(s) from', payload.url || '');
     }
     return candidates;
   }
@@ -5541,6 +5661,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             q.blocks = fresh.blocks;
             q.sourceUrl = fresh.sourceUrl || q.sourceUrl;
             q.truncated = fresh.truncated;
+            // Long-form quote: syndication only has the preview, but the network capture
+            // may hold the full text X's web app already delivered to this browser.
+            if (q.truncated) recoverQuoteNoteText(q, getCapturedNoteTweet(id));
           }
         } catch (e) {
           warn('syndication enrich failed for', id, '-', e.message);
@@ -5599,7 +5722,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * inlineMedia so recovered blocks are downloaded and counted like any other
    * media. Per-post failures keep the DOM capture as-is.
    */
-  async function enrichThreadViaSyndication(model, onProgress, fetchTweet = fetchTweetSyndication) {
+  async function enrichThreadViaSyndication(
+    model,
+    onProgress,
+    fetchTweet = fetchTweetSyndication,
+    lookupNote = getCapturedNoteTweet
+  ) {
     const markers = [];
     model.blocks.forEach((block, index) => {
       if (block.kind === 'thread-marker' && block.statusId) markers.push({ block, index });
@@ -5608,6 +5736,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     let done = 0;
     let recovered = 0;
     let truncatedPosts = 0;
+    let recoveredNotes = 0;
     onProgress && onProgress(0, markers.length);
     // Walk backwards so insertions never shift the indices of unprocessed segments.
     for (let i = markers.length - 1; i >= 0; i--) {
@@ -5656,15 +5785,43 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             });
           });
 
-          // Long-form (note) post: syndication only ever has the preview text.
-          if (data.note_tweet && !segment.some((b) => b.kind === 'truncation-notice')) {
-            additions.push({ kind: 'truncation-notice', sourceUrl: marker.sourceUrl });
-            truncatedPosts++;
+          // Long-form (note) post: syndication only ever has the preview text, but the
+          // network capture may hold the full text X's own web app already downloaded.
+          let segEnd = end;
+          if (data.note_tweet) {
+            const note = lookupNote(marker.statusId);
+            const fullText = note && note.text ? note.text.trim() : '';
+            const previewText = segment
+              .filter((b) => b.kind === 'paragraph')
+              .map((b) => textFromHtml(b.html))
+              .join('\n')
+              .trim();
+            if (fullText && fullText.length > previewText.length) {
+              // Swap the preview paragraphs (and any stale truncation notice) for the
+              // full text; media/link-card blocks in the segment are kept as-is.
+              for (let j = segEnd - 1; j > index; j--) {
+                const kind = model.blocks[j].kind;
+                if (kind === 'paragraph' || kind === 'truncation-notice') {
+                  model.blocks.splice(j, 1);
+                  segEnd--;
+                }
+              }
+              const paragraphs = noteTweetParagraphBlocks(note);
+              model.blocks.splice(index + 1, 0, ...paragraphs);
+              segEnd += paragraphs.length;
+              additions.push({ kind: 'note-recovered', sourceUrl: marker.sourceUrl });
+              recoveredNotes++;
+            } else if (fullText && previewText.length >= fullText.length) {
+              // The DOM already showed the complete note text - nothing to warn about.
+            } else if (!segment.some((b) => b.kind === 'truncation-notice')) {
+              additions.push({ kind: 'truncation-notice', sourceUrl: marker.sourceUrl });
+              truncatedPosts++;
+            }
           }
 
           if (additions.length) {
             // Keep a DOM-detected truncation notice as the segment's last word.
-            let insertAt = end;
+            let insertAt = segEnd;
             while (
               insertAt > index + 1 &&
               model.blocks[insertAt - 1].kind === 'truncation-notice'
@@ -5685,9 +5842,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const totalTruncated = model.blocks.filter((b) => b.kind === 'truncation-notice').length;
       if (recovered) model.thread.mediaRecovered = recovered;
       if (totalTruncated) model.thread.truncatedPosts = totalTruncated;
-      if (recovered || truncatedPosts) {
+      if (recoveredNotes) model.thread.recoveredNotes = recoveredNotes;
+      if (recovered || truncatedPosts || recoveredNotes) {
         log(
-          `syndication pass: recovered ${recovered} media item(s), flagged ${truncatedPosts} long-form post(s)`
+          `syndication pass: recovered ${recovered} media item(s), recovered full text for ${recoveredNotes} long-form post(s), flagged ${truncatedPosts} as preview-only`
         );
       }
     }
@@ -6300,7 +6458,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 
   function networkCapturePatterns() {
     return {
-      body: /video_info|variants|video\.twimg\.com|amplify_video|ext_tw_video|tweet_video/i,
+      body: /video_info|variants|video\.twimg\.com|amplify_video|ext_tw_video|tweet_video|note_tweet/i,
       url: /\/graphql\/|\/i\/api\/|TweetDetail|TweetResult|Article|UserTweets|HomeTimeline/i,
       contentType: /json|javascript|text/i,
     };
@@ -6431,7 +6589,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const MAX_MESSAGES = 200;
       let sent = 0;
       const bodyPattern = new RegExp(
-        'video_info|variants|video\\\\.twimg\\\\.com|amplify_video|ext_tw_video|tweet_video',
+        'video_info|variants|video\\.twimg\\.com|amplify_video|ext_tw_video|tweet_video|note_tweet',
         'i'
       );
       const urlPattern = new RegExp(
@@ -6676,6 +6834,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       videoCandidatesFromCapturedBody,
       videoCandidateMatchesBlock,
       handleNetworkCapturePayload,
+      // Long-form (note) full-text recovery from passively captured GraphQL payloads.
+      noteTweetsFromCapturedBody,
+      noteTweetParagraphBlocks,
+      recoverQuoteNoteText,
+      getCapturedNoteTweet,
       humanBytes,
       VERSION,
       // Extraction layer (exported for the jsdom DOM test).

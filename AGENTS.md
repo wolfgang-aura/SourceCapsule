@@ -72,7 +72,11 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
 - **Video preservation is best-effort.** Full MP4s inline when X exposes them (no size cap,
   so archives can be large); HLS-only/blocked/failed videos fall back to poster + source link
   and are recorded as incomplete media — never counted as "captured." Long-form ("note")
-  embedded posts return only a preview from syndication and are flagged truncated.
+  posts return only a preview from syndication; the network-capture layer passively grabs the
+  full text from GraphQL responses X's web app already fetched (`noteTweetsFromCapturedBody` →
+  `capturedNoteTweets` map, swapped in during `enrichThreadViaSyndication` /
+  `recoverQuoteNoteText`, marked with a `note-recovered` block). Posts whose full text was
+  never delivered to the browser stay flagged truncated.
 - **Embedded-tweet media comes from syndication, not the DOM.** The DOM only supplies each
   quote's _position + status id_; `enrichQuotesViaSyndication` overwrites its text/media. If
   syndication is blocked/changes, set `CONFIG.useSyndication=false` to fall back to DOM scraping
@@ -88,5 +92,6 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
 Batch/bookmark export, **in-app settings panel** (manager menu commands only — see Export modes),
 HLS reassembly, OCR/transcripts, AI-generated summaries/media descriptions, hosted dashboard,
 accounts/billing/permanent-link quotas, Chrome Web Store publication, guaranteed complete capture
-of arbitrarily long threads, and full long-form (“note”) post text retrieval (preview-only,
-flagged truncated).
+of arbitrarily long threads, and active fetching of long-form (“note”) post text (recovery is
+passive-only: the full text is used when X already delivered it to the browser; otherwise the
+preview stays flagged truncated).
