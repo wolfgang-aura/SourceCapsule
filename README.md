@@ -150,7 +150,10 @@ layer; it is not ready for Chrome Web Store submission until live-X testing pass
 | Provenance | Source URL, author, timestamp, warnings, and capture manifest |
 
 An archive never claims more than it actually preserved. Missing media, preview-only long-form
-quotes, and incomplete video are visible in both the rendered output and manifest.
+quotes, and incomplete video are visible in both the rendered output and manifest. For long-form
+(note) posts, SourceCapsule recovers the full text when X has already delivered it to your
+browser while the page was open (no extra requests); otherwise the preview is clearly flagged
+as truncated.
 
 ## Settings
 
