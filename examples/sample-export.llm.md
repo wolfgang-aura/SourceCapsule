@@ -2,7 +2,7 @@
 
 Source: https://x.com/ada/article/12345
 Exported at: 2026-06-25 10:00:00 UTC
-Exporter: SourceCapsule v1.2.1
+Exporter: SourceCapsule v1.3.0
 Language: en
 Published at: 2026-06-24 09:30:00 UTC
 Author: Ada Lovelace @ada
@@ -23,6 +23,7 @@ The media bytes are embedded (base64) inside the companion file sample-export.ht
 - Embedded posts: 4 total
   - Direct embedded posts: 3
   - Nested quoted posts: 1
+- Polls: 1
 - Images: 2 captured, 1 missing
 - Videos found: 5
 - Videos preserved offline: 2
@@ -63,6 +64,13 @@ Plain text with a link & an ampersand.
 
 - First item
 - Second item with link
+
+**Poll: Which archive format?**
+- HTML - 75%
+- Markdown - 25%
+- Total votes: 120
+- Status: Poll closed
+- Source: https://x.com/ada/status/12345
 
 [Image: image-001 - Image attached to main X article by @ada, archive media image-001]
 

@@ -25,6 +25,20 @@ assert.ok(
   ),
   'combined local-save and share action is available'
 );
+assert.ok(
+  engine.POST_EXPORT_TYPES.some(
+    (item) => item.key === 'library-thread' && item.label === 'Save full thread'
+  ),
+  'per-post menu keeps full-thread capture explicit'
+);
+assert.deepEqual(engine.postExportRequest('library-thread'), {
+  exportType: 'library',
+  includeThread: true,
+});
+assert.deepEqual(engine.postExportRequest('copy'), {
+  exportType: 'copy',
+  includeThread: false,
+});
 
 // A 1x1 transparent PNG, already base64-inlined — stands in for fetched media.
 const PNG =
@@ -58,6 +72,19 @@ const sampleModel = {
       kind: 'list',
       ordered: false,
       items: ['First item', 'Second item with <a href="https://example.org/path">link</a>'],
+    },
+    {
+      kind: 'poll',
+      question: 'Which archive format?',
+      choices: [
+        { label: 'HTML', percentage: '75%' },
+        { label: 'Markdown', percentage: '25%' },
+      ],
+      totalVotes: '120',
+      status: 'Poll closed',
+      sourcePostId: '12345',
+      sourceUrl: 'https://x.com/ada/status/12345',
+      resultsUnavailable: false,
     },
     {
       kind: 'image',
@@ -205,6 +232,24 @@ check('produces a valid HTML5 document', () => {
   assert.ok(html.includes('<html lang="en">') && html.includes('</html>'));
 });
 
+check('polls render in HTML, Markdown, and the structured manifest', () => {
+  assert.match(html, /class="xa-poll"/);
+  assert.match(html, /Which archive format\?/);
+  assert.match(markdown, /\*\*Poll: Which archive format\?\*\*/);
+  assert.match(markdown, /- HTML - 75%/);
+  assert.equal(debugJson.capture.polls, 1);
+  assert.equal(debugJson.polls[0].sourcePostId, '12345');
+  assert.equal(debugJson.polls[0].resultsUnavailable, false);
+});
+
+check('hosted attribution is explicit and never leaks into local archives', () => {
+  const shared = engine.assembleHtml(sampleModel, '', { distribution: 'shared' });
+  assert.doesNotMatch(html, /Install SourceCapsule/);
+  assert.match(shared, /Captured with SourceCapsule/);
+  assert.match(shared, /Preserve complete X threads for AI and offline reading\./);
+  assert.match(shared, /href="https:\/\/github\.com\/wolfgang-aura\/SourceCapsule#installation"/);
+});
+
 check('embeds an inline <style> (no external stylesheet/font)', () => {
   assert.ok(html.includes('<style>'), 'no inline style block');
   assert.ok(!/<link[^>]+stylesheet/i.test(html), 'found external stylesheet link');
@@ -330,6 +375,51 @@ check('renders clean LLM Markdown from the archive model', () => {
   assert.ok(markdown.includes('quoted-post: 7'));
   assert.ok(markdown.includes('## Source Links'));
   assert.ok(markdown.includes('https://example.com'));
+});
+
+check('Markdown labels normal posts, threads, and Articles correctly', () => {
+  const base = {
+    title: 'Heading contract',
+    author: { name: 'A', handle: '@a' },
+    sourceUrl: 'https://x.com/a/status/1',
+    exportedAt: '2026-07-06T00:00:00Z',
+    blocks: [{ kind: 'paragraph', html: 'Body' }],
+  };
+  assert.match(engine.renderLlmMarkdown({ ...base, type: 'post' }), /## Main Post/);
+  assert.doesNotMatch(engine.renderLlmMarkdown({ ...base, type: 'post' }), /## Main Article/);
+  assert.match(engine.renderLlmMarkdown({ ...base, type: 'article' }), /## Main Article/);
+  assert.match(
+    engine.renderLlmMarkdown({
+      ...base,
+      type: 'post',
+      thread: { capturedPosts: 2, completeness: 'best-effort' },
+    }),
+    /## Full Thread/
+  );
+});
+
+check('embedded posts without a recoverable permalink are explicitly incomplete', () => {
+  const model = {
+    type: 'post',
+    title: 'Missing embedded source',
+    author: { name: 'A', handle: '@a' },
+    sourceUrl: 'https://x.com/a/status/1',
+    exportedAt: '2026-07-06T00:00:00Z',
+    blocks: [
+      { kind: 'paragraph', html: 'Body' },
+      {
+        kind: 'quote',
+        author: { name: 'Context', handle: '@context' },
+        sourceUrl: '',
+        blocks: [{ kind: 'paragraph', html: 'Context body' }],
+      },
+    ],
+  };
+  const md = engine.renderLlmMarkdown(model);
+  const html = engine.assembleHtml(model);
+  assert.match(md, /URL: unavailable \(X did not expose a canonical permalink/);
+  assert.match(md, /embedded post was captured, but X did not expose its canonical source URL/i);
+  assert.match(html, /xa-quote-source-missing/);
 });
 
 check('llm.md is honest about what it does and does not contain', () => {

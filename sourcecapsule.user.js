@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SourceCapsule - Save X/Twitter Threads & Articles as Markdown for LLMs + Offline HTML
 // @namespace    https://github.com/wolfgang-aura/SourceCapsule
-// @version      1.2.2
+// @version      1.3.0
 // @description  One click saves an X (Twitter) thread, Article, or post as clean Markdown for LLM context (Claude, ChatGPT) plus a self-contained offline HTML archive - images, video, and quoted posts embedded, with honest completeness reporting. Local-first, with optional expiring share links.
 // @author       wolfgang-aura
 // @license      MIT
@@ -22,7 +22,6 @@
 // @connect      twitter.com
 // @connect      127.0.0.1
 // @connect      localhost
-// @connect      share.sourcecapsule.app
 // @connect      sourcecapsule-share.wolfgang-aura.workers.dev
 // @run-at       document-start
 // @noframes
@@ -96,6 +95,23 @@
       // "Show more" link X renders on long-form (note) posts in timeline views;
       // its presence means the visible text is only a preview.
       showMore: ['[data-testid="tweet-text-show-more-link"]'],
+      // Poll containers and observed fields. Results may be hidden until the poll closes;
+      // extraction records only text/ARIA values X actually rendered.
+      poll: [
+        'div[data-testid="cardPoll"]',
+        'div[role="radiogroup"]',
+        '[data-testid*="poll" i]',
+        '[aria-label*="poll" i]',
+      ],
+      pollChoice: [
+        '[role="radio"]',
+        '[role="progressbar"]',
+        '[data-testid*="pollOption" i]',
+        '[data-testid*="choice" i][aria-label]',
+        '[aria-label*="%"]',
+      ],
+      pollQuestion: ['[data-testid="pollQuestion"]', '[role="heading"]'],
+      pollMeta: ['[data-testid="pollMetadata"]', '[aria-label*="vote" i]'],
       // Time element (carries the canonical permalink).
       timeLink: ['a[href*="/status/"] time'],
       // Section headings X inserts between a conversation and recommendation feeds
@@ -159,10 +175,11 @@
       expiryDays: [1, 7, 30],
       defaultExpiryDays: 7,
     },
+    installUrl: 'https://github.com/wolfgang-aura/SourceCapsule#installation',
   };
 
   const APP = 'SourceCapsule';
-  const VERSION = '1.2.1';
+  const VERSION = '1.3.0';
 
   // ===========================================================================
   // Small utilities
@@ -693,7 +710,10 @@
             reject(new Error(`HTTP ${res.status} for ${url}`));
           }
         },
-        onerror: () => reject(new Error(`Network error for ${url}`)),
+        onerror: (event) =>
+          reject(
+            new Error(`${(event && (event.error || event.message)) || 'Network error'} for ${url}`)
+          ),
         ontimeout: () => reject(new Error(`Timeout (${CONFIG.fetchTimeoutMs}ms) for ${url}`)),
       });
     });
@@ -1933,6 +1953,33 @@
     return quotes;
   }
 
+  function quoteSourceUrlFromElement(quoteEl, author = {}) {
+    if (!quoteEl) return '';
+    const nestedQuotes = findQuotedTweetEls(quoteEl);
+    const belongsToQuote = (el) => !nestedQuotes.some((nested) => nested.contains(el));
+    const directAnchor = Array.from(quoteEl.querySelectorAll('a[href*="/status/"]')).find(
+      belongsToQuote
+    );
+    if (directAnchor && directAnchor.href) return normalizeStatusUrl(directAnchor.href);
+
+    const handle = String(author.handle || '').replace(/^@/, '');
+    const elements = [quoteEl, ...quoteEl.querySelectorAll('*')].filter(belongsToQuote);
+    for (const element of elements) {
+      for (const attr of Array.from(element.attributes || [])) {
+        const value = decodeBasicEntities(String(attr.value || '')).replace(/\\\//g, '/');
+        const absolute = value.match(
+          /https?:\/\/(?:mobile\.)?(?:x|twitter)\.com\/([A-Za-z0-9_]+)\/status\/(\d+)/i
+        );
+        if (absolute) return `https://x.com/${absolute[1]}/status/${absolute[2]}`;
+        const relative = value.match(/\/([A-Za-z0-9_]+)\/status\/(\d+)/);
+        if (relative) return `https://x.com/${relative[1]}/status/${relative[2]}`;
+        const statusOnly = value.match(/(?:status(?:Id)?[=:"'\s]+)(\d{10,})/i);
+        if (statusOnly && handle) return `https://x.com/${handle}/status/${statusOnly[1]}`;
+      }
+    }
+    return '';
+  }
+
   function isTweetLikeBlock(el) {
     if (!el) return false;
     const hasActionGroup = Array.from(el.querySelectorAll('div[role="group"][aria-label]')).some(
@@ -2146,10 +2193,158 @@
     };
   }
 
+  function observedPollText(el) {
+    let value = el && el.innerText;
+    if (!value && el && el.querySelectorAll) {
+      const leaves = Array.from(el.querySelectorAll('*'))
+        .filter((child) => !child.children.length)
+        .map((child) => child.textContent || '')
+        .filter((text) => text.trim());
+      if (leaves.length) value = leaves.join(' ');
+    }
+    return String(value || (el && el.textContent) || '')
+      .replace(/\u00a0/g, ' ')
+      .replace(/[ \t]+/g, ' ')
+      .trim();
+  }
+
+  function postVotePollRowFromPercent(percentEl, tweetEl) {
+    let current = percentEl && percentEl.parentElement;
+    while (current && current !== tweetEl) {
+      const text = observedPollText(current);
+      const withoutResult = text.replace(/\d{1,3}(?:[.,]\d+)?\s*%/g, '').trim();
+      if (
+        /\d{1,3}(?:[.,]\d+)?\s*%/.test(text) &&
+        /[A-Za-z\p{L}]/u.test(withoutResult) &&
+        !/\b(?:votes?|poll\s+closed|days?|hours?|minutes?|seconds?)\b/i.test(withoutResult) &&
+        text.length < 300
+      ) {
+        return current;
+      }
+      current = current.parentElement;
+    }
+    return null;
+  }
+
+  function observedPollChoiceEls(root, tweetEl = root) {
+    const choices = pickAllMatchesIncludingRoot(root, CONFIG.selectors.pollChoice);
+    root.querySelectorAll('span,div').forEach((element) => {
+      if (element.children.length) return;
+      if (!/^\s*\d{1,3}(?:[.,]\d+)?\s*%\s*$/.test(observedPollText(element))) return;
+      const row = postVotePollRowFromPercent(element, tweetEl);
+      if (row) choices.push(row);
+    });
+    return Array.from(new Set(choices)).filter(
+      (choice, index, all) =>
+        !all.some(
+          (other, otherIndex) => otherIndex < index && other !== choice && other.contains(choice)
+        )
+    );
+  }
+
+  function inferredPostVotePollRoot(tweetEl, excludes) {
+    const resultRows = observedPollChoiceEls(tweetEl, tweetEl).filter((row) => {
+      if (excludes.some((quoteEl) => quoteEl.contains(row))) return false;
+      const text = `${observedPollText(row)} ${row.getAttribute('aria-label') || ''}`;
+      return /\d{1,3}(?:[.,]\d+)?\s*%/.test(text);
+    });
+    if (resultRows.length < 2) return null;
+    let ancestor = resultRows[0].parentElement;
+    while (ancestor && ancestor !== tweetEl) {
+      if (
+        resultRows.every((row) => ancestor.contains(row)) &&
+        /\b(?:votes?|poll\s+closed|\d+\s+(?:days?|hours?|minutes?|seconds?)\s+left)\b/i.test(
+          observedPollText(ancestor)
+        )
+      ) {
+        return ancestor;
+      }
+      ancestor = ancestor.parentElement;
+    }
+    return null;
+  }
+
+  function extractPollBlock(tweetEl, quoteEls, sourceUrl) {
+    const excludes = Array.isArray(quoteEls) ? quoteEls : [];
+    const pollRoots = pickAllMatchesIncludingRoot(tweetEl, CONFIG.selectors.poll).filter(
+      (candidate) => {
+        if (excludes.some((quoteEl) => quoteEl.contains(candidate))) return false;
+        const ownerTweet = closestAny(candidate, CONFIG.selectors.tweet);
+        const tweetElIsArticle = closestAny(tweetEl, CONFIG.selectors.tweet) === tweetEl;
+        return !ownerTweet || ownerTweet === tweetEl || !tweetElIsArticle;
+      }
+    );
+    const inferred = inferredPostVotePollRoot(tweetEl, excludes);
+    if (inferred && !pollRoots.includes(inferred)) pollRoots.push(inferred);
+    const pollEl = pollRoots.find(
+      (candidate) => observedPollChoiceEls(candidate, tweetEl).length >= 2
+    );
+    if (!pollEl) return null;
+
+    const choiceEls = observedPollChoiceEls(pollEl, tweetEl);
+    const choices = choiceEls
+      .map((choice) => {
+        const visible = observedPollText(choice);
+        const aria = observedPollText({ textContent: choice.getAttribute('aria-label') || '' });
+        const combined = [visible, aria].filter(Boolean).join(' ');
+        const percentageMatch = combined.match(/(\d{1,3}(?:[.,]\d+)?)\s*%/);
+        const votesMatch = combined.match(
+          /([\d,.]+)\s+votes?(?=\s|poll|\d+\s+(?:days?|hours?|minutes?|seconds?)|$)/i
+        );
+        const label =
+          visible
+            .replace(/\d{1,3}(?:[.,]\d+)?\s*%/g, '')
+            .replace(/[\d,.]+\s+votes?(?=\s|poll|\d+\s+(?:days?|hours?|minutes?|seconds?)|$)/gi, '')
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .find(
+              (line) =>
+                line && !/^\d{1,3}(?:[.,]\d+)?\s*%$/.test(line) && !/^[\d,.]+\s+votes?$/i.test(line)
+            ) ||
+          combined
+            .replace(/\b\d{1,3}(?:[.,]\d+)?\s*%\b/g, '')
+            .replace(
+              /\b[\d,.]+\s+votes?(?=\s|poll|\d+\s+(?:days?|hours?|minutes?|seconds?)|$)/gi,
+              ''
+            )
+            .replace(/[,:\-\s]+$/g, '')
+            .trim();
+        if (!label) return null;
+        return {
+          label,
+          ...(percentageMatch ? { percentage: `${percentageMatch[1].replace(',', '.')}%` } : {}),
+          ...(votesMatch ? { votes: votesMatch[1] } : {}),
+        };
+      })
+      .filter(Boolean);
+    if (!choices.length) return null;
+
+    const fullText = observedPollText(pollEl);
+    const questionEl = pick(pollEl, CONFIG.selectors.pollQuestion, { quiet: true });
+    const question = observedPollText(questionEl);
+    const totalMatch = fullText.match(
+      /([\d,.]+)\s+votes?(?=\s|poll|\d+\s+(?:days?|hours?|minutes?|seconds?)|$)/i
+    );
+    const statusMatch = fullText.match(
+      /(?:poll\s+closed|final results?|\d+\s+(?:days?|hours?|minutes?|seconds?)\s+left)\b/i
+    );
+    const resultsUnavailable = !choices.some((choice) => choice.percentage || choice.votes);
+    return {
+      kind: 'poll',
+      ...(question && !choices.some((choice) => choice.label === question) ? { question } : {}),
+      choices,
+      ...(totalMatch ? { totalVotes: totalMatch[1] } : {}),
+      ...(statusMatch ? { status: statusMatch[0] } : {}),
+      sourcePostId: statusIdFromUrl(sourceUrl),
+      sourceUrl,
+      resultsUnavailable,
+    };
+  }
+
   function buildTweetBlocks(tweetEl, { quoteDepth = 2 } = {}) {
     const quoteEls = quoteDepth > 0 ? findQuotedTweetEls(tweetEl) : [];
     const blocks = [];
-    const sourceUrl = canonicalUrl(tweetEl);
+    const sourceUrl = canonicalUrl(tweetEl, tweetStatusId(tweetEl));
 
     const textEl = (() => {
       // The primary tweet's text is the tweetText NOT inside quoted blocks.
@@ -2168,6 +2363,9 @@
     const card = extractLinkCard(tweetEl, quoteEls, sourceUrl);
     if (card) blocks.push(card);
 
+    const poll = extractPollBlock(tweetEl, quoteEls, sourceUrl);
+    if (poll) blocks.push(poll);
+
     // A "Show more" link on the post's own text means X is only showing a
     // long-form preview; the export must say so rather than pass it off as full.
     const textTruncated = pickAllMatchesIncludingRoot(tweetEl, CONFIG.selectors.showMore).some(
@@ -2177,13 +2375,13 @@
     quoteEls.forEach((quoteEl) => {
       const qAuthor = extractAuthor(quoteEl);
       const qBlocks = buildTweetBlocks(quoteEl, { quoteDepth: quoteDepth - 1 }).blocks;
-      const qLink = quoteEl.querySelector('a[href*="/status/"]');
+      const quoteSourceUrl = quoteSourceUrlFromElement(quoteEl, qAuthor);
       blocks.push({
         kind: 'quote',
         author: qAuthor,
         blocks: qBlocks,
-        sourceUrl: qLink ? normalizeStatusUrl(qLink.href) : '',
-        publishedAt: publishedAtFromElement(quoteEl, statusIdFromUrl((qLink && qLink.href) || '')),
+        sourceUrl: quoteSourceUrl,
+        publishedAt: publishedAtFromElement(quoteEl, statusIdFromUrl(quoteSourceUrl)),
       });
     });
 
@@ -2468,13 +2666,13 @@
       } else if (kind === 'quote') {
         const qAuthor = extractAuthor(node);
         const qBlocks = buildTweetBlocks(node, { quoteDepth: 2 }).blocks;
-        const qLink = node.querySelector('a[href*="/status/"]');
+        const quoteSourceUrl = quoteSourceUrlFromElement(node, qAuthor);
         blocks.push({
           kind: 'quote',
           author: qAuthor,
           blocks: qBlocks,
-          sourceUrl: qLink ? normalizeStatusUrl(qLink.href) : '',
-          publishedAt: publishedAtFromElement(node, statusIdFromUrl((qLink && qLink.href) || '')),
+          sourceUrl: quoteSourceUrl,
+          publishedAt: publishedAtFromElement(node, statusIdFromUrl(quoteSourceUrl)),
         });
       }
     }
@@ -3045,6 +3243,30 @@
           title || domain || cardUrl
         )}</span><span class="xa-card-domain">${escapeHtml(domain || cardUrl)} &rarr;</span></a>`;
       }
+      case 'poll': {
+        const choices = (b.choices || [])
+          .map((choice) => {
+            const observed = [choice.percentage, choice.votes && `${choice.votes} votes`]
+              .filter(Boolean)
+              .join(' / ');
+            return `<li><span>${escapeHtml(choice.label)}</span>${
+              observed ? `<strong>${escapeHtml(observed)}</strong>` : '<em>Result unavailable</em>'
+            }</li>`;
+          })
+          .join('');
+        return `<section class="xa-poll" aria-label="Poll" ${renderAttrs({
+          'data-xa-source-post-id': b.sourcePostId,
+          'data-xa-source-url': b.sourceUrl,
+          'data-xa-results-unavailable': b.resultsUnavailable ? 'true' : 'false',
+        })}>${b.question ? `<h3>${escapeHtml(b.question)}</h3>` : ''}<ol>${choices}</ol><p>${[
+          b.totalVotes && `${b.totalVotes} total votes`,
+          b.status,
+          b.resultsUnavailable && 'Results were unavailable at capture time',
+        ]
+          .filter(Boolean)
+          .map(escapeHtml)
+          .join(' / ')}</p></section>`;
+      }
       case 'truncation-notice':
         return `<p class="xa-truncated" data-xa-truncated="1">&#9888; Long-form post &mdash; only the preview above was available at export; X did not expose the full text.${
           safeUrl(b.sourceUrl)
@@ -3119,6 +3341,10 @@
         })}>${renderAuthorLine(b.author)}<div class="xa-quote-body">${
           b.blocks ? renderBlocks(b.blocks, qctx) : ''
         }</div>${
+          !safeUrl(b.sourceUrl)
+            ? '<p class="xa-quote-source-missing">Source URL unavailable &mdash; X did not expose a canonical permalink at capture time.</p>'
+            : ''
+        }${
           b.truncated
             ? `<p class="xa-truncated" data-xa-truncated="1">&#9888; Long-form post &mdash; only the preview above was available at export; X did not expose the full text.${
                 safeUrl(b.sourceUrl)
@@ -3161,6 +3387,9 @@
       headings: 0,
       paragraphs: 0,
       lists: 0,
+      polls: 0,
+      pollBlocks: [],
+      recoveredNotes: 0,
       quoteCards: 0,
       renderedTweetCards: 0,
       images: 0,
@@ -3205,6 +3434,20 @@
           (b.items || []).forEach((item) =>
             hrefsFromHtml(item).forEach((href) => stats.sourceLinks.add(href))
           );
+        } else if (b.kind === 'poll') {
+          stats.polls += 1;
+          stats.pollBlocks.push({
+            question: b.question || '',
+            choices: (b.choices || []).map((choice) => ({ ...choice })),
+            ...(b.totalVotes ? { totalVotes: b.totalVotes } : {}),
+            ...(b.status ? { status: b.status } : {}),
+            sourcePostId: b.sourcePostId || statusIdFromSourceUrl(b.sourceUrl),
+            sourceUrl: b.sourceUrl || '',
+            resultsUnavailable: b.resultsUnavailable === true,
+          });
+          if (b.sourceUrl) stats.sourceLinks.add(b.sourceUrl);
+        } else if (b.kind === 'note-recovered') {
+          stats.recoveredNotes += 1;
         } else if (b.kind === 'image') {
           stats.images += 1;
           markMediaUrl(b.url);
@@ -3279,7 +3522,13 @@
         } else if (b.kind === 'quote') {
           stats.quoteCards += 1;
           stats.renderedTweetCards += 1;
+          if (b.noteRecovered) stats.recoveredNotes += 1;
           if (b.sourceUrl) stats.sourceLinks.add(b.sourceUrl);
+          else if (b.blocks && b.blocks.length) {
+            stats.warnings.push(
+              'An embedded post was captured, but X did not expose its canonical source URL.'
+            );
+          }
           if (!b.blocks || !b.blocks.length) {
             const postId = statusIdFromSourceUrl(b.sourceUrl);
             addMissing(
@@ -3361,6 +3610,8 @@
         headings: stats.headings,
         paragraphs: stats.paragraphs,
         lists: stats.lists,
+        polls: stats.polls,
+        recoveredLongFormNotes: stats.recoveredNotes,
         quoteCards: stats.quoteCards,
         renderedTweetCards: stats.renderedTweetCards,
         images: stats.images,
@@ -3382,6 +3633,7 @@
       missing: stats.missing,
       incomplete: stats.incomplete,
       duplicates: stats.duplicateMedia,
+      polls: stats.pollBlocks,
       warnings: stats.warnings,
     };
     manifest.diagnostics = diagnostics;
@@ -3394,6 +3646,7 @@
     return `<details class="xa-capture"><summary>Capture summary</summary><dl>${[
       row('Main text', stats.mainTextCaptured ? 'Captured' : 'Not detected'),
       row('Embedded posts', stats.quoteCards),
+      row('Polls', stats.polls),
       row('Images', stats.images),
       row('Videos found', stats.videos),
       row('Videos preserved offline', stats.videosPreservedOffline),
@@ -3816,6 +4069,24 @@
       } else if (b.kind === 'link-card') {
         const label = b.title || b.domain || b.url;
         lines.push(`[Link card] ${markdownLineText(label)}: ${b.url}`);
+      } else if (b.kind === 'poll') {
+        const pollLines = [];
+        if (b.question) pollLines.push(`**Poll: ${markdownLineText(b.question)}**`);
+        else pollLines.push('**Poll**');
+        (b.choices || []).forEach((choice) => {
+          const result = [choice.percentage, choice.votes && `${choice.votes} votes`]
+            .filter(Boolean)
+            .join(', ');
+          pollLines.push(
+            `- ${markdownLineText(choice.label)}${result ? ` - ${result}` : ' - result unavailable'}`
+          );
+        });
+        if (b.totalVotes) pollLines.push(`- Total votes: ${markdownLineText(b.totalVotes)}`);
+        if (b.status) pollLines.push(`- Status: ${markdownLineText(b.status)}`);
+        if (b.resultsUnavailable)
+          pollLines.push('- Results were unavailable at capture time; no values were inferred.');
+        if (b.sourceUrl) pollLines.push(`- Source: ${b.sourceUrl}`);
+        lines.push(pollLines.join('\n'));
       } else if (b.kind === 'truncation-notice') {
         lines.push(
           'Warning: This is a long-form post and only its preview text was available at export time. The full text is NOT included; open the post source URL above to read it in full.'
@@ -3858,6 +4129,7 @@
     if (author.handle) lines.push(`Handle: ${markdownLineText(author.handle)}`);
     if (postId) lines.push(`Post ID: ${postId}`);
     if (block.sourceUrl) lines.push(`URL: ${block.sourceUrl}`);
+    else lines.push('URL: unavailable (X did not expose a canonical permalink at capture time)');
     if (safeIsoTime(block.publishedAt))
       lines.push(`Timestamp: ${readableUtcTime(block.publishedAt)}`);
     if (block.truncated) {
@@ -4051,6 +4323,7 @@
       `- Embedded posts: ${quoteCounts.total} total`,
       `  - Direct embedded posts: ${quoteCounts.direct}`,
       `  - Nested quoted posts: ${quoteCounts.nested}`,
+      `- Polls: ${stats.polls}`,
       `- Images: ${imageMedia.filter((item) => item.embedded).length} captured, ${
         imageMedia.filter((item) => item.missing).length
       } missing`,
@@ -4071,7 +4344,12 @@
       lines.push('  - None');
     }
 
-    lines.push('', '---', '', model.thread ? '## Full Thread' : '## Main Article', '');
+    const mainContentHeading = model.thread
+      ? '## Full Thread'
+      : model.type === 'article'
+        ? '## Main Article'
+        : '## Main Post';
+    lines.push('', '---', '', mainContentHeading, '');
     lines.push(
       renderLlmBlocks(model.blocks, {
         includeMedia: true,
@@ -4132,7 +4410,7 @@
       .trim()}\n`;
   }
 
-  function assembleHtml(model, debugJson = '') {
+  function assembleHtml(model, debugJson = '', options = {}) {
     prepareArchiveModel(model);
     const ctx = createRenderContext(model);
     const body = renderBlocks(model.blocks, ctx);
@@ -4144,6 +4422,10 @@
     const debugScript = `<script id="sourcecapsule-debug" type="application/json">${escapeJsonScript(
       JSON.stringify(manifest, null, 2)
     )}</script>`;
+    const installFooter =
+      options.distribution === 'shared'
+        ? `    <aside class="xa-install-cta"><strong>Captured with SourceCapsule</strong><span>Preserve complete X threads for AI and offline reading.</span><a href="${escapeAttr(CONFIG.installUrl)}" target="_blank" rel="noopener noreferrer">Install SourceCapsule</a></aside>`
+        : '';
 
     const html = `<!doctype html>
 <html lang="${documentLang}">
@@ -4221,6 +4503,7 @@ ${body}
       <div><dt>Exporter</dt><dd>${APP} v${VERSION}</dd></div>
     </dl>
     <p class="xa-disclaimer">This archive preserves content visible to the logged-in user at export time. It may not include content that was unavailable, private, deleted, or failed to load during capture.</p>
+${installFooter}
   </footer>
 </main>
 <div class="xa-lightbox" id="xa-lightbox" role="dialog" aria-modal="true" aria-label="Image preview" tabindex="-1"><button class="xa-lightbox-close" type="button" aria-label="Close image preview">&times;</button><img alt="" aria-hidden="true"></div>
@@ -4298,6 +4581,11 @@ body{font:17px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,
 .xa-code code{font:14px/1.55 ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",Menlo,monospace}
 .xa-blockquote{margin:1.1em 0;padding:.05em 0 .05em 1.2em;border-left:3px solid var(--quoteline);color:var(--fg)}
 .xa-blockquote p:last-child,.xa-blockquote ul:last-child,.xa-blockquote ol:last-child{margin-bottom:0}
+.xa-poll{margin:1.2em 0;padding:14px 16px;border:1px solid var(--quoteline);border-radius:14px;background:var(--card)}
+.xa-poll h3{margin:0 0 10px;font-size:17px}.xa-poll ol{list-style:none;margin:0;padding:0}
+.xa-poll li{display:flex;justify-content:space-between;gap:14px;padding:8px 0;border-top:1px solid var(--line)}
+.xa-poll li:first-child{border-top:0}.xa-poll li strong,.xa-poll li em{white-space:nowrap;font-size:14px;color:var(--muted)}
+.xa-poll p{margin:8px 0 0;font-size:13px;color:var(--muted)}
 figure{margin:1.4em 0}
 figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px solid var(--line)}
 .xa-media{margin:1.1em 0}
@@ -4333,6 +4621,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
 .xa-quote-body .xa-media-single img,.xa-quote-body .xa-gallery{border-radius:12px}
 .xa-quote-body figure video{border-radius:12px}
 .xa-quote-link{display:inline-block;margin-top:6px;font-size:14px;color:var(--accent);text-decoration:none}
+.xa-quote-source-missing{margin:8px 0 0;font-size:13px;color:var(--muted)}
 .xa-truncated{margin:8px 0 0;padding:8px 10px;border-radius:8px;font-size:13px;line-height:1.4;
   background:rgba(255,180,0,.12);border:1px solid rgba(255,180,0,.35);color:var(--fg)}
 .xa-truncated a{color:var(--accent);text-decoration:none}
@@ -4355,6 +4644,8 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
 .xa-footer dl{display:grid;gap:8px;margin:0 0 14px}
 .xa-footer a{color:var(--accent);text-decoration:none;word-break:break-all}
 .xa-disclaimer{font-size:12px;opacity:.85}
+.xa-install-cta{display:flex;flex-direction:column;align-items:flex-start;gap:4px;margin-top:18px;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+.xa-install-cta strong{color:var(--fg)}.xa-install-cta a{margin-top:4px;font-weight:700}
 @media (max-width:520px){.xa-doc{padding:24px 14px 64px}.xa-capture dl{grid-template-columns:1fr}.xa-body{font-size:17px}.xa-title{font-size:26px}}
 @media print{
   :root{--bg:#fff;--fg:#000;--muted:#444;--line:#bbb;--card:#fff;--accent:#000;--quoteline:#999}
@@ -4506,7 +4797,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       mediaFiles: publicMedia,
       sharedLink: true,
     });
-    const html = assembleHtml(model, debugJson);
+    const html = assembleHtml(model, debugJson, { distribution: 'shared' });
     const manifest = renderArchiveManifestJson(model, debugJson);
     const uploads = [
       { name: 'content.html', data: html, type: 'text/html;charset=utf-8' },
@@ -4568,6 +4859,10 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
   const IDB_NAME = 'sourcecapsule';
   const IDB_STORE = 'handles';
   const ROOT_HANDLE_KEY = 'rootDir';
+  const FOLDER_PICKER_SOURCE = `${APP}:folder-picker`;
+  const FOLDER_PICKER_REQUEST_EVENT = 'sourcecapsule:pick-directory';
+  let lastFolderPickerError = '';
+  let extensionFolderPickerSupport = null;
 
   function getPrefs() {
     try {
@@ -4598,6 +4893,61 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       errlog(e);
     }
     return next;
+  }
+
+  function extensionControllerMessage(message) {
+    if (
+      !message ||
+      typeof message !== 'object' ||
+      message.type !== 'sourcecapsule:controller' ||
+      message.version !== 1
+    ) {
+      return { ok: false, error: 'Invalid SourceCapsule extension message.' };
+    }
+    if (message.action === 'get-state') {
+      return {
+        ok: true,
+        version: VERSION,
+        prefs: getPrefs(),
+        pageUrl: location.href,
+        folderPickerSupported: folderPickerAvailable(),
+        libraryDelivery: folderPickerAvailable() ? 'folder' : 'zip',
+      };
+    }
+    if (message.action === 'set-preference') {
+      const value = message.value || {};
+      const valid =
+        (value.key === 'layout' && ['date', 'flat'].includes(value.value)) ||
+        (value.key === 'contents' && ['full', 'lean'].includes(value.value)) ||
+        (value.key === 'floatingButton' && typeof value.value === 'boolean');
+      if (!valid) return { ok: false, error: 'That preference value is not supported.' };
+      const prefs = setPrefs({ [value.key]: value.value });
+      registerSettingsMenu();
+      ensureButton();
+      return { ok: true, prefs };
+    }
+    if (message.action === 'pick-folder') {
+      showFolderPickerPrompt();
+      return { ok: true, requiresPageAction: true };
+    }
+    return { ok: false, error: 'Unknown SourceCapsule extension action.' };
+  }
+
+  let extensionControllerRegistered = false;
+  function registerExtensionController() {
+    if (
+      extensionControllerRegistered ||
+      globalThis.__SOURCECAPSULE_EXTENSION__ !== true ||
+      typeof chrome === 'undefined' ||
+      !chrome.runtime ||
+      !chrome.runtime.onMessage
+    )
+      return;
+    extensionControllerRegistered = true;
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      sendResponse(extensionControllerMessage(message));
+      return false;
+    });
   }
 
   function getShareLinks() {
@@ -4670,6 +5020,60 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     return null;
   }
 
+  function extensionFolderPickerAvailable() {
+    return (
+      globalThis.__SOURCECAPSULE_EXTENSION__ === true && extensionFolderPickerSupport !== false
+    );
+  }
+
+  function folderPickerAvailable() {
+    return !!fsaWindow() || extensionFolderPickerAvailable();
+  }
+
+  function pickDirectoryViaExtensionBridge({ timeoutMs = 65000 } = {}) {
+    return new Promise((resolve, reject) => {
+      const requestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
+      let timer;
+      const finish = (callback, value) => {
+        window.removeEventListener('message', onMessage);
+        clearTimeout(timer);
+        callback(value);
+      };
+      const onMessage = (event) => {
+        if (!event || event.source !== window) return;
+        if (event.origin && event.origin !== location.origin) return;
+        const data = event.data;
+        if (
+          !data ||
+          typeof data !== 'object' ||
+          data.source !== FOLDER_PICKER_SOURCE ||
+          data.contractVersion !== 1 ||
+          data.type !== 'result' ||
+          data.requestId !== requestId
+        )
+          return;
+        if (data.ok && data.handle && data.handle.kind === 'directory') {
+          finish(resolve, data.handle);
+          return;
+        }
+        const error = new Error(String(data.error || 'Folder selection failed.'));
+        error.name = String(data.errorName || 'Error');
+        if (error.name === 'NotSupportedError') extensionFolderPickerSupport = false;
+        finish(reject, error);
+      };
+      window.addEventListener('message', onMessage);
+      timer = setTimeout(
+        () => finish(reject, new Error('Folder picker did not respond. Refresh X and try again.')),
+        timeoutMs
+      );
+      window.dispatchEvent(
+        new window.CustomEvent(FOLDER_PICKER_REQUEST_EVENT, {
+          detail: { source: FOLDER_PICKER_SOURCE, contractVersion: 1, requestId },
+        })
+      );
+    });
+  }
+
   async function verifyPermission(handle) {
     if (!handle || typeof handle.queryPermission !== 'function') return true;
     const opts = { mode: 'readwrite' };
@@ -4686,7 +5090,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
    */
   async function getRootDir({ forcePick = false } = {}) {
     const win = fsaWindow();
-    if (!win) return null;
+    lastFolderPickerError = '';
     if (!forcePick) {
       try {
         const saved = await idbGet(ROOT_HANDLE_KEY);
@@ -4697,8 +5101,18 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     }
     let handle;
     try {
-      handle = await win.showDirectoryPicker({ id: 'sourcecapsule', mode: 'readwrite' });
-    } catch {
+      if (win) {
+        handle = await win.showDirectoryPicker({ id: 'sourcecapsule', mode: 'readwrite' });
+      } else if (extensionFolderPickerAvailable()) {
+        handle = await pickDirectoryViaExtensionBridge();
+      } else {
+        return null;
+      }
+    } catch (error) {
+      lastFolderPickerError =
+        error && error.name === 'AbortError'
+          ? 'Folder selection was cancelled.'
+          : `Could not open the folder picker: ${error.message || error}`;
       return null; // user cancelled the picker
     }
     if (!(await verifyPermission(handle))) return null;
@@ -4832,8 +5246,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 #${CONFIG.toastId}.show{opacity:1;transform:none}
 #${CONFIG.toastId}.error{background:#b00020}
 .xa-modal-backdrop{position:fixed;inset:0;z-index:100001;display:flex;align-items:center;justify-content:center;
-  padding:20px;background:rgba(0,0,0,.62);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  padding:20px;overflow:auto;background:rgba(0,0,0,.62);font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
 .xa-modal{width:min(480px,100%);padding:20px;border-radius:16px;background:#fff;color:#0f1419;
+  box-sizing:border-box;max-height:calc(100vh - 40px);overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;
   box-shadow:0 20px 70px rgba(0,0,0,.45)}.xa-modal h2{margin:0 0 8px;font-size:20px}
 .xa-modal p{margin:0 0 14px;color:#536471}.xa-modal label{display:block;margin:12px 0 5px;font-weight:650}
 .xa-modal input,.xa-modal textarea,.xa-modal select{box-sizing:border-box;width:100%;padding:10px 11px;
@@ -4844,9 +5259,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 .xa-modal-open{display:inline-flex;align-items:center;padding:9px 14px;border-radius:999px;
   font:650 14px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;text-decoration:none}
 .xa-share-url{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.xa-share-status{min-height:20px}
+.xa-receipt-grid{display:grid;grid-template-columns:1fr auto;gap:6px 14px;margin:14px 0}.xa-receipt-grid dt{color:#536471}.xa-receipt-grid dd{margin:0;font-weight:700;text-align:right}
+.xa-receipt-location{padding:9px;border-radius:8px;background:#eff3f4;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}
+.xa-receipt-status{font-weight:700}.xa-receipt-status.warning,.xa-receipt-action-status.error{color:#b00020}.xa-receipt-details{margin-top:10px}.xa-receipt-details[open]{max-height:min(42vh,360px);overflow:auto;overscroll-behavior:contain}.xa-receipt-actions{flex-wrap:wrap}
 @media (prefers-color-scheme:dark){.xa-modal{background:#15202b;color:#e7e9ea}.xa-modal p{color:#8b98a5}
   .xa-modal input,.xa-modal textarea,.xa-modal select{background:#1f2733;color:#e7e9ea;border-color:#536471}
-  .xa-modal-cancel{background:#273340;color:#e7e9ea}}
+  .xa-modal-cancel{background:#273340;color:#e7e9ea}.xa-receipt-location{background:#273340}.xa-receipt-grid dt{color:#8b98a5}}
 `;
     (document.head || document.documentElement).appendChild(s);
   }
@@ -4868,10 +5286,36 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     }
   }
 
+  function hideToast() {
+    const toast = document.getElementById(CONFIG.toastId);
+    if (!toast) return;
+    if (toast._timer) clearTimeout(toast._timer);
+    toast.classList.remove('show');
+  }
+
   function showShareResult(created, { copied = false } = {}) {
     const viewUrl = safeUrl(created && created.viewUrl);
     if (!viewUrl) throw new Error('Share service returned an invalid public link.');
     ensureStyle();
+    const receipt = document.querySelector('.xa-capture-receipt');
+    if (receipt) {
+      const status = receipt.querySelector('.xa-receipt-action-status');
+      status.classList.remove('error');
+      status.textContent = copied
+        ? 'Share link created and copied.'
+        : 'Share link created. Automatic copy was blocked; use the link below.';
+      let link = receipt.querySelector('.xa-receipt-share-link');
+      if (!link) {
+        link = document.createElement('a');
+        link.className = 'xa-receipt-share-link';
+        link.target = '_blank';
+        link.rel = 'noopener';
+        receipt.querySelector('.xa-receipt-details').after(link);
+      }
+      link.href = viewUrl;
+      link.textContent = viewUrl;
+      return;
+    }
     const existing = document.querySelector('.xa-share-result');
     if (existing) existing.remove();
 
@@ -4939,6 +5383,92 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     input.select();
   }
 
+  function setReceiptActionStatus(message, { error = false } = {}) {
+    const status = document.querySelector('.xa-capture-receipt .xa-receipt-action-status');
+    if (!status) return;
+    status.textContent = message;
+    status.classList.toggle('error', error);
+  }
+
+  function showCaptureReceipt({
+    model,
+    debugJson = '',
+    savedLocation = '',
+    markdown = '',
+    videosPreservedOffline,
+    onShare,
+  }) {
+    ensureStyle();
+    hideToast();
+    document.querySelector('.xa-capture-receipt')?.remove();
+    const stats = archiveStats(model);
+    const imageMedia = stats.media.filter((item) => item.type === 'image');
+    const imagesCaptured = imageMedia.filter((item) => item.embedded).length;
+    const imagesMissing = imageMedia.filter((item) => item.missing).length;
+    const posts = model.thread ? model.thread.capturedPosts : 1;
+    const savedOfflineVideos = Number.isFinite(videosPreservedOffline)
+      ? videosPreservedOffline
+      : stats.videosPreservedOffline;
+    const complete = stats.missingMedia === 0 && stats.incompleteMedia === 0;
+    const retainedMarkdown = markdown || renderLlmMarkdown(model, debugJson);
+    const backdrop = document.createElement('div');
+    backdrop.className = 'xa-modal-backdrop xa-capture-receipt';
+    backdrop.innerHTML = `<section class="xa-modal" role="dialog" aria-modal="true" aria-labelledby="xa-receipt-title"><h2 id="xa-receipt-title">Capture saved</h2>${
+      savedLocation
+        ? `<p>Saved to</p><div class="xa-receipt-location">${escapeHtml(savedLocation)}</div>`
+        : ''
+    }<dl class="xa-receipt-grid"><dt>Posts captured</dt><dd>${escapeHtml(posts)}</dd><dt>Polls captured</dt><dd>${stats.polls}</dd><dt>Images</dt><dd>${imagesCaptured} captured · ${imagesMissing} missing</dd><dt>Videos preserved offline</dt><dd>${savedOfflineVideos}</dd><dt>Video posters captured</dt><dd>${stats.videoPostersCaptured}</dd><dt>Incomplete media</dt><dd>${stats.incompleteMedia}</dd><dt>Recovered long-form Notes</dt><dd>${stats.recoveredNotes}</dd></dl><p class="xa-receipt-status ${complete ? '' : 'warning'}">${
+      complete
+        ? 'Complete — no missing media detected'
+        : `${stats.missingMedia} missing and ${stats.incompleteMedia} incomplete item(s)`
+    }</p><details class="xa-receipt-details" ${complete ? '' : 'open'}><summary>Capture details</summary><ul>${
+      stats.warnings.length
+        ? stats.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')
+        : '<li>No capture warnings.</li>'
+    }</ul></details><p class="xa-receipt-action-status" aria-live="polite"></p><div class="xa-modal-actions xa-receipt-actions"><button type="button" class="xa-receipt-copy">Copy for AI</button>${
+      typeof onShare === 'function'
+        ? '<button type="button" class="xa-receipt-share">Create share link</button>'
+        : ''
+    }<button type="button" class="xa-modal-cancel">Done</button></div></section>`;
+    const done = backdrop.querySelector('.xa-modal-cancel');
+    const close = () => {
+      document.removeEventListener('keydown', onKeyDown, true);
+      backdrop.remove();
+    };
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') close();
+    };
+    done.addEventListener('click', close);
+    backdrop.querySelector('.xa-receipt-copy').addEventListener('click', async () => {
+      try {
+        await copyText(retainedMarkdown);
+        setReceiptActionStatus('Clean Markdown copied for AI.');
+      } catch (error) {
+        setReceiptActionStatus(`Copy failed: ${error.message}`, { error: true });
+      }
+    });
+    const shareButton = backdrop.querySelector('.xa-receipt-share');
+    if (shareButton) {
+      shareButton.addEventListener('click', async () => {
+        shareButton.disabled = true;
+        setReceiptActionStatus('Preparing share confirmation…');
+        try {
+          await onShare();
+        } catch (error) {
+          setReceiptActionStatus(`Local save is safe. Share failed: ${error.message}`, {
+            error: true,
+          });
+        } finally {
+          shareButton.disabled = false;
+        }
+      });
+    }
+    document.addEventListener('keydown', onKeyDown, true);
+    document.body.appendChild(backdrop);
+    done.focus();
+    return backdrop;
+  }
+
   function promptCaptureOptions({ share = false, saveLocal = false } = {}) {
     ensureStyle();
     return new Promise((resolve) => {
@@ -4997,6 +5527,34 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     });
   }
 
+  function showFolderPickerPrompt() {
+    ensureStyle();
+    const old = document.querySelector('.xa-folder-picker-prompt');
+    if (old) old.remove();
+    const backdrop = document.createElement('div');
+    backdrop.className = 'xa-modal-backdrop xa-folder-picker-prompt';
+    backdrop.innerHTML = `<section class="xa-modal" role="dialog" aria-modal="true" aria-labelledby="xa-folder-title"><h2 id="xa-folder-title">Change export folder</h2><p>Chrome requires a click on this page before it can open the folder picker.</p><div class="xa-modal-actions"><button type="button" class="xa-modal-cancel">Cancel</button><button type="button" class="xa-modal-submit">Choose folder</button></div></section>`;
+    const close = () => backdrop.remove();
+    backdrop.querySelector('.xa-modal-cancel').addEventListener('click', close);
+    backdrop.querySelector('.xa-modal-submit').addEventListener('click', async () => {
+      const button = backdrop.querySelector('.xa-modal-submit');
+      button.disabled = true;
+      const handle = await getRootDir({ forcePick: true });
+      close();
+      showToast(
+        handle
+          ? `Export folder set: ${handle.name}`
+          : lastFolderPickerError || 'Export folder unchanged',
+        { error: !handle }
+      );
+    });
+    backdrop.addEventListener('click', (event) => {
+      if (event.target === backdrop) close();
+    });
+    document.body.appendChild(backdrop);
+    backdrop.querySelector('.xa-modal-submit').focus();
+  }
+
   // ===========================================================================
   // PROGRESSIVE MEDIA HARVEST
   // ---------------------------------------------------------------------------
@@ -5031,6 +5589,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     errors: [],
     lastUrls: [],
   };
+  const networkCapturePayloadSignatures = new Set();
   let pageScriptVideoCandidatesScanned = false;
   let nudgedVideoPlayers = new WeakSet();
   let capturedImageUrls = new Set(); // urls already placed in the current model
@@ -5054,6 +5613,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     networkCaptureDiagnostics.messages = 0;
     networkCaptureDiagnostics.candidates = 0;
     networkCaptureDiagnostics.lastUrls = [];
+    networkCapturePayloadSignatures.clear();
   }
 
   function rememberNetworkCaptureUrl(url) {
@@ -5263,18 +5823,49 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return sortVideoCandidates(out);
   }
 
+  function validateNetworkCapturePayload(payload) {
+    if (!payload || typeof payload !== 'object' || payload.source !== `${APP}:network-capture`)
+      return false;
+    if (payload.contractVersion !== undefined && payload.contractVersion !== 1) return false;
+    if (!['installed', 'response'].includes(payload.type)) return false;
+    if (typeof payload.transport !== 'string' || payload.transport.length > 100) return false;
+    if (payload.type === 'installed') return true;
+    if (
+      typeof payload.body !== 'string' ||
+      payload.body.length > CONFIG.video.networkCaptureMaxChars
+    )
+      return false;
+    if (typeof payload.url !== 'string' || payload.url.length > 4096) return false;
+    return true;
+  }
+
+  function networkCaptureSignature(payload) {
+    const body = payload.body || '';
+    return `${payload.url}|${body.length}|${body.slice(0, 80)}|${body.slice(-80)}`;
+  }
+
   function handleNetworkCapturePayload(payload) {
-    if (!payload || payload.source !== `${APP}:network-capture`) {
-      return [];
-    }
+    if (!validateNetworkCapturePayload(payload)) return [];
     networkCaptureDiagnostics.messages += 1;
     if (payload.type === 'installed') {
       networkCaptureDiagnostics.installed = true;
       networkCaptureDiagnostics.injectedInstalled = true;
-      networkCaptureDiagnostics.mode = networkCaptureDiagnostics.directInstalled
-        ? 'unsafeWindow+injected'
-        : 'injected';
+      const extensionBridge = payload.transport === 'extension-main';
+      if (extensionBridge && typeof payload.folderPickerAvailable === 'boolean') {
+        extensionFolderPickerSupport = payload.folderPickerAvailable;
+      }
+      networkCaptureDiagnostics.mode = extensionBridge
+        ? 'extension-main'
+        : networkCaptureDiagnostics.directInstalled
+          ? 'unsafeWindow+injected'
+          : 'injected';
       return [];
+    }
+    const signature = networkCaptureSignature(payload);
+    if (networkCapturePayloadSignatures.has(signature)) return [];
+    networkCapturePayloadSignatures.add(signature);
+    if (networkCapturePayloadSignatures.size > 200) {
+      networkCapturePayloadSignatures.delete(networkCapturePayloadSignatures.values().next().value);
     }
     if (payload.type !== 'response') return [];
     networkCaptureDiagnostics.responsesSeen += 1;
@@ -5308,7 +5899,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (!event || event.source !== window) return;
     if (event.origin && event.origin !== location.origin) return;
     const data = event.data;
-    if (!data || typeof data !== 'object' || data.source !== `${APP}:network-capture`) return;
+    if (!validateNetworkCapturePayload(data)) return;
     handleNetworkCapturePayload(data);
   }
 
@@ -5711,6 +6302,121 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     };
   }
 
+  function normalizedPostText(value) {
+    return decodeBasicEntities(String(value || ''))
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase();
+  }
+
+  function quoteTextForMatching(quote) {
+    const paragraphs = (quote.blocks || [])
+      .filter((block) => block.kind === 'paragraph')
+      .map((block) => textFromHtml(block.html));
+    return normalizedPostText(paragraphs.join(' '));
+  }
+
+  function syndicationRelationCandidates(tweet) {
+    const candidates = [];
+    const legacy = (tweet && tweet.legacy) || tweet || {};
+    const add = ({ id, handle, text, relation }) => {
+      const statusId = String(id || '');
+      if (!/^\d+$/.test(statusId)) return;
+      candidates.push({
+        id: statusId,
+        handle: String(handle || '').replace(/^@/, ''),
+        text: normalizedPostText(text),
+        relation,
+      });
+    };
+    const quoted = tweet && tweet.quoted_tweet;
+    if (quoted) {
+      add({
+        id: quoted.id_str || quoted.rest_id || (quoted.legacy && quoted.legacy.id_str),
+        handle:
+          (quoted.user && quoted.user.screen_name) ||
+          (quoted.core &&
+            quoted.core.user_results &&
+            quoted.core.user_results.result &&
+            quoted.core.user_results.result.legacy &&
+            quoted.core.user_results.result.legacy.screen_name),
+        text: quoted.text || (quoted.legacy && quoted.legacy.full_text),
+        relation: 'quote',
+      });
+    }
+    add({
+      id:
+        legacy.in_reply_to_status_id_str ||
+        legacy.in_reply_to_status_id ||
+        (tweet && tweet.in_reply_to_status_id_str),
+      handle: legacy.in_reply_to_screen_name || (tweet && tweet.in_reply_to_screen_name) || '',
+      text: '',
+      relation: 'reply',
+    });
+    return candidates;
+  }
+
+  function relationMatchesQuote(candidate, quote, candidateCount, missingQuoteCount) {
+    const quoteHandle = String((quote.author && quote.author.handle) || '')
+      .replace(/^@/, '')
+      .toLowerCase();
+    const candidateHandle = candidate.handle.toLowerCase();
+    if (quoteHandle && candidateHandle) return quoteHandle === candidateHandle;
+    const quoteText = quoteTextForMatching(quote);
+    if (quoteText && candidate.text) {
+      const sample = quoteText.slice(0, Math.min(120, quoteText.length));
+      return (
+        candidate.text.startsWith(sample) || quoteText.startsWith(candidate.text.slice(0, 120))
+      );
+    }
+    return candidateCount === 1 && missingQuoteCount === 1;
+  }
+
+  async function recoverMissingQuoteSourcesViaSyndication(
+    model,
+    onProgress,
+    fetchTweet = fetchTweetSyndication
+  ) {
+    const missingQuotes = directQuotes(model.blocks).filter(
+      (quote) => !statusIdFromUrl(quote.sourceUrl)
+    );
+    if (!missingQuotes.length) return model;
+    const statusIds = new Set([statusIdFromUrl(model.sourceUrl)]);
+    (model.blocks || []).forEach((block) => {
+      if (block.kind === 'thread-marker' && block.statusId) statusIds.add(block.statusId);
+    });
+    statusIds.delete('');
+    const candidates = [];
+    let done = 0;
+    onProgress && onProgress(0, statusIds.size);
+    for (const statusId of statusIds) {
+      try {
+        const data = await fetchTweet(statusId);
+        syndicationRelationCandidates(data).forEach((candidate) => candidates.push(candidate));
+      } catch (error) {
+        warn('embedded-post source recovery failed for', statusId, '-', error.message);
+      }
+      done += 1;
+      onProgress && onProgress(done, statusIds.size);
+    }
+    const unused = new Set(candidates);
+    missingQuotes.forEach((quote) => {
+      const matches = Array.from(unused).filter((candidate) =>
+        relationMatchesQuote(candidate, quote, candidates.length, missingQuotes.length)
+      );
+      if (matches.length !== 1) return;
+      const candidate = matches[0];
+      const handle =
+        candidate.handle || String((quote.author && quote.author.handle) || '').replace(/^@/, '');
+      if (!handle) return;
+      quote.sourceUrl = `https://x.com/${handle}/status/${candidate.id}`;
+      quote.relation = candidate.relation;
+      unused.delete(candidate);
+    });
+    return model;
+  }
+
   /**
    * Replace each top-level quote block's content with authoritative syndication
    * data (by status id). On any failure the original DOM-extracted quote is kept.
@@ -5937,9 +6643,37 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     { key: 'both', label: 'Download HTML + Markdown' },
   ];
   const POST_EXPORT_TYPES = [
-    { key: 'library-single', label: 'Save this post only' },
-    ...EXPORT_TYPES.filter((item) => item.key !== 'library'),
+    { key: 'library-thread', label: 'Save full thread' },
+    { divider: true },
+    { key: 'library-note', label: 'Save this post with note / tags' },
+    { divider: true },
+    { key: 'copy', label: 'Copy this post as Markdown' },
+    { key: 'share', label: 'Share this post with AI' },
+    { key: 'library-share', label: 'Save this post locally + share' },
+    { divider: true },
+    { key: 'both', label: 'Download this post HTML + Markdown' },
   ];
+
+  function postExportRequest(exportType) {
+    return {
+      exportType: exportType === 'library-thread' ? 'library' : exportType,
+      includeThread: exportType === 'library-thread',
+    };
+  }
+
+  function postControlCaptureMode(tweetEl, column) {
+    const statusId = tweetStatusId(tweetEl);
+    const isFocusedPost = !!statusId && statusId === currentStatusId();
+    const isThread = isFocusedPost && buildTweetSequence(column || document, tweetEl).length > 1;
+    return {
+      isThread,
+      includeThread: isThread,
+      label: isThread ? 'Save thread' : 'Save post',
+      title: isThread
+        ? 'Quick-save this full thread to your SourceCapsule library'
+        : 'Quick-save only this post to your SourceCapsule library',
+    };
+  }
 
   // Only one export menu is open at a time; this closes the previous one.
   let closeOpenExportMenu = null;
@@ -6209,8 +6943,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (root) {
       await writeEntriesToDir(root, paths.segments, entries);
       await updateLibraryIndex(root, indexEntry);
-      showToast(`Saved to ${[root.name, ...paths.segments].join('/')}`);
-      return;
+      return {
+        location: [root.name, ...paths.segments].join('/'),
+        markdown,
+        videosPreservedOffline: prefs.contents === 'full' ? stats.videosPreservedOffline : 0,
+      };
     }
     // No handle => the browser lacks the File System Access API (the caller already handled a
     // user-cancelled picker). Fall back to a single .zip. Files sit at the ZIP ROOT (no inner
@@ -6226,7 +6963,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       bytes: new TextEncoder().encode(`${renderLibraryIndexItem(indexEntry)}\n`),
     });
     downloadBlob(`${zipName}.zip`, new Blob([buildZip(zipEntries)], { type: 'application/zip' }));
-    showToast(`Folder save not supported in this browser; saved ${zipName}.zip`);
+    return {
+      location: `${zipName}.zip`,
+      markdown,
+      videosPreservedOffline: prefs.contents === 'full' ? stats.videosPreservedOffline : 0,
+    };
   }
 
   /**
@@ -6271,8 +7012,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       let libraryRoot = null;
       if (needsLibrary) {
         libraryRoot = await getRootDir();
-        if (!libraryRoot && fsaWindow()) {
-          showToast('Export folder not set; export cancelled', { error: true });
+        if (!libraryRoot && folderPickerAvailable()) {
+          showToast(lastFolderPickerError || 'Export folder not set; export cancelled', {
+            error: true,
+          });
           return;
         }
       }
@@ -6307,6 +7050,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       log('model', model);
 
       if (CONFIG.useSyndication) {
+        await recoverMissingQuoteSourcesViaSyndication(model, (done, total) =>
+          showToast(
+            total ? `Resolving embedded post sources... ${done}/${total}` : 'Reading page...',
+            { sticky: true }
+          )
+        );
         await enrichQuotesViaSyndication(model, (done, total) =>
           showToast(total ? `Fetching embedded tweets... ${done}/${total}` : 'Reading page...', {
             sticky: true,
@@ -6330,11 +7079,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       });
 
       showToast('Assembling files...', { sticky: true });
-      const publishAndCopyShare = async () => {
+      const publishAndCopyShare = async (expiryDays = metadata.expiryDays) => {
         const created = await createShareLink(
           model,
           debugJson,
-          metadata.expiryDays || CONFIG.share.defaultExpiryDays,
+          expiryDays || CONFIG.share.defaultExpiryDays,
           (message, done, total) =>
             showToast(total ? `[${Math.min(done + 1, total)}/${total}] ${message}` : message, {
               sticky: true,
@@ -6353,18 +7102,45 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           `Share link ready; expires ${readableUtcTime(created.expiresAt)}${copied ? ' (copied)' : ''}`
         );
       };
+      const shareFromReceipt = async () => {
+        const shareMetadata = await promptCaptureOptions({ share: true, saveLocal: true });
+        if (!shareMetadata) {
+          setReceiptActionStatus('Share cancelled. Your local save is unchanged.');
+          return;
+        }
+        applyCaptureMetadata(model, shareMetadata);
+        await publishAndCopyShare(shareMetadata.expiryDays);
+      };
       if (outputType === 'library-share') {
-        await saveToLibrary(model, debugJson, libraryRoot);
+        const saved = await saveToLibrary(model, debugJson, libraryRoot);
+        showCaptureReceipt({
+          model,
+          debugJson,
+          savedLocation: saved.location,
+          markdown: saved.markdown,
+          videosPreservedOffline: saved.videosPreservedOffline,
+          onShare: shareFromReceipt,
+        });
         try {
           await publishAndCopyShare();
         } catch (shareError) {
           errlog(shareError);
-          showToast(`Saved locally, but link failed: ${shareError.message}`, { error: true });
+          setReceiptActionStatus(`Local save is safe. Share failed: ${shareError.message}`, {
+            error: true,
+          });
         }
         return;
       }
       if (outputType === 'library') {
-        await saveToLibrary(model, debugJson, libraryRoot);
+        const saved = await saveToLibrary(model, debugJson, libraryRoot);
+        showCaptureReceipt({
+          model,
+          debugJson,
+          savedLocation: saved.location,
+          markdown: saved.markdown,
+          videosPreservedOffline: saved.videosPreservedOffline,
+          onShare: shareFromReceipt,
+        });
         return;
       }
       if (outputType === 'copy') {
@@ -6382,6 +7158,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const basename = `${slugify(model.title)}.${nowStamp()}`;
       const htmlFilename = `${basename}.html`;
       const saved = [];
+      let receiptMarkdown = '';
       if (outputType === 'html' || outputType === 'both') {
         const html = assembleHtml(model, debugJson);
         downloadHtml(htmlFilename, html);
@@ -6393,6 +7170,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         // a Markdown-only export has no companion on disk, so the markdown must not claim one.
         const companionHtmlFilename = outputType === 'both' ? htmlFilename : '';
         const markdown = renderLlmMarkdown(model, debugJson, { companionHtmlFilename });
+        receiptMarkdown = markdown;
         const markdownFilename = `${basename}.llm.md`;
         downloadBlob(
           markdownFilename,
@@ -6401,7 +7179,18 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         saved.push(markdownFilename);
         log('markdown', markdownFilename, humanBytes(markdown.length));
       }
-      showToast(`Saved ${saved.join(' and ')}`);
+      if (!receiptMarkdown) receiptMarkdown = renderLlmMarkdown(model, debugJson);
+      showCaptureReceipt({
+        model,
+        debugJson,
+        savedLocation: saved.join(' and '),
+        markdown: receiptMarkdown,
+        videosPreservedOffline:
+          outputType === 'html' || outputType === 'both'
+            ? archiveStats(model).videosPreservedOffline
+            : 0,
+        onShare: shareFromReceipt,
+      });
     } catch (e) {
       errlog(e);
       showToast(`Export failed: ${e.message}`, { error: true });
@@ -6427,12 +7216,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       triggerLabel: type === 'article' ? 'Save article' : 'Save thread',
       triggerTitle: `Quick-save this ${type === 'article' ? 'article' : 'full thread'} to your SourceCapsule library (drag to move)`,
       className: 'xa-ctl xa-ctl-floating',
-      menuItems: type === 'article' ? EXPORT_TYPES : POST_EXPORT_TYPES,
+      menuItems: EXPORT_TYPES,
       onQuick: (trigger) => runExport('library', { trigger, includeThread: true }),
       onPick: (exportType, trigger) =>
-        runExport(exportType === 'library-single' ? 'library' : exportType, {
+        runExport(exportType, {
           trigger,
-          includeThread: exportType !== 'library-single',
+          includeThread: true,
         }),
       draggable: true,
     });
@@ -6450,21 +7239,40 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const column = pick(document, CONFIG.selectors.primaryColumn, { quiet: true });
     if (!column) return;
     topLevelTweetEls(column).forEach((tweetEl) => {
-      if (tweetEl.querySelector(`.${CONFIG.postControlClass}`)) return; // already has a control
       if (!tweetStatusId(tweetEl)) return; // only real posts (skip compose box / ads)
+      const mode = postControlCaptureMode(tweetEl, column);
+      const existing = tweetEl.querySelector(`.${CONFIG.postControlClass}`);
+      if (existing) {
+        // A continuation may render after the root control. Keep the label honest as X lazily
+        // fills the conversation; the click handler below also re-checks at click time.
+        const trigger = existing.querySelector('.xa-ctl-trigger');
+        if (trigger && !trigger.disabled) {
+          trigger.textContent = mode.label;
+          trigger.title = mode.title;
+        }
+        return;
+      }
       const { wrap } = createExportControl({
-        triggerLabel: 'Save thread',
-        triggerTitle: `Quick-save this full thread to your SourceCapsule library`,
+        triggerLabel: mode.label,
+        triggerTitle: mode.title,
         className: `xa-ctl ${CONFIG.postControlClass}`,
         menuItems: POST_EXPORT_TYPES,
-        onQuick: (trigger) =>
-          runExport('library', { targetTweetEl: tweetEl, trigger, includeThread: true }),
-        onPick: (exportType, trigger) =>
-          runExport(exportType === 'library-single' ? 'library' : exportType, {
+        onQuick: (trigger) => {
+          const currentMode = postControlCaptureMode(tweetEl, column);
+          return runExport('library', {
             targetTweetEl: tweetEl,
             trigger,
-            includeThread: exportType !== 'library-single',
-          }),
+            includeThread: currentMode.includeThread,
+          });
+        },
+        onPick: (exportType, trigger) => {
+          const request = postExportRequest(exportType);
+          return runExport(request.exportType, {
+            targetTweetEl: tweetEl,
+            trigger,
+            includeThread: request.includeThread,
+          });
+        },
       });
       wrap.setAttribute(CONFIG.postControlFlag, '1');
       // Prefer placing the control inline in the header, right before X's "..." menu, so it
@@ -6803,6 +7611,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     }
     networkCaptureBridgeInstalled = true;
     window.addEventListener('message', onNetworkCaptureMessage);
+    if (globalThis.__SOURCECAPSULE_EXTENSION__ === true) {
+      networkCaptureDiagnostics.installed = true;
+      networkCaptureDiagnostics.mode = 'extension-main-pending';
+      window.postMessage(
+        { source: `${APP}:network-capture`, contractVersion: 1, type: 'ping' },
+        location.origin
+      );
+      return;
+    }
     networkCaptureDiagnostics.unsafeWindowAvailable =
       typeof unsafeWindow !== 'undefined' && !!unsafeWindow;
     if (networkCaptureDiagnostics.unsafeWindowAvailable) {
@@ -6855,6 +7672,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const obs = new MutationObserver(() => scheduleEnsure());
     obs.observe(document.body, { childList: true, subtree: true });
     registerSettingsMenu();
+    registerExtensionController();
     ensureButton();
     log(`${APP} v${VERSION} ready`);
   }
@@ -6892,7 +7710,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       updateLibraryIndexText,
       renderArchiveManifestJson,
       EXPORT_TYPES,
+      POST_EXPORT_TYPES,
+      postExportRequest,
+      postControlCaptureMode,
       showShareResult,
+      showCaptureReceipt,
+      archiveStats,
+      extensionControllerMessage,
+      folderPickerAvailable,
+      pickDirectoryViaExtensionBridge,
       handleFromSourceUrl,
       escapeHtml,
       safeUrl,
@@ -6903,6 +7729,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       videoCandidatesFromCapturedBody,
       videoCandidateMatchesBlock,
       handleNetworkCapturePayload,
+      validateNetworkCapturePayload,
       // Long-form (note) full-text recovery from passively captured GraphQL payloads.
       noteTweetsFromCapturedBody,
       noteTweetParagraphBlocks,
@@ -6928,9 +7755,13 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       syndicationToken,
       syndicationToQuoteBlock,
       syndicationMediaBlocks,
+      syndicationRelationCandidates,
+      recoverMissingQuoteSourcesViaSyndication,
       mediaKeyFromUrl,
       enrichThreadViaSyndication,
       extractLinkCard,
+      extractPollBlock,
+      quoteSourceUrlFromElement,
       buildTweetBlocks,
     };
   }

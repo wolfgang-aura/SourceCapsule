@@ -1,19 +1,29 @@
 'use strict';
 
+const PRODUCTION_HOSTS = new Set([
+  'x.com',
+  'twitter.com',
+  'twimg.com',
+  'cdn.syndication.twimg.com',
+  'sourcecapsule-share.wolfgang-aura.workers.dev',
+]);
+const DEVELOPMENT_HOSTS_ENABLED = false;
+
 function allowedUrl(value) {
   try {
     const url = new URL(value);
     const host = url.hostname.toLowerCase();
-    return (
-      host === 'x.com' ||
-      host.endsWith('.x.com') ||
-      host === 'twitter.com' ||
-      host.endsWith('.twitter.com') ||
-      host === 'twimg.com' ||
-      host.endsWith('.twimg.com') ||
-      host === 'share.sourcecapsule.app' ||
-      host === '127.0.0.1' ||
-      host === 'localhost'
+    if (
+      DEVELOPMENT_HOSTS_ENABLED &&
+      url.protocol === 'http:' &&
+      ['127.0.0.1', 'localhost'].includes(host)
+    )
+      return true;
+    if (url.protocol !== 'https:') return false;
+    return Array.from(PRODUCTION_HOSTS).some(
+      (allowed) =>
+        host === allowed ||
+        (allowed !== 'cdn.syndication.twimg.com' && host.endsWith(`.${allowed}`))
     );
   } catch {
     return false;
@@ -36,7 +46,7 @@ function bytesToBase64(bytes) {
   return btoa(binary);
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+function handleMessage(message, _sender, sendResponse) {
   if (!message || message.type !== 'sourcecapsule:http') return false;
   const request = message.request || {};
   if (!allowedUrl(request.url)) {
@@ -72,4 +82,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     .catch((error) => sendResponse({ ok: false, error: error.message }))
     .finally(() => clearTimeout(timer));
   return true;
-});
+}
+
+if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+  chrome.runtime.onMessage.addListener(handleMessage);
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { allowedUrl, handleMessage, PRODUCTION_HOSTS };
+}

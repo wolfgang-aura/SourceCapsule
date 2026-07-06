@@ -1,6 +1,6 @@
 {
   "name": "sourcecapsule",
-  "version": "1.2.2",
+  "version": "1.3.0",
   "private": false,
   "description": "Export an X (Twitter) Article or post to a single self-contained, fully-offline HTML file with all media and quoted tweets embedded.",
   "keywords": [
@@ -27,7 +27,7 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "node test/smoke.mjs && node test/dom.test.mjs && node test/share-worker.test.mjs && node test/x-api-probe.test.mjs",
+    "test": "node test/smoke.mjs && node test/dom.test.mjs && node test/extension.test.mjs && node test/share-worker.test.mjs && node test/x-api-probe.test.mjs",
     "test:dom": "node test/dom.test.mjs",
     "test:share": "node test/share-worker.test.mjs",
     "test:x-probe": "node test/x-api-probe.test.mjs",

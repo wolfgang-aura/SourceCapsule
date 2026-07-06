@@ -23,6 +23,7 @@ module.exports = [
       globals: {
         ...globals.browser,
         ...globals.webextensions,
+        module: 'writable',
       },
     },
   },
@@ -50,6 +51,7 @@ module.exports = [
         GM_unregisterMenuCommand: 'readonly',
         GM: 'readonly',
         unsafeWindow: 'readonly',
+        chrome: 'readonly',
         // Node-only export guard at the bottom of the file (no-op in browser).
         module: 'writable',
       },

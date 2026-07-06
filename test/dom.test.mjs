@@ -93,6 +93,8 @@ global.window = dom.window;
 global.document = dom.window.document;
 global.Node = dom.window.Node;
 global.location = dom.window.location;
+global.localStorage = dom.window.localStorage;
+global.getComputedStyle = dom.window.getComputedStyle;
 
 let failures = 0;
 function check(name, fn) {
@@ -109,6 +111,97 @@ console.log('SourceCapsule DOM extraction test\n');
 
 check('detectPageType() recognizes a status page as a post', () => {
   assert.equal(engine.detectPageType(), 'post');
+});
+
+check(
+  'extension controller reads/writes the existing preference model and rejects malformed input',
+  () => {
+    const state = engine.extensionControllerMessage({
+      type: 'sourcecapsule:controller',
+      version: 1,
+      action: 'get-state',
+    });
+    assert.equal(state.ok, true);
+    assert.equal(state.prefs.layout, 'date');
+    const changed = engine.extensionControllerMessage({
+      type: 'sourcecapsule:controller',
+      version: 1,
+      action: 'set-preference',
+      value: { key: 'layout', value: 'flat' },
+    });
+    assert.equal(changed.ok, true);
+    assert.equal(
+      engine.extensionControllerMessage({
+        type: 'sourcecapsule:controller',
+        version: 1,
+        action: 'get-state',
+      }).prefs.layout,
+      'flat'
+    );
+    assert.equal(engine.extensionControllerMessage({ type: 'wrong' }).ok, false);
+  }
+);
+
+check('extension folder command renders a direct in-page picker fallback', () => {
+  const result = engine.extensionControllerMessage({
+    type: 'sourcecapsule:controller',
+    version: 1,
+    action: 'pick-folder',
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.requiresPageAction, true);
+  const prompt = document.querySelector('.xa-folder-picker-prompt');
+  assert.ok(prompt);
+  assert.match(prompt.textContent, /requires a click on this page/i);
+  prompt.querySelector('.xa-modal-cancel').click();
+});
+
+await checkAsync('extension folder bridge returns a validated directory handle', async () => {
+  globalThis.__SOURCECAPSULE_EXTENSION__ = true;
+  const fakeHandle = { kind: 'directory', name: 'SourceCapsule Test' };
+  window.addEventListener(
+    'sourcecapsule:pick-directory',
+    (event) => {
+      window.dispatchEvent(
+        new dom.window.MessageEvent('message', {
+          source: window,
+          origin: location.origin,
+          data: {
+            source: 'SourceCapsule:folder-picker',
+            contractVersion: 1,
+            type: 'result',
+            requestId: event.detail.requestId,
+            ok: true,
+            handle: fakeHandle,
+          },
+        })
+      );
+    },
+    { once: true }
+  );
+  assert.equal(engine.folderPickerAvailable(), true);
+  assert.equal(await engine.pickDirectoryViaExtensionBridge({ timeoutMs: 100 }), fakeHandle);
+  delete globalThis.__SOURCECAPSULE_EXTENSION__;
+});
+
+check('extension capability handshake selects ZIP fallback when the picker is unavailable', () => {
+  globalThis.__SOURCECAPSULE_EXTENSION__ = true;
+  engine.handleNetworkCapturePayload({
+    source: 'SourceCapsule:network-capture',
+    contractVersion: 1,
+    type: 'installed',
+    transport: 'extension-main',
+    folderPickerAvailable: false,
+  });
+  const state = engine.extensionControllerMessage({
+    type: 'sourcecapsule:controller',
+    version: 1,
+    action: 'get-state',
+  });
+  assert.equal(state.folderPickerSupported, false);
+  assert.equal(state.libraryDelivery, 'zip');
+  assert.equal(engine.folderPickerAvailable(), false);
+  delete globalThis.__SOURCECAPSULE_EXTENSION__;
 });
 
 check('share success remains visible when automatic clipboard copy is blocked', () => {
@@ -198,6 +291,30 @@ check('full-thread mode is explicit for a clicked post and adds post boundaries'
   assert.equal(model.thread.capturedPosts, 2);
   assert.equal(model.blocks.filter((block) => block.kind === 'thread-marker').length, 2);
 });
+
+check(
+  'focused thread root is labelled as a thread while continuation controls stay post-only',
+  () => {
+    const column = document.querySelector('[data-testid="primaryColumn"]');
+    const posts = Array.from(column.querySelectorAll(':scope > article[data-testid="tweet"]'));
+    const focused = posts.find((tweet) => tweet.textContent.includes('mstr'));
+    const continuation = posts.find((tweet) =>
+      tweet.textContent.includes('Thread continuation should export.')
+    );
+    assert.deepEqual(engine.postControlCaptureMode(focused, column), {
+      isThread: true,
+      includeThread: true,
+      label: 'Save thread',
+      title: 'Quick-save this full thread to your SourceCapsule library',
+    });
+    assert.deepEqual(engine.postControlCaptureMode(continuation, column), {
+      isThread: false,
+      includeThread: false,
+      label: 'Save post',
+      title: 'Quick-save only this post to your SourceCapsule library',
+    });
+  }
+);
 
 check('buildModelForPost uses the focused post permalink as sourceUrl', () => {
   assert.equal(model.sourceUrl, STATUS_URL);
@@ -919,6 +1036,49 @@ check('extractLinkCard captures the card URL + title, skips cards inside quotes'
   assert.equal(engine.extractLinkCard(outer, [quoted], 'https://x.com/a/status/1'), null);
 });
 
+check('quote source recovery reads canonical status URLs from non-anchor DOM attributes', () => {
+  const quote = document.createElement('div');
+  quote.setAttribute('role', 'link');
+  quote.setAttribute('tabindex', '0');
+  quote.setAttribute('data-source-url', '/context/status/9876543210123456789');
+  quote.innerHTML = '<div data-testid="tweetText">Context post</div>';
+  assert.equal(
+    engine.quoteSourceUrlFromElement(quote, { handle: '@context' }),
+    'https://x.com/context/status/9876543210123456789'
+  );
+});
+
+await checkAsync(
+  'syndication relation recovery restores a missing reply-context permalink',
+  async () => {
+    const model = {
+      type: 'post',
+      sourceUrl: 'https://x.com/answer/status/200',
+      blocks: [
+        { kind: 'paragraph', html: 'Answer' },
+        {
+          kind: 'quote',
+          author: { name: 'Questioner', handle: '@questioner' },
+          sourceUrl: '',
+          blocks: [{ kind: 'paragraph', html: 'Question text' }],
+        },
+      ],
+    };
+    await engine.recoverMissingQuoteSourcesViaSyndication(model, null, async (statusId) => {
+      assert.equal(statusId, '200');
+      return {
+        __typename: 'Tweet',
+        text: 'Answer',
+        in_reply_to_status_id_str: '100',
+        in_reply_to_screen_name: 'questioner',
+      };
+    });
+    const quote = model.blocks.find((block) => block.kind === 'quote');
+    assert.equal(quote.sourceUrl, 'https://x.com/questioner/status/100');
+    assert.equal(quote.relation, 'reply');
+  }
+);
+
 check('buildTweetBlocks flags long-form previews and keeps the link card', () => {
   const d = dom.window.document;
   const tweetEl = d.createElement('article');
@@ -1250,6 +1410,203 @@ check('renderBlock and LLM markdown report recovered long-form text honestly', (
   );
   assert.match(md, /full text above was recovered from data X delivered to the browser/);
   assert.ok(!/only its preview text was available/.test(md), 'no stale truncation warning');
+});
+
+check('poll extraction keeps outer and quoted polls separate without inventing results', () => {
+  const host = document.createElement('article');
+  host.setAttribute('data-testid', 'tweet');
+  host.innerHTML = `
+    <div data-testid="tweetText" lang="en">Outer poll</div>
+    <div data-testid="cardPoll" role="radiogroup">
+      <div role="radio"><span>Tea</span></div><div role="radio"><span>Coffee</span></div>
+      <span>2 hours left</span>
+    </div>
+    <div role="link" tabindex="0">
+      <div data-testid="User-Name"><span>Quoted</span><span>@quotedpoll</span></div>
+      <div data-testid="tweetText" lang="en">Quoted closed poll</div>
+      <div data-testid="cardPoll" role="radiogroup">
+        <div role="progressbar" aria-label="Yes, 60%"><span>Yes</span><span>60%</span></div>
+        <div role="progressbar" aria-label="No, 40%"><span>No</span><span>40%</span></div>
+        <span>1,234 votes</span><span>Poll closed</span>
+      </div>
+      <a href="/quotedpoll/status/902"><time datetime="2026-07-01T00:00:00Z">Jul 1</time></a>
+    </div>
+    <a href="/outer/status/901"><time datetime="2026-07-01T00:01:00Z">Jul 1</time></a>`;
+  document.body.appendChild(host);
+  const built = engine.buildTweetBlocks(host);
+  const outerPolls = built.blocks.filter((block) => block.kind === 'poll');
+  const quote = built.blocks.find((block) => block.kind === 'quote');
+  const quotePolls = quote.blocks.filter((block) => block.kind === 'poll');
+  assert.equal(outerPolls.length, 1);
+  assert.deepEqual(
+    outerPolls[0].choices.map((choice) => choice.label),
+    ['Tea', 'Coffee']
+  );
+  assert.equal(outerPolls[0].resultsUnavailable, true);
+  assert.equal(outerPolls[0].status, '2 hours left');
+  assert.equal(quotePolls.length, 1);
+  assert.deepEqual(
+    quotePolls[0].choices.map((choice) => choice.percentage),
+    ['60%', '40%']
+  );
+  assert.equal(quotePolls[0].totalVotes, '1,234');
+  assert.equal(quotePolls[0].resultsUnavailable, false);
+  assert.equal(outerPolls[0].sourcePostId, '901');
+  assert.equal(quotePolls[0].sourcePostId, '902');
+  host.remove();
+});
+
+check('post-vote poll results are recovered without radio-group or cardPoll markup', () => {
+  const host = document.createElement('article');
+  host.setAttribute('data-testid', 'tweet');
+  host.innerHTML = `
+    <div data-testid="tweetText" lang="en">Who would you vote for?</div>
+    <div class="results-only-wrapper">
+      <div><span>Kamala Harris</span><span>52%</span></div>
+      <div><span>Marco Rubio</span><span>37%</span></div>
+      <div><span>Other</span><span>11%</span></div>
+      <div><span>10,030 votes</span><span>1 day left</span></div>
+    </div>
+    <a href="/poller/status/903"><time datetime="2026-07-01T00:02:00Z">Jul 1</time></a>`;
+  document.body.appendChild(host);
+  const poll = engine.extractPollBlock(host, [], 'https://x.com/poller/status/903');
+  assert.ok(poll, 'results-only markup should still produce a poll block');
+  assert.deepEqual(
+    poll.choices.map((choice) => [choice.label, choice.percentage]),
+    [
+      ['Kamala Harris', '52%'],
+      ['Marco Rubio', '37%'],
+      ['Other', '11%'],
+    ]
+  );
+  assert.equal(poll.totalVotes, '10,030');
+  assert.equal(poll.status, '1 day left');
+  assert.equal(poll.resultsUnavailable, false);
+  host.remove();
+});
+
+check('threads can carry multiple poll blocks through HTML, Markdown, and manifest', () => {
+  const pollModel = {
+    type: 'post',
+    title: 'Poll thread',
+    author: { name: 'Poller', handle: '@poller' },
+    sourceUrl: 'https://x.com/poller/status/1',
+    exportedAt: '2026-07-01T00:00:00Z',
+    thread: { capturedPosts: 2, completeness: 'best-effort' },
+    blocks: [
+      {
+        kind: 'poll',
+        choices: [{ label: 'A' }, { label: 'B' }],
+        sourcePostId: '1',
+        resultsUnavailable: true,
+      },
+      { kind: 'thread-marker', index: 2, total: 2, sourceUrl: 'https://x.com/poller/status/2' },
+      {
+        kind: 'poll',
+        choices: [{ label: 'C', percentage: '100%' }],
+        sourcePostId: '2',
+        resultsUnavailable: false,
+      },
+    ],
+  };
+  const pollHtml = engine.assembleHtml(pollModel);
+  const manifest = JSON.parse(engine.renderArchiveManifestJson(pollModel));
+  const pollMd = engine.renderLlmMarkdown(pollModel);
+  assert.equal((pollHtml.match(/class="xa-poll"/g) || []).length, 2);
+  assert.equal(manifest.capture.polls, 2);
+  assert.equal(manifest.polls.length, 2);
+  assert.equal((pollMd.match(/\*\*Poll\*\*/g) || []).length, 2);
+});
+
+await checkAsync(
+  'persistent receipt copies retained Markdown, preserves local success on share failure, and dismisses with Escape',
+  async () => {
+    const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    let copied = '';
+    Object.defineProperty(globalThis, 'navigator', {
+      configurable: true,
+      value: {
+        clipboard: {
+          writeText: async (value) => {
+            copied = value;
+          },
+        },
+      },
+    });
+    const receiptModel = {
+      type: 'post',
+      title: 'Receipt',
+      author: { name: 'R', handle: '@r' },
+      sourceUrl: 'https://x.com/r/status/1',
+      exportedAt: '2026-07-01T00:00:00Z',
+      blocks: [
+        { kind: 'paragraph', html: 'Saved text' },
+        {
+          kind: 'poll',
+          choices: [{ label: 'Yes' }, { label: 'No' }],
+          sourcePostId: '1',
+          sourceUrl: 'https://x.com/r/status/1',
+          resultsUnavailable: true,
+        },
+      ],
+    };
+    engine.showCaptureReceipt({
+      model: receiptModel,
+      savedLocation: 'Library/2026-07-01/r-1',
+      markdown: 'retained clean markdown',
+      onShare: async () => {
+        throw new Error('network unavailable');
+      },
+    });
+    const receipt = document.querySelector('.xa-capture-receipt');
+    assert.ok(receipt);
+    assert.match(receipt.querySelector('.xa-receipt-status').textContent, /Complete/);
+    assert.match(receipt.querySelector('.xa-receipt-grid').textContent, /Polls captured1/);
+    receipt.querySelector('.xa-receipt-copy').click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(copied, 'retained clean markdown');
+    receipt.querySelector('.xa-receipt-share').click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.match(
+      receipt.querySelector('.xa-receipt-action-status').textContent,
+      /Local save is safe/
+    );
+    document.dispatchEvent(
+      new dom.window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true })
+    );
+    assert.equal(document.querySelector('.xa-capture-receipt'), null);
+    if (previousNavigator) Object.defineProperty(globalThis, 'navigator', previousNavigator);
+    else delete globalThis.navigator;
+  }
+);
+
+check('receipt expands honest incomplete-media details', () => {
+  const staleToast = document.createElement('div');
+  staleToast.id = 'sourcecapsule-toast';
+  staleToast.className = 'show';
+  staleToast.textContent = 'Assembling files...';
+  document.body.appendChild(staleToast);
+  engine.showCaptureReceipt({
+    model: {
+      type: 'post',
+      title: 'Incomplete',
+      author: { handle: '@r' },
+      sourceUrl: 'https://x.com/r/status/2',
+      exportedAt: '2026-07-01T00:00:00Z',
+      blocks: [{ kind: 'image', url: 'https://pbs.twimg.com/media/missing.jpg', failed: true }],
+    },
+    savedLocation: 'incomplete.html',
+    markdown: 'incomplete',
+  });
+  const receipt = document.querySelector('.xa-capture-receipt');
+  assert.match(receipt.querySelector('.xa-receipt-status').textContent, /missing/);
+  assert.equal(receipt.querySelector('.xa-receipt-details').open, true);
+  const style = document.getElementById('sourcecapsule-style').textContent;
+  assert.match(style, /\.xa-modal\{[^}]*max-height:[^}]*overflow:auto/s);
+  assert.match(style, /\.xa-receipt-details\[open\]\{[^}]*overflow:auto/s);
+  assert.equal(staleToast.classList.contains('show'), false);
+  receipt.querySelector('.xa-modal-cancel').click();
+  staleToast.remove();
 });
 
 if (failures) {
