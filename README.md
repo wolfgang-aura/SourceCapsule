@@ -35,18 +35,21 @@ copy-paste mangling, no dead links when the thread disappears.
 
 The source file is also the shipped artifact: plain JavaScript, no production build step.
 
-## What is new in v1.2
+## What is new in v1.3
 
-- **One-click quick save.** The main button immediately saves to your library.
-- **Full thread by default.** On status pages, SourceCapsule scrolls from the top and captures the
-  same-author thread posts it can verify. The options menu still has “this post only.”
-- **Share with AI.** Create a private, unguessable web link that expires after 1, 7, or 30 days
-  (7 days by default). The link exposes clean HTML, Markdown, a manifest, and image/poster files.
-- **Copy clean Markdown.** Put agent-ready context directly on the clipboard.
-- **Saved context.** Add an optional “saved because” note and tags before saving.
-- **Local library index.** Each library root gets `_sourcecapsule-index.md`, updated on save.
-- **Experimental Chrome extension.** A generated Manifest V3 package now runs the same source
-  engine without Tampermonkey.
+- **Trustworthy capture receipts.** Every save ends with durable post, poll, image, video, poster,
+  and incomplete-media counts, plus expandable details when anything needs attention.
+- **Poll preservation.** Pre-vote and post-vote polls now retain their choices and, when available,
+  percentages, vote totals, and status in HTML, Markdown, and manifest data.
+- **Thread-aware controls.** A verified same-author root says **Save thread** and captures the full
+  sequence; continuation and reply controls say **Save post** and capture only that post.
+- **Usable Manifest V3 extension.** The toolbar popup exposes Full/Lean library contents, layout,
+  folder, and floating-button preferences without requiring userscript-manager menus.
+- **More reliable extension capture.** A static page bridge recovers long-form Note and video data,
+  while a bounded media fallback prevents a failed extension request bridge from losing every
+  image in an otherwise valid archive.
+- **Store-ready production package.** Automated checks enforce aligned versions, the exact package
+  file set, production-only hosts, and extension bridge behavior.
 
 The product remains local-first. Nothing is uploaded until you explicitly choose **Share with AI**
 or **Save locally + share with AI** and confirm the expiry. In the combined flow, the local copy is
@@ -193,7 +196,7 @@ and extension packaging. It does not replace manual testing against X's live DOM
 Do not share sensitive posts through a public deployment until authentication and abuse controls
 exist. “Unguessable” is useful access control for v1 testing, not a replacement for user accounts.
 
-## Deliberately out of scope for v1.2
+## Deliberately out of scope for v1.3
 
 - AI summaries, chat, OCR, transcripts, or media descriptions
 - Bookmark scraping and bulk export

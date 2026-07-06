@@ -6,6 +6,46 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-07-07
+
+### Added
+
+- Persistent capture receipts with post, poll, image, video, poster, incomplete-media, and
+  recovered long-form Note counts, plus expandable diagnostics and post-save AI actions.
+- Poll capture before and after voting, including choices, percentages, vote totals, and status
+  when X exposes them. Polls are preserved in HTML, Markdown, and the structured manifest.
+- A Manifest V3 toolbar popup for library layout, Full/Lean contents, floating-button visibility,
+  and export-folder controls.
+- A static MAIN-world extension bridge for reliable passive GraphQL capture.
+- A hosted-capsule install call-to-action that is excluded from local archives.
+- A production Chrome Web Store package build with automated manifest, host, bridge, popup, and
+  file-set checks.
+
+### Changed
+
+- The focused root of a detected same-author thread is labelled **Save thread** and quick-saves the
+  full thread; continuation and reply controls remain **Save post** and capture one post only.
+- Post, thread, and Article exports now use accurate content headings and receipt labels.
+- All release surfaces now report version `1.3.0` consistently.
+
+### Fixed
+
+- Extension sharing now permits the configured production Cloudflare Worker host.
+- Brave and Chromium environments without a usable folder picker fall back cleanly to a ZIP
+  instead of blocking library saves.
+- Extension media capture retries through a host-bounded direct request when its service-worker
+  request bridge fails, preventing otherwise valid images and videos from becoming all-missing
+  archives.
+- Long capture receipts are constrained and scrollable, and completed exports clear stale progress
+  toasts.
+- Post-vote polls are detected even when X removes the pre-vote radio-group markup.
+
+### Security
+
+- Production extension packages exclude localhost and obsolete development share hosts.
+- Extension request and page-bridge payloads use explicit host allowlists, size limits, schema
+  validation, and duplicate suppression.
+
 ## [1.2.2] - 2026-07-06
 
 ### Fixed
