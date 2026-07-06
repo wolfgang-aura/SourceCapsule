@@ -1,6 +1,6 @@
 {
   "name": "sourcecapsule",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "private": false,
   "description": "Export an X (Twitter) Article or post to a single self-contained, fully-offline HTML file with all media and quoted tweets embedded.",
   "keywords": [

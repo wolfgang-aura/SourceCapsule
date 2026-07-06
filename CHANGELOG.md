@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-07-06
+
+### Fixed
+
+- Thread exports no longer treat same-author posts from X's **Discover more** recommendation
+  section as thread continuations or download their unrelated media.
+- Parent post IDs are now read outside embedded quote cards, preventing a quote permalink from
+  corrupting thread ordering and media attribution.
+
 ## [1.2.0] - 2026-07-02
 
 ### Added

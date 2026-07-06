@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SourceCapsule - Save X/Twitter Threads & Articles as Markdown for LLMs + Offline HTML
 // @namespace    https://github.com/wolfgang-aura/SourceCapsule
-// @version      1.2.1
+// @version      1.2.2
 // @description  One click saves an X (Twitter) thread, Article, or post as clean Markdown for LLM context (Claude, ChatGPT) plus a self-contained offline HTML archive - images, video, and quoted posts embedded, with honest completeness reporting. Local-first, with optional expiring share links.
 // @author       wolfgang-aura
 // @license      MIT
@@ -98,6 +98,9 @@
       showMore: ['[data-testid="tweet-text-show-more-link"]'],
       // Time element (carries the canonical permalink).
       timeLink: ['a[href*="/status/"] time'],
+      // Section headings X inserts between a conversation and recommendation feeds
+      // such as "Discover more". These are thread boundaries, never continuations.
+      threadBoundaryHeading: ['[role="heading"]', 'h1', 'h2', 'h3'],
       // Long-form Article rich-text root.
       articleRoot: [
         'div[data-testid="twitterArticleReadView"]',
@@ -1201,10 +1204,20 @@
   }
 
   function tweetStatusId(tweetEl) {
-    const timeLink = pick(tweetEl, CONFIG.selectors.timeLink, { quiet: true });
+    // A quoted card carries its own permalink inside the outer tweet. Taking the
+    // first <time> therefore returns the quote id, which also breaks chronological
+    // thread validation. Exclude quote cards and nested tweet articles first.
+    const quoteEls = findQuotedTweetEls(tweetEl);
+    const belongsToOuterTweet = (el) => {
+      if (quoteEls.some((quote) => quote.contains(el))) return false;
+      return closestAny(el, CONFIG.selectors.tweet) === tweetEl;
+    };
+    const timeLink = pickAll(tweetEl, CONFIG.selectors.timeLink).find(belongsToOuterTweet);
     const timeAnchor = timeLink && timeLink.closest('a');
     if (timeAnchor && timeAnchor.href) return statusIdFromUrl(timeAnchor.href);
-    const statusAnchor = tweetEl.querySelector('a[href*="/status/"]');
+    const statusAnchor = Array.from(tweetEl.querySelectorAll('a[href*="/status/"]')).find(
+      belongsToOuterTweet
+    );
     return statusAnchor ? statusIdFromUrl(statusAnchor.href) : '';
   }
 
@@ -1426,6 +1439,51 @@
       .map((item) => item.tweet);
   }
 
+  const THREAD_BOUNDARY_FLAG = 'data-sourcecapsule-thread-boundary-before';
+  const THREAD_BOUNDARY_TEXT =
+    /\b(?:discover more|more posts|recommended|you might like)\b|发现更多|探索更多|更多帖子|更多貼文|さらに見つける|더 찾아보기|temui lebih banyak/i;
+
+  /**
+   * True when X placed a non-conversation section between this post and the
+   * previous top-level post. Prefer semantic headings so this survives localized
+   * UI text; keep a small text fallback because X sometimes renders the heading
+   * as an unlabelled div. Harvested clones carry the result as a data attribute.
+   */
+  function hasThreadBoundaryBefore(tweet, column) {
+    if (!tweet) return false;
+    if (tweet.getAttribute && tweet.getAttribute(THREAD_BOUNDARY_FLAG) === '1') return true;
+    if (!tweet.isConnected || !column || !document.createRange) return false;
+    const tweets = topLevelTweetEls(column).sort(compareDocumentOrder);
+    const index = tweets.indexOf(tweet);
+    if (index <= 0) return false;
+    try {
+      const range = document.createRange();
+      range.setStartAfter(tweets[index - 1]);
+      range.setEndBefore(tweet);
+      const between = range.cloneContents();
+      const headingSelector = CONFIG.selectors.threadBoundaryHeading.join(',');
+      if (
+        Array.from(between.querySelectorAll(headingSelector)).some((heading) =>
+          String(heading.textContent || '').trim()
+        )
+      ) {
+        return true;
+      }
+      return THREAD_BOUNDARY_TEXT.test(String(between.textContent || '').replace(/\s+/g, ' '));
+    } catch {
+      return false;
+    }
+  }
+
+  /** Twitter status IDs are time-ordered snowflakes; thread replies must be newer. */
+  function statusIdIsAfter(candidateId, previousId) {
+    const candidate = String(candidateId || '').replace(/^0+/, '');
+    const previous = String(previousId || '').replace(/^0+/, '');
+    if (!candidate || !previous || !/^\d+$/.test(candidate) || !/^\d+$/.test(previous)) return true;
+    if (candidate.length !== previous.length) return candidate.length > previous.length;
+    return candidate > previous;
+  }
+
   function buildTweetSequence(column, focusedTweet) {
     const tweets = threadTweetCandidates(column);
     const focusedId = tweetStatusId(focusedTweet);
@@ -1446,6 +1504,15 @@
       const author = extractAuthor(tweet);
       const sameAuthor = focusedHandle && author.handle === focusedHandle;
       if (sequence.length > 0 && !sameAuthor) break;
+      if (sequence.length > 0) {
+        const previous = sequence[sequence.length - 1];
+        if (
+          hasThreadBoundaryBefore(tweet, column) ||
+          !statusIdIsAfter(id, tweetStatusId(previous))
+        ) {
+          break;
+        }
+      }
 
       sequence.push(tweet);
       if (id) seenIds.add(id);
@@ -5033,10 +5100,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   }
 
   function harvestMediaNow() {
+    const column = pick(document, CONFIG.selectors.primaryColumn, { quiet: true }) || document.body;
     topLevelTweetEls(document).forEach((tweet) => {
       const statusId = tweetStatusId(tweet);
       if (!statusId) return;
       const clone = tweet.cloneNode(true);
+      if (hasThreadBoundaryBefore(tweet, column)) clone.setAttribute(THREAD_BOUNDARY_FLAG, '1');
       clone.querySelectorAll(`.${CONFIG.postControlClass}`).forEach((control) => control.remove());
       const y = absY(tweet);
       const existing = harvestedTweets.get(statusId);
@@ -6848,6 +6917,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       inlineHtmlFromTweetText,
       detectPageType,
       extractAuthor,
+      hasThreadBoundaryBefore,
+      statusIdIsAfter,
       // Media harvest (exported to test the virtualization workaround).
       resetMediaState,
       harvestMediaNow,

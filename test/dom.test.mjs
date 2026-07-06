@@ -72,6 +72,13 @@ const PAGE = `<!doctype html><html><body>
       <div data-testid="tweetPhoto"><img src="https://pbs.twimg.com/media/Thread1?format=jpg&name=small" alt=""></div>
       <a href="/Vegahao/status/1790000000000000001"><time datetime="2026-06-25T12:02:00Z">Jun 25</time></a>
     </article>
+    <div data-testid="cellInnerDiv"><h2 role="heading">Discover more</h2></div>
+    <article data-testid="tweet" role="article">
+      <div data-testid="User-Name"><a href="/Vegahao"><span>Vega Hao</span></a><a href="/Vegahao"><span>@Vegahao</span></a></div>
+      <div data-testid="tweetText" lang="en"><span>Same-author recommendation must not export.</span></div>
+      <div data-testid="tweetPhoto"><img src="https://pbs.twimg.com/media/RecommendedBad?format=jpg&name=small" alt=""></div>
+      <a href="/Vegahao/status/1790000000000000002"><time datetime="2026-06-25T12:02:30Z">Jun 25</time></a>
+    </article>
     <article data-testid="tweet" role="article">
       <div data-testid="User-Name"><a href="/other"><span>Reply Author</span></a><a href="/other"><span>@other</span></a></div>
       <div data-testid="tweetText" lang="en"><span>Unrelated reply should not export.</span></div>
@@ -141,6 +148,15 @@ check('articleListType: "unordered" class is bullets, not numbers (no substring 
   assert.equal(engine.articleListType(make('aria-label', 'Numbered list')), 'ordered');
 });
 
+check('thread boundary detection preserves a real continuation and stops at Discover more', () => {
+  const column = document.querySelector('[data-testid="primaryColumn"]');
+  const posts = Array.from(column.querySelectorAll(':scope > article[data-testid="tweet"]'));
+  assert.equal(engine.hasThreadBoundaryBefore(posts[2], column), false);
+  assert.equal(engine.hasThreadBoundaryBefore(posts[3], column), true);
+  assert.equal(engine.statusIdIsAfter('1790000000000000001', '1790000000000000000'), true);
+  assert.equal(engine.statusIdIsAfter('1790000000000000000', '1790000000000000001'), false);
+});
+
 const model = engine.buildModelForPost();
 
 function allBlocks(blocks) {
@@ -165,6 +181,9 @@ check('buildModelForPost captures same-author thread continuations only', () => 
   assert.ok(paragraphs.some((html) => html.includes('Second quoted video should export.')));
   assert.ok(!paragraphs.some((html) => html.includes('Unrelated reply should not export.')));
   assert.ok(!paragraphs.some((html) => html.includes('Nested unrelated text should not export.')));
+  assert.ok(
+    !paragraphs.some((html) => html.includes('Same-author recommendation must not export.'))
+  );
 });
 
 check('full-thread mode is explicit for a clicked post and adds post boundaries', () => {
@@ -175,6 +194,7 @@ check('full-thread mode is explicit for a clicked post and adds post boundaries'
   assert.equal(single.thread, undefined);
   const fullThread = engine.buildModelForPost(focused, { includeThread: true });
   assert.equal(fullThread.thread.capturedPosts, 2);
+  assert.deepEqual(fullThread.thread.sourcePostIds, ['1790000000000000000', '1790000000000000001']);
   assert.equal(model.thread.capturedPosts, 2);
   assert.equal(model.blocks.filter((block) => block.kind === 'thread-marker').length, 2);
 });
@@ -197,6 +217,7 @@ check('buildModelForPost also captures the image', () => {
   );
   assert.equal(videos.length, 2, 'expected all quote video fallbacks to be captured');
   assert.ok(!images.some((image) => image.url.includes('NestedBad')));
+  assert.ok(!images.some((image) => image.url.includes('RecommendedBad')));
 });
 
 check('assembleHtml puts the tweet text in the <article> body', () => {
