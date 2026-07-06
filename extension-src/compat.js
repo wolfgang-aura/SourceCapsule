@@ -1,6 +1,8 @@
 (function () {
   'use strict';
 
+  globalThis.__SOURCECAPSULE_EXTENSION__ = true;
+
   function bytesToBase64(bytes) {
     let binary = '';
     const chunk = 0x8000;
@@ -22,6 +24,33 @@
       return 'SourceCapsule was reloaded. Refresh this X page and try again.';
     }
     return message || 'Extension request failed.';
+  }
+
+  async function directHttpRequest(details, fetchImpl = fetch) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), details.timeout || 30000);
+    try {
+      const response = await fetchImpl(details.url, {
+        method: details.method || 'GET',
+        headers: details.headers || {},
+        body: details.data == null ? undefined : details.data,
+        credentials: 'omit',
+        signal: controller.signal,
+      });
+      const buffer = await response.arrayBuffer();
+      const responseHeaders = Array.from(response.headers.entries())
+        .map(([name, value]) => `${name}: ${value}`)
+        .join('\r\n');
+      return {
+        status: response.status,
+        response:
+          details.responseType === 'arraybuffer' ? buffer : new TextDecoder().decode(buffer),
+        responseText: new TextDecoder().decode(buffer),
+        responseHeaders,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   globalThis.GM_registerMenuCommand = () => null;
@@ -49,12 +78,19 @@
     const fail = (rawMessage) => {
       const message = friendlyExtensionError(rawMessage);
       if (/timeout/i.test(message)) details.ontimeout && details.ontimeout();
-      else details.onerror && details.onerror({ error: message });
+      else details.onerror && details.onerror({ error: message, message });
+    };
+    const fallback = (rawMessage) => {
+      directHttpRequest(details)
+        .then((result) => details.onload && details.onload(result))
+        .catch((error) =>
+          fail(`${friendlyExtensionError(rawMessage)}; direct fallback failed: ${error.message}`)
+        );
     };
     try {
       chrome.runtime.sendMessage(request, (result) => {
         if (chrome.runtime.lastError || !result || !result.ok) {
-          fail(
+          fallback(
             (chrome.runtime.lastError && chrome.runtime.lastError.message) ||
               (result && result.error)
           );
@@ -73,7 +109,11 @@
           });
       });
     } catch (error) {
-      fail(error.message);
+      fallback(error.message);
     }
   };
+
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { directHttpRequest, friendlyExtensionError };
+  }
 })();

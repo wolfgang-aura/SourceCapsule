@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="generator" content="SourceCapsule v1.2.1">
+<meta name="generator" content="SourceCapsule v1.3.0">
 <title>How we built a self-contained exporter - a &quot;test&quot; &amp; demo</title>
 <style>
 
@@ -41,6 +41,11 @@ body{font:17px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,
 .xa-code code{font:14px/1.55 ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",Menlo,monospace}
 .xa-blockquote{margin:1.1em 0;padding:.05em 0 .05em 1.2em;border-left:3px solid var(--quoteline);color:var(--fg)}
 .xa-blockquote p:last-child,.xa-blockquote ul:last-child,.xa-blockquote ol:last-child{margin-bottom:0}
+.xa-poll{margin:1.2em 0;padding:14px 16px;border:1px solid var(--quoteline);border-radius:14px;background:var(--card)}
+.xa-poll h3{margin:0 0 10px;font-size:17px}.xa-poll ol{list-style:none;margin:0;padding:0}
+.xa-poll li{display:flex;justify-content:space-between;gap:14px;padding:8px 0;border-top:1px solid var(--line)}
+.xa-poll li:first-child{border-top:0}.xa-poll li strong,.xa-poll li em{white-space:nowrap;font-size:14px;color:var(--muted)}
+.xa-poll p{margin:8px 0 0;font-size:13px;color:var(--muted)}
 figure{margin:1.4em 0}
 figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px solid var(--line)}
 .xa-media{margin:1.1em 0}
@@ -76,6 +81,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
 .xa-quote-body .xa-media-single img,.xa-quote-body .xa-gallery{border-radius:12px}
 .xa-quote-body figure video{border-radius:12px}
 .xa-quote-link{display:inline-block;margin-top:6px;font-size:14px;color:var(--accent);text-decoration:none}
+.xa-quote-source-missing{margin:8px 0 0;font-size:13px;color:var(--muted)}
 .xa-truncated{margin:8px 0 0;padding:8px 10px;border-radius:8px;font-size:13px;line-height:1.4;
   background:rgba(255,180,0,.12);border:1px solid rgba(255,180,0,.35);color:var(--fg)}
 .xa-truncated a{color:var(--accent);text-decoration:none}
@@ -98,6 +104,8 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
 .xa-footer dl{display:grid;gap:8px;margin:0 0 14px}
 .xa-footer a{color:var(--accent);text-decoration:none;word-break:break-all}
 .xa-disclaimer{font-size:12px;opacity:.85}
+.xa-install-cta{display:flex;flex-direction:column;align-items:flex-start;gap:4px;margin-top:18px;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--card)}
+.xa-install-cta strong{color:var(--fg)}.xa-install-cta a{margin-top:4px;font-weight:700}
 @media (max-width:520px){.xa-doc{padding:24px 14px 64px}.xa-capture dl{grid-template-columns:1fr}.xa-body{font-size:17px}.xa-title{font-size:26px}}
 @media print{
   :root{--bg:#fff;--fg:#000;--muted:#444;--line:#bbb;--card:#fff;--accent:#000;--quoteline:#999}
@@ -125,11 +133,12 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     </div>
 
   </header>
-  <details class="xa-capture"><summary>Capture summary</summary><dl><div><dt>Main text</dt><dd>Captured</dd></div><div><dt>Embedded posts</dt><dd>4</dd></div><div><dt>Images</dt><dd>3</dd></div><div><dt>Videos found</dt><dd>5</dd></div><div><dt>Videos preserved offline</dt><dd>2</dd></div><div><dt>Video posters captured</dt><dd>2</dd></div><div><dt>Incomplete media</dt><dd>3</dd></div><div><dt>Hashed media</dt><dd>4/8</dd></div><div><dt>Duplicate groups</dt><dd>1</dd></div><div><dt>Missing media</dt><dd>6</dd></div><div><dt>Source links</dt><dd>13</dd></div></dl></details>
+  <details class="xa-capture"><summary>Capture summary</summary><dl><div><dt>Main text</dt><dd>Captured</dd></div><div><dt>Embedded posts</dt><dd>4</dd></div><div><dt>Polls</dt><dd>1</dd></div><div><dt>Images</dt><dd>3</dd></div><div><dt>Videos found</dt><dd>5</dd></div><div><dt>Videos preserved offline</dt><dd>2</dd></div><div><dt>Video posters captured</dt><dd>2</dd></div><div><dt>Incomplete media</dt><dd>3</dd></div><div><dt>Hashed media</dt><dd>4/8</dd></div><div><dt>Duplicate groups</dt><dd>1</dd></div><div><dt>Missing media</dt><dd>6</dd></div><div><dt>Source links</dt><dd>14</dd></div></dl></details>
   <article class="xa-body">
 <h2>Intro &lt;script&gt;alert(1)&lt;/script&gt;</h2>
 <p>Plain text with a <a href="https://example.com" target="_blank" rel="noopener noreferrer">link</a> &amp; an ampersand.</p>
 <ul><li>First item</li><li>Second item with <a href="https://example.org/path" target="_blank" rel="noopener noreferrer">link</a></li></ul>
+<section class="xa-poll" aria-label="Poll" data-xa-source-post-id="12345" data-xa-source-url="https://x.com/ada/status/12345" data-xa-results-unavailable="false"><h3>Which archive format?</h3><ol><li><span>HTML</span><strong>75%</strong></li><li><span>Markdown</span><strong>25%</strong></li></ol><p>120 total votes / Poll closed</p></section>
 <figure class="xa-media xa-gallery-wrap xa-gallery-count-2"><div class="xa-gallery"><div class="xa-image-link"><img class="xa-zoomable" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" alt="Image attached to main X article by @ada, archive media image-001" loading="lazy" decoding="async" data-xa-media-id="image-001" data-xa-source-post-id="12345" data-xa-source-url="https://x.com/ada/article/12345" data-xa-sha256="sha256:duplicate-media-hash" data-xa-mime="image/png" data-xa-size="68" width="1200" height="800"></div><div class="xa-gallery-missing xa-missing-compact" data-xa-media-id="image-002" data-xa-source-post-id="12345" data-xa-source-url="https://x.com/ada/article/12345" data-xa-missing-type="image"><span>Image unavailable</span></div></div></figure>
 <figure class="xa-video-fallback" data-xa-media-id="video-003" data-xa-source-post-id="999" data-xa-source-url="https://x.com/ada/status/999" data-xa-sha256="sha256:video-poster-hash" data-xa-mime="image/png" data-xa-size="68" data-xa-missing-type="video-inline"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==" alt="" aria-hidden="true" loading="lazy" decoding="async"><a class="xa-watch" href="https://x.com/ada/status/999" target="_blank" rel="noopener noreferrer">&#9654; Watch video on X</a><figcaption>Embedded video &middot; video file not preserved offline; poster/source link fallback</figcaption></figure>
 <figure class="xa-video" data-xa-media-id="video-004" data-xa-source-post-id="1000" data-xa-source-url="https://x.com/ada/status/1000" data-xa-sha256="sha256:video-hash" data-xa-mime="video/mp4" data-xa-size="456" width="438" height="270"><video controls playsinline preload="metadata" data-xa-media-id="video-004" data-xa-sha256="sha256:video-hash" data-xa-width="438" data-xa-height="270" data-xa-duration="884.79" poster="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="><source src="data:video/mp4;base64,AAAA" type="video/mp4"></video><figcaption>Embedded video &middot; 14:45 &middot; preserved offline</figcaption></figure>
@@ -151,9 +160,10 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       <div><dt>Original URL</dt><dd><a href="https://x.com/ada/article/12345" target="_blank" rel="noopener noreferrer">https://x.com/ada/article/12345</a></dd></div>
       <div><dt>Published at</dt><dd><time datetime="2026-06-24T09:30:00.000Z">2026-06-24 09:30:00 UTC</time></dd></div>
       <div><dt>Exported at</dt><dd><time datetime="2026-06-25T10:00:00.000Z">2026-06-25 10:00:00 UTC</time></dd></div>
-      <div><dt>Exporter</dt><dd>SourceCapsule v1.2.1</dd></div>
+      <div><dt>Exporter</dt><dd>SourceCapsule v1.3.0</dd></div>
     </dl>
     <p class="xa-disclaimer">This archive preserves content visible to the logged-in user at export time. It may not include content that was unavailable, private, deleted, or failed to load during capture.</p>
+
   </footer>
 </main>
 <div class="xa-lightbox" id="xa-lightbox" role="dialog" aria-modal="true" aria-label="Image preview" tabindex="-1"><button class="xa-lightbox-close" type="button" aria-label="Close image preview">&times;</button><img alt="" aria-hidden="true"></div>
@@ -193,7 +203,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
   "schemaVersion": "1.0",
   "exporter": {
     "name": "SourceCapsule",
-    "version": "1.2.1"
+    "version": "1.3.0"
   },
   "capture": {
     "sourceUrl": "https://x.com/ada/article/12345",
@@ -204,6 +214,8 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     "headings": 1,
     "paragraphs": 4,
     "lists": 2,
+    "polls": 1,
+    "recoveredLongFormNotes": 0,
     "quoteCards": 4,
     "renderedTweetCards": 4,
     "images": 3,
@@ -215,7 +227,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     "missingMedia": 6,
     "hashedMedia": 4,
     "duplicateMedia": 1,
-    "sourceLinks": 13,
+    "sourceLinks": 14,
     "threadPosts": 1,
     "threadCompleteness": "single-post",
     "note": "",
@@ -504,6 +516,26 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
         "image-001",
         "image-008"
       ]
+    }
+  ],
+  "polls": [
+    {
+      "question": "Which archive format?",
+      "choices": [
+        {
+          "label": "HTML",
+          "percentage": "75%"
+        },
+        {
+          "label": "Markdown",
+          "percentage": "25%"
+        }
+      ],
+      "totalVotes": "120",
+      "status": "Poll closed",
+      "sourcePostId": "12345",
+      "sourceUrl": "https://x.com/ada/status/12345",
+      "resultsUnavailable": false
     }
   ],
   "warnings": [

@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "SourceCapsule",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Save complete X threads, Articles, and posts as offline archives, agent-ready Markdown, or expiring share links.",
-  "permissions": ["storage"],
+  "permissions": ["activeTab"],
   "host_permissions": [
     "https://x.com/*",
     "https://twitter.com/*",
@@ -11,10 +11,7 @@
     "https://mobile.twitter.com/*",
     "https://*.twimg.com/*",
     "https://cdn.syndication.twimg.com/*",
-    "https://share.sourcecapsule.app/*",
-    "https://sourcecapsule-share.wolfgang-aura.workers.dev/*",
-    "http://127.0.0.1/*",
-    "http://localhost/*"
+    "https://sourcecapsule-share.wolfgang-aura.workers.dev/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -27,11 +24,23 @@
         "https://mobile.x.com/*",
         "https://mobile.twitter.com/*"
       ],
+      "js": ["page-bridge.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*",
+        "https://mobile.x.com/*",
+        "https://mobile.twitter.com/*"
+      ],
       "js": ["compat.js", "sourcecapsule.user.js"],
       "run_at": "document_start"
     }
   ],
   "action": {
-    "default_title": "SourceCapsule runs inside X"
+    "default_title": "SourceCapsule",
+    "default_popup": "popup.html"
   }
 }

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SourceCapsule</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>SourceCapsule</h1>
+        <span id="version"></span>
+      </header>
+      <p id="status" role="status">Checking this tab…</p>
+      <button id="open-x" type="button" hidden>Open X</button>
+      <form id="settings" hidden>
+        <fieldset>
+          <legend>Library layout</legend>
+          <label><input type="radio" name="layout" value="date" /> By date</label>
+          <label><input type="radio" name="layout" value="flat" /> Flat</label>
+        </fieldset>
+        <fieldset>
+          <legend>Library contents</legend>
+          <label><input type="radio" name="contents" value="full" /> Full archive</label>
+          <label><input type="radio" name="contents" value="lean" /> Lean Markdown + media</label>
+        </fieldset>
+        <label class="toggle"><input id="floating-button" type="checkbox" /> Floating button</label>
+        <button id="change-folder" type="button">Change export folder</button>
+        <p id="folder-help" class="hint" hidden></p>
+      </form>
+      <nav>
+        <a href="https://github.com/wolfgang-aura/SourceCapsule#readme" target="_blank"
+          >Help / source</a
+        >
+        <a
+          href="https://github.com/wolfgang-aura/SourceCapsule#privacy-and-security"
+          target="_blank"
+          >Privacy</a
+        >
+      </nav>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
