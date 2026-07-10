@@ -34,15 +34,22 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
    `capturedQuotedRefs`. Free source of truth — no extra network call, and it survives
    whatever the DOM later virtualizes away.
 3. **Syndication layer**: each embedded/quoted tweet is re-fetched by id from
-   `cdn.syndication.twimg.com/tweet-result` and its quote card is rebuilt from that
-   authoritative data (`enrichQuotesViaSyndication` → `syndicationToQuoteBlock`). Runs
-   AFTER capture-based recovery so most quote permalinks are already resolved and no
-   round-trip is needed.
+   `cdn.syndication.twimg.com/tweet-result` (with retry + backoff; 404 stops early) and
+   its quote card is rebuilt from that authoritative data (`enrichQuotesViaSyndication` →
+   `syndicationToQuoteBlock`). Runs AFTER capture-based recovery so most quote permalinks
+   are already resolved and no round-trip is needed. Threads get a per-post media/link
+   diff (`enrichThreadViaSyndication`); focused single posts get the same diff via
+   `enrichFocusedPostViaSyndication` (both share `applySyndicationDataToSegment`), so a
+   lazily-lost image that never produced a DOM block is still recovered.
 4. **Ship-blocker layer** (strict export): `assessExportCompleteness(model)` walks the
    fully-recovered model and returns any dead-end the reader would see (missing quote
    permalinks, uncaptured quote content, failed images, videos with no bytes or poster).
-   When strict mode is on (default), the download is blocked with a confirm modal and a
-   `buildDiagnosticBundle()` "Copy diagnostic" button.
+   When strict mode is on (default) and blockers remain, `repairExportBlockers()` first
+   retries each through the layer that owns it (captured refs → pool permalink matcher →
+   syndication quote rebuild → media rescue) after a short pause; only if the export is
+   STILL incomplete is the download blocked with a confirm modal offering **Retry
+   recovery** (re-runs the repair round in place), a `buildDiagnosticBundle()` "Copy
+   diagnostic" button, and Ship-anyway/Cancel.
 5. **Stable layer**: `GM_xmlhttpRequest` fetch (bypasses CORS) → base64 → `assembleHtml()`
    / `renderLlmMarkdown()` → download. Touches only the model, never the DOM. The model
    is the contract, so X's frequent DOM churn rarely hits the engine.
