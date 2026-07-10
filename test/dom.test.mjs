@@ -351,6 +351,24 @@ check('inlineHtmlFromTweetText captures nested-span text', () => {
   assert.ok(html.includes('对我们这些炒币的可能就够了'), `got: ${JSON.stringify(html)}`);
 });
 
+check('quote detection survives X removing tabindex from the clickable card', () => {
+  const host = document.createElement('article');
+  host.setAttribute('data-testid', 'tweet');
+  host.innerHTML = `
+    <div data-testid="tweetText" lang="en">Outer post</div>
+    <div role="link">
+      <div data-testid="User-Name"><span>Quoted</span><span>@quoted</span></div>
+      <div data-testid="tweetText" lang="en">Quote without tabindex</div>
+      <a href="/quoted/status/700"><time datetime="2026-07-10T00:00:00Z">Jul 10</time></a>
+    </div>
+    <a href="/outer/status/701"><time datetime="2026-07-10T00:01:00Z">Jul 10</time></a>`;
+  const blocks = engine.buildTweetBlocks(host).blocks;
+  const quote = blocks.find((block) => block.kind === 'quote');
+  assert.ok(quote);
+  assert.equal(quote.sourceUrl, 'https://x.com/quoted/status/700');
+  assert.match(quote.blocks[0].html, /without tabindex/);
+});
+
 check('articleListType: "unordered" class is bullets, not numbers (no substring trap)', () => {
   const d = dom.window.document;
   const make = (attr, val) => {
