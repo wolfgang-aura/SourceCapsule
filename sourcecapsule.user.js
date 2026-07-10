@@ -7057,6 +7057,21 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return false;
   }
 
+  function unambiguousVideoFallbackCandidate(candidates, unresolvedBlockCount) {
+    if (unresolvedBlockCount !== 1) return null;
+    const mp4s = sortVideoCandidates(candidates || []).filter(
+      (candidate) => candidate.kind === 'mp4'
+    );
+    if (!mp4s.length) return null;
+    const identities = new Set(
+      mp4s.map(
+        (candidate) =>
+          String(candidate.mediaKey || '') || xVideoMediaKey(candidate.url) || candidate.url
+      )
+    );
+    return identities.size === 1 ? mp4s[0] : null;
+  }
+
   function enrichVideoCandidates(model) {
     const videos = [];
     const walk = (blocks) => {
@@ -7068,7 +7083,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     walk(model.blocks);
     const ordered = sortVideoCandidates(harvestedVideoCandidates);
     const used = new Set();
-    videos.forEach((block, index) => {
+    videos.forEach((block) => {
       addVideoCandidatesToBlock(block, block.videoCandidates || []);
       const matched = ordered.filter(
         (candidate) => !used.has(candidate.url) && videoCandidateMatchesBlock(candidate, block)
@@ -7077,17 +7092,24 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         addVideoCandidatesToBlock(block, matched);
         matched.forEach((candidate) => used.add(candidate.url));
       } else {
-        const byIndex = ordered.filter((candidate, candidateIndex) => {
-          if (used.has(candidate.url)) return false;
-          if (block.mp4Url) return false;
-          return (
-            candidate.kind === 'mp4' ||
-            (!ordered.some((item) => item.kind === 'mp4') && candidateIndex === index)
-          );
-        });
-        if (byIndex.length) {
-          addVideoCandidatesToBlock(block, [byIndex[0]]);
-          used.add(byIndex[0].url);
+        // Never pair multiple posts/videos by array index: candidates are
+        // bitrate-sorted, not DOM-ownership sorted, so that can put another
+        // post's MP4 into this block. A keyless fallback is safe only when one
+        // unresolved block and one logical media id remain.
+        const remaining = ordered.filter((candidate) => !used.has(candidate.url));
+        const unresolved = videos.filter((candidateBlock) => !candidateBlock.mp4Url).length;
+        const fallback = block.mp4Url
+          ? null
+          : unambiguousVideoFallbackCandidate(remaining, unresolved);
+        if (fallback) {
+          addVideoCandidatesToBlock(block, [fallback]);
+          remaining
+            .filter(
+              (candidate) =>
+                (candidate.mediaKey || xVideoMediaKey(candidate.url)) ===
+                (fallback.mediaKey || xVideoMediaKey(fallback.url))
+            )
+            .forEach((candidate) => used.add(candidate.url));
         }
       }
       if (!block.mp4Url) {
@@ -9501,6 +9523,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       videoCandidatesFromStructuredData,
       videoCandidatesFromCapturedBody,
       videoCandidateMatchesBlock,
+      unambiguousVideoFallbackCandidate,
       handleNetworkCapturePayload,
       validateNetworkCapturePayload,
       networkCapturePatterns,
