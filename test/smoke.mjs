@@ -1248,6 +1248,29 @@ check('MP4 validation rejects tiny X video fragments', () => {
   );
 });
 
+check('image validation rejects HTTP-200 error pages and accepts real image signatures', () => {
+  const html = new TextEncoder().encode('<!doctype html><html><body>rate limited</body></html>');
+  assert.throws(
+    () =>
+      engine.validateImageDownload({
+        bytes: html,
+        size: html.length,
+        mime: 'text/html',
+      }),
+    /error document/
+  );
+  const jpeg = new Uint8Array(32);
+  jpeg.set([0xff, 0xd8, 0xff, 0xe0], 0);
+  assert.equal(
+    engine.validateImageDownload({
+      bytes: jpeg,
+      size: jpeg.length,
+      mime: 'application/octet-stream',
+    }),
+    'image/jpeg'
+  );
+});
+
 check('network capture extracts bitrate-ranked GraphQL video variants', () => {
   const payload = {
     data: {

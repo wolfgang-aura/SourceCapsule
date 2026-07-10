@@ -1131,6 +1131,39 @@
     }
   }
 
+  function detectedImageMime(bytes) {
+    if (!bytes || bytes.length < 12) return '';
+    const starts = (...values) => values.every((value, index) => bytes[index] === value);
+    if (starts(0xff, 0xd8, 0xff)) return 'image/jpeg';
+    if (starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) return 'image/png';
+    const head = bytesAscii(bytes, 0, 12);
+    if (head.startsWith('GIF87a') || head.startsWith('GIF89a')) return 'image/gif';
+    if (head.startsWith('RIFF') && head.slice(8, 12) === 'WEBP') return 'image/webp';
+    if (head.startsWith('BM')) return 'image/bmp';
+    if (bytesAscii(bytes, 4, 4) === 'ftyp') {
+      const brand = bytesAscii(bytes, 8, 4).toLowerCase();
+      if (['avif', 'avis'].includes(brand)) return 'image/avif';
+      if (['heic', 'heix', 'mif1', 'msf1'].includes(brand)) return 'image/heic';
+    }
+    return '';
+  }
+
+  /** Reject HTTP-200 error pages masquerading as image downloads. */
+  function validateImageDownload({ bytes, size, mime }) {
+    const actualSize = Number(size || (bytes && bytes.length) || 0);
+    if (actualSize < 12) throw new Error(`image response too small (${humanBytes(actualSize)})`);
+    const declared = String(mime || '').toLowerCase();
+    const detected = detectedImageMime(bytes);
+    const prefix = bytesAscii(bytes, 0, Math.min(actualSize, 256)).trimStart().toLowerCase();
+    if (/^(?:<!doctype\s+html|<html|<head|<body|\{\s*"(?:error|errors|message)")/.test(prefix)) {
+      throw new Error('image response contained an HTML/JSON error document');
+    }
+    if (!detected && !/^image\//i.test(declared)) {
+      throw new Error(`unexpected image content-type ${mime || 'unknown'}`);
+    }
+    return detected || declared;
+  }
+
   function imageFetchCandidates(url) {
     const out = [];
     const add = (candidate) => {
@@ -1167,7 +1200,13 @@
     let lastError = null;
     for (const candidate of imageFetchCandidates(url)) {
       try {
-        return await fetchAsDataUri(candidate);
+        const fetched = await fetchAsDataUri(candidate);
+        const validatedMime = validateImageDownload(fetched);
+        if (validatedMime && validatedMime !== fetched.mime) {
+          fetched.mime = validatedMime;
+          fetched.dataUri = `data:${validatedMime};base64,${bytesToBase64(fetched.bytes)}`;
+        }
+        return fetched;
       } catch (e) {
         lastError = e;
       }
@@ -9403,6 +9442,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       imageFetchCandidates,
       gmFetchBytes,
       validateMp4Download,
+      validateImageDownload,
       videoCandidatesFromStructuredData,
       videoCandidatesFromCapturedBody,
       videoCandidateMatchesBlock,
