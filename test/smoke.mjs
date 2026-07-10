@@ -1351,6 +1351,42 @@ check('network capture extracts bitrate-ranked GraphQL video variants', () => {
   assert.ok(candidates.some((candidate) => candidate.kind === 'hls'));
 });
 
+check('keyless video fallback refuses ambiguous cross-post candidates', () => {
+  const sameVideoVariants = [
+    {
+      url: 'https://video.twimg.com/ext_tw_video/777/pu/vid/640x360/low.mp4',
+      kind: 'mp4',
+      bitrate: 256000,
+    },
+    {
+      url: 'https://video.twimg.com/ext_tw_video/777/pu/vid/1280x720/high.mp4',
+      kind: 'mp4',
+      bitrate: 2176000,
+    },
+  ];
+  assert.equal(
+    engine.unambiguousVideoFallbackCandidate(sameVideoVariants, 1).bitrate,
+    2176000,
+    'multiple encodes of one media id are safe; pick the best'
+  );
+  assert.equal(engine.unambiguousVideoFallbackCandidate(sameVideoVariants, 2), null);
+  assert.equal(
+    engine.unambiguousVideoFallbackCandidate(
+      [
+        sameVideoVariants[1],
+        {
+          url: 'https://video.twimg.com/ext_tw_video/888/pu/vid/1280x720/other.mp4',
+          kind: 'mp4',
+          bitrate: 3000000,
+        },
+      ],
+      1
+    ),
+    null,
+    'two logical videos must never be assigned by bitrate/index order'
+  );
+});
+
 // Write a previewable sample so humans (and the README) can see the output style.
 const outDir = join(here, '..', 'examples');
 mkdirSync(outDir, { recursive: true });
