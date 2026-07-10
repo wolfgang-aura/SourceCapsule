@@ -7756,6 +7756,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const additions = [];
     let recoveredNote = false;
     let truncatedPost = false;
+    let recoveredQuote = false;
 
     // Position-based quote-source recovery: this post's own syndication response
     // is the definitive source for its (single) quoted-tweet id. If any quote in
@@ -7790,6 +7791,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             recoverQuoteNoteText(target, lookupNote(qt.id_str));
           }
         }
+      } else if (!segment.some((b) => b.kind === 'quote')) {
+        // The quote card itself never mounted (lazy loading / virtualization),
+        // so there is no DOM block for the strict gate to flag. The parent
+        // payload is authoritative: rebuild the missing quote in full.
+        const fresh = syndicationToQuoteBlock(qt);
+        if (fresh.truncated) recoverQuoteNoteText(fresh, lookupNote(qt.id_str));
+        additions.push(fresh);
+        recoveredQuote = true;
       }
     }
 
@@ -7817,7 +7826,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       }
       additions.push(candidate);
     });
-    const recovered = additions.length + merged;
+    const recovered =
+      additions.filter((block) => ['image', 'video'].includes(block.kind)).length + merged;
 
     // External links: X strips a card's URL from the visible text, so a
     // lazily-lost card means the link exists ONLY in entities.urls.
@@ -7891,7 +7901,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       }
       model.blocks.splice(insertAt, 0, ...additions);
     }
-    return { recovered, truncatedPost, recoveredNote };
+    return { recovered, recoveredQuote, truncatedPost, recoveredNote };
   }
 
   /**
@@ -7920,6 +7930,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     let recovered = 0;
     let truncatedPosts = 0;
     let recoveredNotes = 0;
+    let recoveredQuotes = 0;
     onProgress && onProgress(0, markers.length);
     // Walk backwards so insertions never shift the indices of unprocessed segments.
     for (let i = markers.length - 1; i >= 0; i--) {
@@ -7939,6 +7950,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           recovered += applied.recovered;
           if (applied.truncatedPost) truncatedPosts++;
           if (applied.recoveredNote) recoveredNotes++;
+          if (applied.recoveredQuote) recoveredQuotes++;
         }
       } catch (e) {
         warn('thread syndication check failed for post', marker.statusId, '-', e.message);
@@ -7952,9 +7964,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       if (recovered) model.thread.mediaRecovered = recovered;
       if (totalTruncated) model.thread.truncatedPosts = totalTruncated;
       if (recoveredNotes) model.thread.recoveredNotes = recoveredNotes;
-      if (recovered || truncatedPosts || recoveredNotes) {
+      if (recoveredQuotes) model.thread.quotesRecovered = recoveredQuotes;
+      if (recovered || recoveredQuotes || truncatedPosts || recoveredNotes) {
         log(
-          `syndication pass: recovered ${recovered} media item(s), recovered full text for ${recoveredNotes} long-form post(s), flagged ${truncatedPosts} as preview-only`
+          `syndication pass: recovered ${recovered} media item(s), ${recoveredQuotes} quote card(s), full text for ${recoveredNotes} long-form post(s), flagged ${truncatedPosts} as preview-only`
         );
       }
     }
@@ -7992,8 +8005,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           data,
           lookupNote
         );
-        if (applied.recovered) {
-          log(`post syndication pass: recovered ${applied.recovered} item(s) the DOM missed`);
+        if (applied.recovered || applied.recoveredQuote) {
+          log(
+            `post syndication pass: recovered ${applied.recovered} media/link item(s) and ${applied.recoveredQuote ? 1 : 0} quote card(s) the DOM missed`
+          );
         }
       }
     } catch (e) {
