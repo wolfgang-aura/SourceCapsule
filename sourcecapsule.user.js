@@ -167,6 +167,11 @@
     forceLoadSettleMs: 2500,
     mediaFetchRetries: 4,
     mediaFetchRetryBaseMs: 650,
+    // Parallel media downloads during the main inline pass. Small on purpose:
+    // enough to cut big-thread export time ~3x, low enough to stay under X's
+    // rate limits. The rescue/repair passes stay sequential - they are retrying
+    // failures, and gentler pacing is what lets those succeed.
+    mediaFetchConcurrency: 3,
     // Backoff multiplier applied when a fetch is rate-limited (HTTP 429): those
     // need substantially more room than transient socket errors to clear.
     rateLimitBackoffFactor: 4,
@@ -205,6 +210,23 @@
   const warn = (...a) => console.warn(`[${APP}]`, ...a);
   const errlog = (...a) => console.error(`[${APP}]`, ...a);
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  /** Run `worker(item)` over `items` with at most `limit` in flight. Each item is
+   *  awaited exactly once; worker must handle its own errors (a throw aborts the run). */
+  async function runWithConcurrency(items, limit, worker) {
+    const queue = (items || []).slice();
+    const width = Math.max(1, Math.min(Number(limit) || 1, queue.length));
+    const runners = [];
+    for (let i = 0; i < width; i++) {
+      runners.push(
+        (async () => {
+          while (queue.length) {
+            await worker(queue.shift());
+          }
+        })()
+      );
+    }
+    await Promise.all(runners);
+  }
   const withTimeout = (promise, ms) =>
     Promise.race([
       Promise.resolve(promise).catch((error) => ({ error })),
@@ -2245,11 +2267,17 @@
     const domainLine = lines.find((line) => /^from\s+\S/i.test(line)) || '';
     const title =
       lines.filter((line) => line !== domainLine).sort((a, b) => b.length - a.length)[0] || '';
+    // Card preview image (X proxies these through pbs.twimg.com/card_img/...).
+    // Decorative: a fetch failure never counts missing and never gates the export.
+    const imageEl = Array.from(cardEl.querySelectorAll('img')).find((el) =>
+      /twimg\.com/.test(el.src || '')
+    );
     return {
       kind: 'link-card',
       url,
       title,
       domain: domainLine.replace(/^from\s+/i, ''),
+      imageUrl: imageEl ? imageEl.src : '',
       sourceUrl,
     };
   }
@@ -2792,7 +2820,9 @@
       for (const b of blocks) {
         if (b.kind === 'image') tasks.push(b);
         else if (b.kind === 'video') tasks.push(b);
-        else if (b.kind === 'quote') {
+        else if (b.kind === 'link-card') {
+          if (b.imageUrl) tasks.push(b);
+        } else if (b.kind === 'quote') {
           addAuthor(b.author);
           collect(b.blocks);
         } else if (b.kind === 'blockquote') collect(b.blocks);
@@ -2805,7 +2835,7 @@
     const total = tasks.length;
     onProgress && onProgress(0, total);
 
-    for (const t of tasks) {
+    await runWithConcurrency(tasks, CONFIG.mediaFetchConcurrency, async (t) => {
       try {
         if (t.kind === 'avatar') {
           const { dataUri, size, mime, sha256 } = await fetchImageAsDataUri(t._author.avatarUrl);
@@ -2819,6 +2849,9 @@
           t.size = size;
           t.mime = mime;
           t.sha256 = sha256;
+        } else if (t.kind === 'link-card') {
+          const { dataUri } = await fetchImageAsDataUri(t.imageUrl);
+          t.imageDataUri = dataUri;
         } else if (t.kind === 'video') {
           await inlineVideoBlock(t);
         }
@@ -2826,11 +2859,12 @@
         warn('media inline failed, skipping:', e.message);
         if (t.kind === 'avatar') t._author.avatarFailed = true;
         if (t.kind === 'image') t.failed = true;
+        if (t.kind === 'link-card') t.imageFailed = true;
         if (t.kind === 'video') t.failed = true;
       }
       done++;
       onProgress && onProgress(done, total);
-    }
+    });
     return model;
   }
 
@@ -2850,6 +2884,7 @@
     const collect = (blocks) => {
       for (const b of blocks || []) {
         if (b.kind === 'image' && !b.dataUri && b.url) tasks.push(b);
+        else if (b.kind === 'link-card' && b.imageUrl && !b.imageDataUri) tasks.push(b);
         else if (
           b.kind === 'video' &&
           ((!b.dataUri && (b.mp4Url || (b.videoCandidates || []).some((c) => c.kind === 'mp4'))) ||
@@ -2891,6 +2926,11 @@
           t.mime = mime;
           t.sha256 = sha256;
           t.failed = false;
+          recovered += 1;
+        } else if (t.kind === 'link-card') {
+          const { dataUri } = await fetchImageAsDataUri(t.imageUrl);
+          t.imageDataUri = dataUri;
+          t.imageFailed = false;
           recovered += 1;
         } else if (t.kind === 'video') {
           const hadVideo = !!t.dataUri;
@@ -3399,7 +3439,12 @@
         if (!cardUrl) return '';
         const domain = b.domain || urlHostname(cardUrl);
         const title = b.title && b.title !== domain ? b.title : '';
-        return `<a class="xa-card-link" href="${escapeAttr(cardUrl)}" target="_blank" rel="noopener noreferrer"><span class="xa-card-title">${escapeHtml(
+        // Thumbnail is decorative: rendered only when its bytes actually landed,
+        // silently absent otherwise (never a placeholder, never a blocker).
+        const thumb = b.imageDataUri
+          ? `<img class="xa-card-img" src="${b.imageDataUri}" alt="" aria-hidden="true" loading="lazy" decoding="async">`
+          : '';
+        return `<a class="xa-card-link" href="${escapeAttr(cardUrl)}" target="_blank" rel="noopener noreferrer">${thumb}<span class="xa-card-title">${escapeHtml(
           title || domain || cardUrl
         )}</span><span class="xa-card-domain">${escapeHtml(domain || cardUrl)} &rarr;</span></a>`;
       }
@@ -3435,10 +3480,18 @@
         }</p>`;
       case 'note-recovered':
         return `<p class="xa-note-recovered" data-xa-note-recovered="1">&#10003; Long-form post &mdash; the full text above was recovered from data X delivered to this browser while the page was open.</p>`;
-      case 'quote-tombstone':
-        return `<article class="xa-missing xa-quote-missing" data-xa-missing-type="quoted-post-tombstone"><strong>Quoted post unavailable on X</strong><span>X showed: &ldquo;${escapeHtml(
-          b.notice || 'This Post is unavailable.'
-        )}&rdquo;</span><span>The quoted post was already gone on X at capture time (deleted, suspended, or restricted account) &mdash; there was nothing to capture.</span></article>`;
+      case 'quote-tombstone': {
+        const label = b.replyContext
+          ? 'Replied-to post unavailable on X'
+          : 'Quoted post unavailable on X';
+        const detail = b.replyContext
+          ? escapeHtml(b.notice || 'The post being replied to is no longer available on X.')
+          : `X showed: &ldquo;${escapeHtml(b.notice || 'This Post is unavailable.')}&rdquo;`;
+        return `<article class="xa-missing xa-quote-missing" ${renderAttrs({
+          'data-xa-missing-type': 'quoted-post-tombstone',
+          'data-xa-reply-context': b.replyContext ? '1' : '',
+        })}><strong>${label}</strong><span>${detail}</span><span>The post was already gone on X at capture time (deleted, suspended, or restricted account) &mdash; there was nothing to capture.</span></article>`;
+      }
       case 'code':
         return `<pre class="xa-code"><code>${escapeHtml(b.text)}</code></pre>`;
       case 'blockquote':
@@ -3507,14 +3560,18 @@
           }</article>`;
         }
         const className =
-          qctx.quoteDepth > 1
+          (qctx.quoteDepth > 1
             ? 'xa-tweet-card xa-nested-tweet-card xa-quote'
-            : 'xa-tweet-card xa-quote';
-        return `<article class="${className}" ${renderAttrs({
+            : 'xa-tweet-card xa-quote') + (b.replyContext ? ' xa-reply-context' : '');
+        // Reply context reads top-down: label the card so the reader knows the
+        // exported post ANSWERS this one (not the usual embedded-quote relation).
+        const replyLabel = b.replyContext ? '<p class="xa-reply-label">In reply to</p>' : '';
+        return `${replyLabel}<article class="${className}" ${renderAttrs({
           'data-xa-post-id': sourcePostId,
           'data-xa-source-url': b.sourceUrl,
           'data-xa-source-fallback': quoteSourceHref ? '' : authorHref ? 'author-profile' : '',
           'data-xa-published-at': safeIsoTime(b.publishedAt),
+          'data-xa-reply-context': b.replyContext ? '1' : '',
         })}>${renderAuthorLine(b.author)}<div class="xa-quote-body">${
           b.blocks ? renderBlocks(b.blocks, qctx) : ''
         }</div>${
@@ -3629,9 +3686,11 @@
           // X itself, so "complete" stays true - but the reader is told why.
           stats.quoteTombstones += 1;
           stats.warnings.push(
-            `A quoted post was already unavailable on X at capture time (${
-              b.notice || 'This Post is unavailable.'
-            }). Nothing was capturable.`
+            b.replyContext
+              ? 'The post this reply answers was already unavailable on X at capture time. Nothing was capturable.'
+              : `A quoted post was already unavailable on X at capture time (${
+                  b.notice || 'This Post is unavailable.'
+                }). Nothing was capturable.`
           );
         } else if (b.kind === 'image') {
           stats.images += 1;
@@ -4140,7 +4199,9 @@
 
   function quoteLabel(block) {
     const number = block && block._xaLlmNumber ? block._xaLlmNumber : '?';
-    return number.includes('.') ? `Nested Quoted Post ${number}` : `Embedded Post ${number}`;
+    if (number.includes('.')) return `Nested Quoted Post ${number}`;
+    if (block && block.replyContext) return `Reply Context Post ${number}`;
+    return `Embedded Post ${number}`;
   }
 
   function directQuotes(blocks) {
@@ -4507,9 +4568,16 @@
         lines.push(pollLines.join('\n'));
       } else if (b.kind === 'quote-tombstone') {
         lines.push(
-          `Note: This post embeds a quoted post that was ALREADY unavailable on X at capture time (deleted, suspended, or restricted account). X showed: "${markdownLineText(
-            b.notice || 'This Post is unavailable.'
-          )}" No quoted content exists to include; this is not a capture failure.`
+          b.replyContext
+            ? `Note: This post is a reply, and the post it replied to was ALREADY unavailable on X at capture time (deleted, suspended, or restricted account). ${markdownLineText(
+                b.notice || ''
+              )} No content exists to include; this is not a capture failure.`.replace(
+                /\s{2,}/g,
+                ' '
+              )
+            : `Note: This post embeds a quoted post that was ALREADY unavailable on X at capture time (deleted, suspended, or restricted account). X showed: "${markdownLineText(
+                b.notice || 'This Post is unavailable.'
+              )}" No quoted content exists to include; this is not a capture failure.`
         );
       } else if (b.kind === 'truncation-notice') {
         lines.push(
@@ -4547,6 +4615,9 @@
 
   function renderLlmPost(block, level = 3) {
     const lines = [markdownHeading(level, quoteLabel(block))];
+    if (block.replyContext) {
+      lines.push('', 'This is the post the exported post was replying to (conversation context).');
+    }
     const postId = statusIdFromSourceUrl(block.sourceUrl);
     const author = block.author || {};
     if (author.name) lines.push(`Author: ${markdownLineText(author.name)}`);
@@ -5088,6 +5159,8 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
 .xa-card-link:hover{border-color:var(--accent)}
 .xa-card-title{font-weight:600;font-size:14px;word-break:break-word}
 .xa-card-domain{font-size:13px;color:var(--accent)}
+.xa-card-img{width:100%;max-height:280px;object-fit:cover;border-radius:8px;margin-bottom:6px}
+.xa-reply-label{margin:10px 0 -4px;font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
 .xa-thread-marker{display:flex;align-items:center;gap:12px;margin:28px 0 12px;padding-top:18px;
   border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
 .xa-thread-marker:first-child{margin-top:8px;border-top:0;padding-top:0}
@@ -5338,6 +5411,9 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
         // prompt for explicit confirmation instead of silently shipping a broken export.
         // Explicit `false` disables; anything else (including missing / true) enables.
         strictExport: parsed.strictExport !== false,
+        // Reply context is ON by default: a reply archived without the post it
+        // answers often loses its meaning. Explicit `false` disables.
+        replyContext: parsed.replyContext !== false,
       };
     } catch {
       return {
@@ -5346,6 +5422,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
         floatingButton: false,
         shareApiBase: CONFIG.share.defaultApiBase,
         strictExport: true,
+        replyContext: true,
       };
     }
   }
@@ -5385,7 +5462,8 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
         (value.key === 'layout' && ['date', 'flat'].includes(value.value)) ||
         (value.key === 'contents' && ['full', 'lean'].includes(value.value)) ||
         (value.key === 'floatingButton' && typeof value.value === 'boolean') ||
-        (value.key === 'strictExport' && typeof value.value === 'boolean');
+        (value.key === 'strictExport' && typeof value.value === 'boolean') ||
+        (value.key === 'replyContext' && typeof value.value === 'boolean');
       if (!valid) return { ok: false, error: 'That preference value is not supported.' };
       const prefs = setPrefs({ [value.key]: value.value });
       registerSettingsMenu();
@@ -5696,6 +5774,16 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
         const next = setPrefs({ strictExport: !prefs.strictExport });
         showToast(
           `Strict export: ${next.strictExport ? 'on - broken exports will be blocked' : 'off - exports ship regardless'}`
+        );
+        registerSettingsMenu();
+      }
+    );
+    reg(
+      `${APP}: Reply context - ${prefs.replyContext ? 'on (include replied-to post)' : 'off'} (click to switch)`,
+      () => {
+        const next = setPrefs({ replyContext: !prefs.replyContext });
+        showToast(
+          `Reply context: ${next.replyContext ? 'on - replies include the post they answer' : 'off'}`
         );
         registerSettingsMenu();
       }
@@ -6425,6 +6513,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     pageScriptVideoCandidatesScanned = false;
     nudgedVideoPlayers = new WeakSet();
     capturedImageUrls = new Set();
+    // Per-export cache: a stale payload from a previous export must never leak
+    // into this one (the same post can gain/lose media between exports).
+    syndicationSuccessCache.clear();
     capturedNetworkVideoCandidates.forEach((candidate) => rememberVideoCandidate(candidate, 0));
   }
 
@@ -7093,6 +7184,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return ((Number(id) / 1e15) * Math.PI).toString(6 ** 2).replace(/(0+|\.)/g, '');
   }
 
+  // Successful syndication payloads for the current export run. Several layers
+  // ask for the same status id (pool recovery, quote/thread/focused enrichment,
+  // reply context); one network fetch serves them all. Failures are NOT cached,
+  // so the repair round and the modal retry always get a fresh attempt.
+  const syndicationSuccessCache = new Map();
+
   function fetchTweetSyndicationOnce(id) {
     return new Promise((resolve, reject) => {
       if (typeof GM_xmlhttpRequest !== 'function') {
@@ -7135,11 +7232,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * authoritative (deleted/protected post): retrying cannot succeed, stop early.
    */
   async function fetchTweetSyndication(id) {
+    const key = String(id);
+    if (syndicationSuccessCache.has(key)) return syndicationSuccessCache.get(key);
     const attempts = Math.max(1, Number(CONFIG.syndicationFetchRetries) || 1);
     let lastError = null;
     for (let attempt = 1; attempt <= attempts; attempt++) {
       try {
-        return await fetchTweetSyndicationOnce(id);
+        const result = await fetchTweetSyndicationOnce(id);
+        syndicationSuccessCache.set(key, result);
+        return result;
       } catch (error) {
         lastError = error;
         if (error.status === 404) break;
@@ -7756,6 +7857,88 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return model;
   }
 
+  /**
+   * If the exported post is a reply, prepend the post it replies to as a
+   * labelled "In reply to" context card - a reply archived alone often loses
+   * its meaning. Applies to the model's ROOT post only (thread continuations
+   * reply to their own previous posts, which the thread capture already holds).
+   * A parent that is gone on X gets an honest reply-context tombstone note,
+   * never a strict-gate blocker. Controlled by the `replyContext` pref
+   * (default on); the root fetch is served from the per-export syndication
+   * cache, so this usually costs one extra request (the parent) at most.
+   */
+  async function enrichReplyContextViaSyndication(
+    model,
+    onProgress,
+    fetchTweet = fetchTweetSyndication
+  ) {
+    if (!model || model.type !== 'post' || !Array.isArray(model.blocks)) return model;
+    if (
+      model.blocks.some(
+        (b) => (b.kind === 'quote' || b.kind === 'quote-tombstone') && b.replyContext
+      )
+    ) {
+      return model;
+    }
+    const rootId = statusIdFromUrl(model.sourceUrl);
+    if (!rootId) return model;
+    onProgress && onProgress(0, 1);
+    try {
+      const data = await fetchTweet(rootId);
+      const inlineParent = data && data.parent && data.parent.id_str ? data.parent : null;
+      const parentId =
+        (data && data.in_reply_to_status_id_str) || (inlineParent && inlineParent.id_str) || '';
+      if (!parentId) return model;
+      // A same-author thread export may already contain the parent as a
+      // captured post - prepending it again would duplicate content.
+      const capturedIds = new Set(
+        model.blocks.filter((b) => b.kind === 'thread-marker').map((b) => b.statusId)
+      );
+      if (capturedIds.has(parentId)) return model;
+      const parentHandle =
+        (data && data.in_reply_to_screen_name) ||
+        (inlineParent && inlineParent.user && inlineParent.user.screen_name) ||
+        '';
+      let parentData = null;
+      try {
+        // Full fetch first: the inline `parent` payload is a slimmer shape that
+        // can lack media; fall back to it only when the id fetch fails.
+        parentData = await fetchTweet(parentId);
+      } catch (e) {
+        warn('reply-context parent fetch failed for', parentId, '-', e.message);
+        parentData = inlineParent;
+      }
+      if (
+        parentData &&
+        parentData.user &&
+        (parentData.__typename === 'Tweet' || parentData.text != null)
+      ) {
+        const card = syndicationToQuoteBlock(parentData);
+        card.replyContext = true;
+        if (!statusIdFromUrl(card.sourceUrl) && parentHandle) {
+          card.sourceUrl = `https://x.com/${parentHandle}/status/${parentId}`;
+        }
+        if (card.truncated) recoverQuoteNoteText(card, getCapturedNoteTweet(parentId));
+        model.blocks.unshift(card);
+        log('reply context: prepended parent post', parentId);
+      } else {
+        // We KNOW it is a reply (X said so), but the parent is gone on X.
+        model.blocks.unshift({
+          kind: 'quote-tombstone',
+          replyContext: true,
+          notice: parentHandle
+            ? `This post replies to a post by @${parentHandle} that is no longer available on X.`
+            : 'This post replies to a post that is no longer available on X.',
+          sourceUrl: model.sourceUrl,
+        });
+      }
+    } catch (e) {
+      warn('reply-context check failed for', rootId, '-', e.message);
+    }
+    onProgress && onProgress(1, 1);
+    return model;
+  }
+
   // The export choices offered by every Export control, grouped: save variants,
   // then share/clipboard, then loose file downloads. The primary trigger button
   // already quick-saves, so the menu holds only the variants - and the single
@@ -8329,6 +8512,13 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           // no block at all, invisible even to the strict gate.
           await enrichFocusedPostViaSyndication(model, () =>
             showToast('Verifying post media...', { sticky: true })
+          );
+        }
+        if (getPrefs().replyContext) {
+          // Runs BEFORE inlineMedia so the parent card's avatar/media inline
+          // like any other block. Root payload comes from the per-export cache.
+          await enrichReplyContextViaSyndication(model, () =>
+            showToast('Fetching reply context...', { sticky: true })
           );
         }
         log('model after syndication', model);
@@ -9148,7 +9338,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       mediaKeyFromUrl,
       enrichThreadViaSyndication,
       enrichFocusedPostViaSyndication,
+      enrichReplyContextViaSyndication,
       repairExportBlockers,
+      runWithConcurrency,
+      inlineMedia,
       extractLinkCard,
       extractPollBlock,
       quoteSourceUrlFromElement,

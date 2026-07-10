@@ -2659,6 +2659,224 @@ check('quote-tombstone renders honestly in HTML, Markdown, stats, and stays comp
   assert.match(stats.warnings.join('\n'), /already unavailable on X at capture time/);
 });
 
+// ---------------------------------------------------------------------------
+// Reply context, parallel media downloads, link-card thumbnails.
+// ---------------------------------------------------------------------------
+
+await checkAsync('runWithConcurrency caps in-flight work and processes every item', async () => {
+  const items = Array.from({ length: 10 }, (_, i) => i);
+  let inFlight = 0;
+  let maxInFlight = 0;
+  const seen = [];
+  await engine.runWithConcurrency(items, 3, async (item) => {
+    inFlight += 1;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    seen.push(item);
+    inFlight -= 1;
+  });
+  assert.equal(seen.length, 10, 'every item processed exactly once');
+  assert.deepEqual(
+    [...seen].sort((a, b) => a - b),
+    items
+  );
+  assert.ok(maxInFlight <= 3, `at most 3 in flight (saw ${maxInFlight})`);
+  assert.ok(maxInFlight > 1, 'actually ran in parallel');
+});
+
+await checkAsync('inlineMedia fetches link-card thumbnails and marks failures softly', async () => {
+  global.GM_xmlhttpRequest = (options) => {
+    if (options.url.includes('card_img/good')) {
+      options.onload({
+        status: 200,
+        response: new Uint8Array([1, 2, 3, 4]).buffer,
+        responseHeaders: 'content-type: image/jpeg\r\n',
+      });
+      return;
+    }
+    options.onload({ status: 404, response: null, responseHeaders: '' });
+  };
+  const model = {
+    type: 'post',
+    sourceUrl: 'https://x.com/a/status/1',
+    author: {},
+    blocks: [
+      {
+        kind: 'link-card',
+        url: 'https://example.com/good',
+        imageUrl: 'https://pbs.twimg.com/card_img/good.jpg',
+      },
+      {
+        kind: 'link-card',
+        url: 'https://example.com/bad',
+        imageUrl: 'https://pbs.twimg.com/card_img/bad.jpg',
+      },
+      { kind: 'link-card', url: 'https://example.com/none' },
+    ],
+  };
+  await engine.inlineMedia(model);
+  delete global.GM_xmlhttpRequest;
+  const [good, bad, none] = model.blocks;
+  assert.ok(good.imageDataUri, 'thumbnail bytes inlined');
+  assert.ok(!good.imageFailed);
+  assert.ok(!bad.imageDataUri);
+  assert.equal(bad.imageFailed, true, 'failure recorded on the block');
+  assert.ok(!none.imageDataUri && !none.imageFailed, 'card without thumbnail untouched');
+  // Decorative only: a failed thumbnail must never gate the export.
+  assert.equal(engine.assessExportCompleteness(model).verdict, 'clean');
+  assert.equal(engine.archiveStats(model).missingMedia, 0);
+});
+
+check('extractLinkCard captures the card preview image URL', () => {
+  const d = dom.window.document;
+  const wrap = d.createElement('div');
+  wrap.innerHTML = `<div data-testid="card.wrapper"><a href="https://t.co/AbC123"><img src="https://pbs.twimg.com/card_img/123/photo?format=jpg"><span>headline</span><span>From example.com</span></a></div>`;
+  const card = engine.extractLinkCard(wrap, [], 'https://x.com/a/status/1');
+  assert.ok(card);
+  assert.match(card.imageUrl, /card_img/);
+});
+
+check('link-card renders its thumbnail only when the bytes actually landed', () => {
+  const withThumb = engine.renderBlock({
+    kind: 'link-card',
+    url: 'https://example.com/x',
+    title: 'Headline',
+    domain: 'example.com',
+    imageUrl: 'https://pbs.twimg.com/card_img/1.jpg',
+    imageDataUri: 'data:image/jpeg;base64,AA',
+  });
+  assert.match(withThumb, /xa-card-img/);
+  assert.match(withThumb, /data:image\/jpeg;base64,AA/);
+  const withoutThumb = engine.renderBlock({
+    kind: 'link-card',
+    url: 'https://example.com/x',
+    title: 'Headline',
+    domain: 'example.com',
+    imageUrl: 'https://pbs.twimg.com/card_img/1.jpg',
+    imageFailed: true,
+  });
+  assert.doesNotMatch(withoutThumb, /xa-card-img/, 'no placeholder for a failed thumbnail');
+});
+
+await checkAsync('reply context prepends the parent post as a labelled card', async () => {
+  const model = {
+    type: 'post',
+    title: 'Reply post',
+    author: { name: 'Replier', handle: '@replier' },
+    sourceUrl: 'https://x.com/replier/status/200',
+    exportedAt: new Date('2026-07-10T00:00:00Z').toISOString(),
+    blocks: [{ kind: 'paragraph', html: 'This. 100%.' }],
+  };
+  const fetches = [];
+  await engine.enrichReplyContextViaSyndication(model, null, async (id) => {
+    fetches.push(id);
+    if (id === '200') {
+      return { __typename: 'Tweet', text: 'This. 100%.', in_reply_to_status_id_str: '100' };
+    }
+    if (id === '100') {
+      return {
+        __typename: 'Tweet',
+        id_str: '100',
+        text: 'The original claim being answered.',
+        user: { name: 'Original', screen_name: 'original' },
+      };
+    }
+    throw new Error('unexpected fetch ' + id);
+  });
+  assert.deepEqual(fetches, ['200', '100']);
+  const card = model.blocks[0];
+  assert.equal(card.kind, 'quote');
+  assert.equal(card.replyContext, true);
+  assert.equal(card.sourceUrl, 'https://x.com/original/status/100');
+  const html = engine.assembleHtml(model);
+  assert.match(html, /In reply to/);
+  assert.match(html, /data-xa-reply-context="1"/);
+  const md = engine.renderLlmMarkdown(model);
+  assert.match(md, /Reply Context Post 1/);
+  assert.match(md, /the post the exported post was replying to/);
+  // Idempotent: a second pass must not stack a second card.
+  await engine.enrichReplyContextViaSyndication(model, null, async () => {
+    throw new Error('must not fetch again');
+  });
+  assert.equal(model.blocks.filter((b) => b.replyContext).length, 1);
+});
+
+await checkAsync('reply context is a no-op for a post that is not a reply', async () => {
+  const model = {
+    type: 'post',
+    sourceUrl: 'https://x.com/a/status/1',
+    blocks: [{ kind: 'paragraph', html: 'standalone' }],
+  };
+  await engine.enrichReplyContextViaSyndication(model, null, async () => ({
+    __typename: 'Tweet',
+    text: 'standalone',
+  }));
+  assert.equal(model.blocks.length, 1);
+});
+
+await checkAsync('reply context leaves an honest note when the parent is gone on X', async () => {
+  const model = {
+    type: 'post',
+    sourceUrl: 'https://x.com/replier/status/200',
+    blocks: [{ kind: 'paragraph', html: 'reply into the void' }],
+  };
+  await engine.enrichReplyContextViaSyndication(model, null, async (id) => {
+    if (id === '200') {
+      return {
+        __typename: 'Tweet',
+        text: 'reply into the void',
+        in_reply_to_status_id_str: '100',
+        in_reply_to_screen_name: 'suspended_user',
+      };
+    }
+    const error = new Error('syndication: HTTP 404');
+    error.status = 404;
+    throw error;
+  });
+  const note = model.blocks[0];
+  assert.equal(note.kind, 'quote-tombstone');
+  assert.equal(note.replyContext, true);
+  assert.match(note.notice, /@suspended_user/);
+  // Never a blocker - the parent is gone on X itself.
+  assert.equal(engine.assessExportCompleteness(model).verdict, 'clean');
+});
+
+await checkAsync('reply context skips a parent already captured in the thread', async () => {
+  const model = {
+    type: 'post',
+    sourceUrl: 'https://x.com/a/status/200',
+    blocks: [
+      { kind: 'thread-marker', statusId: '100', sourceUrl: 'https://x.com/a/status/100' },
+      { kind: 'paragraph', html: 'post one' },
+      { kind: 'thread-marker', statusId: '200', sourceUrl: 'https://x.com/a/status/200' },
+      { kind: 'paragraph', html: 'post two' },
+    ],
+    thread: { capturedPosts: 2 },
+  };
+  await engine.enrichReplyContextViaSyndication(model, null, async (id) => {
+    assert.equal(id, '200', 'only the root fetch; parent is already captured');
+    return { __typename: 'Tweet', text: 'post two', in_reply_to_status_id_str: '100' };
+  });
+  assert.ok(!model.blocks.some((b) => b.replyContext), 'no duplicate context card');
+});
+
+check('extension controller accepts the replyContext preference', () => {
+  const changed = engine.extensionControllerMessage({
+    type: 'sourcecapsule:controller',
+    version: 1,
+    action: 'set-preference',
+    value: { key: 'replyContext', value: false },
+  });
+  assert.equal(changed.ok, true);
+  assert.equal(changed.prefs.replyContext, false);
+  engine.extensionControllerMessage({
+    type: 'sourcecapsule:controller',
+    version: 1,
+    action: 'set-preference',
+    value: { key: 'replyContext', value: true },
+  });
+});
+
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);
   process.exit(1);
