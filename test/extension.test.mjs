@@ -39,6 +39,15 @@ assert.deepEqual(popup.controllerMessage('get-state'), {
 });
 assert.equal(popup.isSupportedXUrl('https://x.com/example/status/1'), true);
 assert.equal(popup.isSupportedXUrl('https://example.com/'), false);
+assert.equal(popup.pageContextLabel('article'), 'Article');
+assert.equal(popup.pageContextLabel('post'), 'Post or thread');
+assert.equal(popup.pageContextLabel('x'), 'X page');
+const popupHtml = fs.readFileSync(path.join(root, 'extension-src', 'popup.html'), 'utf8');
+const popupCss = fs.readFileSync(path.join(root, 'extension-src', 'popup.css'), 'utf8');
+assert.match(popupHtml, /id="status-card"[^>]*aria-live="polite"/);
+assert.match(popupHtml, /role="switch"/);
+assert.match(popupHtml, /id="save-feedback"[^>]*aria-live="polite"/);
+assert.match(popupCss, /prefers-reduced-motion/);
 const directBytes = Uint8Array.from([1, 2, 3, 4]);
 const directResult = await compat.directHttpRequest(
   {

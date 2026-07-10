@@ -8,47 +8,105 @@
   </head>
   <body>
     <main>
-      <header>
-        <h1>SourceCapsule</h1>
+      <header class="brand">
+        <span class="brand-mark" aria-hidden="true"><span></span></span>
+        <div class="brand-copy">
+          <h1>SourceCapsule</h1>
+          <p>Archive X. Keep the source.</p>
+        </div>
         <span id="version"></span>
       </header>
-      <p id="status" role="status">Checking this tab…</p>
-      <button id="open-x" type="button" hidden>Open X</button>
+
+      <section id="status-card" class="status-card" data-state="checking" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <div>
+          <strong id="status-title">Checking this tab</strong>
+          <p id="status" role="status">Connecting to SourceCapsule&hellip;</p>
+        </div>
+      </section>
+      <button id="open-x" class="primary-action" type="button" hidden>Open X</button>
+
       <form id="settings" hidden>
-        <fieldset>
-          <legend>Library layout</legend>
-          <label><input type="radio" name="layout" value="date" /> By date</label>
-          <label><input type="radio" name="layout" value="flat" /> Flat</label>
-        </fieldset>
-        <fieldset>
-          <legend>Library contents</legend>
-          <label><input type="radio" name="contents" value="full" /> Full archive</label>
-          <label><input type="radio" name="contents" value="lean" /> Lean Markdown + media</label>
-        </fieldset>
-        <label class="toggle"><input id="floating-button" type="checkbox" /> Floating button</label>
-        <label class="toggle"
-          ><input id="strict-export" type="checkbox" /> Strict export (block incomplete)</label
-        >
-        <p class="hint">
-          When on, exports that would ship broken quotes or failed media are blocked with a confirm
-          dialog instead of downloading silently.
-        </p>
-        <label class="toggle"
-          ><input id="reply-context" type="checkbox" /> Include reply context</label
-        >
-        <p class="hint">
-          When a saved post is a reply, the post it answers is included as a labelled context card.
-        </p>
-        <button id="change-folder" type="button">Change export folder</button>
-        <p id="folder-help" class="hint" hidden></p>
+        <section class="settings-card" aria-labelledby="library-heading">
+          <div class="section-heading">
+            <div>
+              <h2 id="library-heading">Library</h2>
+              <p>Choose the folder structure and files saved per post.</p>
+            </div>
+          </div>
+          <fieldset>
+            <legend>Folder layout</legend>
+            <div class="segmented">
+              <label><input type="radio" name="layout" value="date" /><span>By date</span></label>
+              <label><input type="radio" name="layout" value="flat" /><span>Flat</span></label>
+            </div>
+          </fieldset>
+          <fieldset>
+            <legend>Saved files</legend>
+            <div class="segmented">
+              <label
+                ><input type="radio" name="contents" value="full" /><span>Full archive</span></label
+              >
+              <label
+                ><input type="radio" name="contents" value="lean" /><span>Lean + media</span></label
+              >
+            </div>
+          </fieldset>
+          <div class="delivery-row">
+            <span class="delivery-icon" aria-hidden="true"></span>
+            <div>
+              <strong id="delivery-title">Export folder</strong>
+              <p id="delivery-copy">Saved to the folder you choose on X.</p>
+            </div>
+          </div>
+          <button id="change-folder" class="secondary-action" type="button">
+            Choose export folder
+          </button>
+          <p id="folder-help" class="inline-feedback" role="status" hidden></p>
+        </section>
+
+        <section class="settings-card" aria-labelledby="capture-heading">
+          <div class="section-heading">
+            <div>
+              <h2 id="capture-heading">Capture</h2>
+              <p>Safer defaults for complete, useful archives.</p>
+            </div>
+          </div>
+          <label class="switch-row">
+            <span
+              ><strong>Strict export</strong><small>Retry and warn before saving gaps</small></span
+            >
+            <input id="strict-export" type="checkbox" role="switch" />
+          </label>
+          <label class="switch-row">
+            <span
+              ><strong>Reply context</strong
+              ><small>Include the post this reply answers</small></span
+            >
+            <input id="reply-context" type="checkbox" role="switch" />
+          </label>
+          <label class="switch-row">
+            <span
+              ><strong>Floating button</strong
+              ><small>Show a draggable page-level shortcut</small></span
+            >
+            <input id="floating-button" type="checkbox" role="switch" />
+          </label>
+        </section>
+        <p id="save-feedback" class="save-feedback" role="status" aria-live="polite"></p>
       </form>
-      <nav>
-        <a href="https://github.com/wolfgang-aura/SourceCapsule#readme" target="_blank"
-          >Help / source</a
+
+      <nav aria-label="SourceCapsule links">
+        <a
+          href="https://github.com/wolfgang-aura/SourceCapsule#readme"
+          target="_blank"
+          rel="noopener noreferrer"
+          >Help &amp; source</a
         >
         <a
           href="https://github.com/wolfgang-aura/SourceCapsule#privacy-and-security"
           target="_blank"
+          rel="noopener noreferrer"
           >Privacy</a
         >
       </nav>

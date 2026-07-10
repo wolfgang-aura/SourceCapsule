@@ -542,14 +542,31 @@ check('home timeline gets visible per-post save controls without opening a post'
   );
   assert.ok(!menuLabels.includes('Save full thread'));
   assert.ok(menuLabels.includes('Save with note / tags'));
-  controls[0].querySelector('.xa-ctl-options').click();
+  const optionsButton = controls[0].querySelector('.xa-ctl-options');
+  assert.equal(optionsButton.getAttribute('aria-haspopup'), 'menu');
+  assert.equal(menus[0].getAttribute('role'), 'menu');
+  assert.ok(
+    Array.from(menus[0].querySelectorAll('.xa-ctl-item')).every(
+      (item) => item.getAttribute('role') === 'menuitem'
+    )
+  );
+  optionsButton.click();
   assert.equal(menus[0].hidden, false);
+  assert.equal(optionsButton.getAttribute('aria-expanded'), 'true');
+  assert.equal(document.activeElement, menus[0].querySelector('.xa-ctl-item'));
   assert.match(menus[0].style.left, /px$/);
   assert.match(menus[0].style.top, /px$/);
+  menus[0].dispatchEvent(new homeDom.window.KeyboardEvent('keydown', { key: 'Escape' }));
+  assert.equal(menus[0].hidden, true);
+  assert.equal(optionsButton.getAttribute('aria-expanded'), 'false');
+  assert.equal(document.activeElement, optionsButton);
   const riskyTweet = document.querySelectorAll('article[data-testid="tweet"]')[2];
   assert.match(engine.timelineArticlePreviewReason(riskyTweet), /Article preview/);
   controls[2].querySelector('.xa-ctl-trigger').click();
-  assert.match(document.getElementById('sourcecapsule-toast').textContent, /Open the post first/);
+  const toast = document.getElementById('sourcecapsule-toast');
+  assert.match(toast.textContent, /Open the post first/);
+  assert.equal(toast.getAttribute('role'), 'status');
+  assert.equal(toast.getAttribute('aria-live'), 'polite');
 });
 
 check('buildModelForPost uses the focused post permalink as sourceUrl', () => {
