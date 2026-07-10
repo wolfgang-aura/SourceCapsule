@@ -4,7 +4,7 @@
   const SOURCE = 'SourceCapsule:network-capture';
   const FOLDER_SOURCE = 'SourceCapsule:folder-picker';
   const FOLDER_REQUEST_EVENT = 'sourcecapsule:pick-directory';
-  const MAX_BODY_CHARS = 2_000_000;
+  const MAX_BODY_CHARS = 6_000_000;
   const MAX_MESSAGES = 200;
   if (window.__SourceCapsuleExtensionBridgeInstalled) return;
   window.__SourceCapsuleExtensionBridgeInstalled = true;

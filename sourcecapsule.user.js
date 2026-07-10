@@ -141,7 +141,10 @@
       inlineEnabled: true,
       inlineCapBytes: Infinity, // Fetch any discovered MP4; fallback only after preservation fails.
       minPlayableBytes: 32 * 1024,
-      networkCaptureMaxChars: 2_000_000,
+      // TweetDetail bodies for media-heavy threads can exceed 2 MB. Keep a
+      // bounded but roomier window so quote refs near the end survive; any
+      // remaining truncation is surfaced in diagnostics instead of hidden.
+      networkCaptureMaxChars: 6_000_000,
     },
 
     image: {
@@ -4042,6 +4045,8 @@
               interestingResponses: networkCaptureDiagnostics.interestingResponses,
               noteTweets: networkCaptureDiagnostics.noteTweets,
               quotedRefs: networkCaptureDiagnostics.quotedRefs,
+              truncatedResponses: networkCaptureDiagnostics.truncatedResponses,
+              lastTruncatedUrl: networkCaptureDiagnostics.lastTruncatedUrl,
               errors: (networkCaptureDiagnostics.errors || []).slice(-3),
             }
           : undefined,
@@ -6567,6 +6572,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     candidates: 0,
     noteTweets: 0,
     quotedRefs: 0,
+    truncatedResponses: 0,
+    lastTruncatedUrl: '',
     errors: [],
     lastUrls: [],
   };
@@ -6596,6 +6603,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     networkCaptureDiagnostics.interestingResponses = 0;
     networkCaptureDiagnostics.messages = 0;
     networkCaptureDiagnostics.candidates = 0;
+    networkCaptureDiagnostics.truncatedResponses = 0;
+    networkCaptureDiagnostics.lastTruncatedUrl = '';
     networkCaptureDiagnostics.lastUrls = [];
     networkCapturePayloadSignatures.clear();
   }
@@ -6923,7 +6932,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 
   function networkCaptureSignature(payload) {
     const body = payload.body || '';
-    return `${payload.url}|${body.length}|${body.slice(0, 80)}|${body.slice(-80)}`;
+    // GraphQL envelopes often have identical prefixes/suffixes and similar
+    // lengths while differing in the middle. Hash the full bounded body so a
+    // distinct quote/media response is never mistaken for a duplicate.
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < body.length; i++) {
+      hash ^= body.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193);
+    }
+    return `${payload.url}|${body.length}|${(hash >>> 0).toString(16)}`;
   }
 
   function handleNetworkCapturePayload(payload) {
@@ -6952,6 +6969,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (payload.type !== 'response') return [];
     networkCaptureDiagnostics.responsesSeen += 1;
     rememberNetworkCaptureUrl(payload.url || '');
+    if (payload.truncated === true) {
+      networkCaptureDiagnostics.truncatedResponses += 1;
+      networkCaptureDiagnostics.lastTruncatedUrl = payload.url || '';
+    }
     const source = `network:${payload.transport || 'unknown'}`;
     const candidates = videoCandidatesFromCapturedBody(payload.body || '', source);
     if (candidates.length) {
@@ -9527,6 +9548,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       handleNetworkCapturePayload,
       validateNetworkCapturePayload,
       networkCapturePatterns,
+      networkCaptureSignature,
       ensureButton,
       // Long-form (note) full-text recovery from passively captured GraphQL payloads.
       noteTweetsFromCapturedBody,

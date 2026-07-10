@@ -87,8 +87,16 @@ const payload = {
 assert.equal(engine.validateNetworkCapturePayload(payload), true);
 assert.equal(engine.validateNetworkCapturePayload({ ...payload, contractVersion: 2 }), false);
 assert.equal(
-  engine.validateNetworkCapturePayload({ ...payload, body: 'x'.repeat(2_000_001) }),
+  engine.validateNetworkCapturePayload({ ...payload, body: 'x'.repeat(6_000_001) }),
   false
+);
+const sameEnvelopeA = { ...payload, body: '{"wrapper":"AAAA-middle-ZZZZ"}' };
+const sameEnvelopeB = { ...payload, body: '{"wrapper":"AAAA-change-ZZZZ"}' };
+assert.equal(sameEnvelopeA.body.length, sameEnvelopeB.body.length);
+assert.notEqual(
+  engine.networkCaptureSignature(sameEnvelopeA),
+  engine.networkCaptureSignature(sameEnvelopeB),
+  'same-size GraphQL envelopes that differ in the middle are not deduplicated'
 );
 assert.ok(engine.handleNetworkCapturePayload(payload).length > 0);
 assert.equal(engine.handleNetworkCapturePayload(payload).length, 0);
