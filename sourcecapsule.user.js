@@ -5517,6 +5517,8 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
         version: VERSION,
         prefs: getPrefs(),
         pageUrl: location.href,
+        pageType: detectPageType() || 'x',
+        recoveryReady: networkCaptureDiagnostics.installed,
         folderPickerSupported: folderPickerAvailable(),
         libraryDelivery: folderPickerAvailable() ? 'folder' : 'zip',
       };
@@ -5975,6 +5977,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (!t) {
       t = document.createElement('div');
       t.id = CONFIG.toastId;
+      t.setAttribute('role', 'status');
+      t.setAttribute('aria-live', 'polite');
+      t.setAttribute('aria-atomic', 'true');
       document.body.appendChild(t);
     }
     t.textContent = msg;
@@ -8190,6 +8195,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 
   // Only one export menu is open at a time; this closes the previous one.
   let closeOpenExportMenu = null;
+  let exportMenuSequence = 0;
 
   /**
    * Build a self-contained Export control: a trigger button that toggles a small menu
@@ -8245,17 +8251,23 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const options = document.createElement('button');
     options.type = 'button';
     options.className = 'xa-ctl-options';
-    options.textContent = '...';
+    options.textContent = '\u22ef';
     options.title = 'More SourceCapsule actions';
     options.setAttribute('aria-label', 'More SourceCapsule actions');
+    options.setAttribute('aria-haspopup', 'menu');
+    options.setAttribute('aria-expanded', 'false');
     const menu = document.createElement('div');
     menu.className = 'xa-ctl-menu';
+    menu.id = `sourcecapsule-menu-${++exportMenuSequence}`;
+    menu.setAttribute('role', 'menu');
+    options.setAttribute('aria-controls', menu.id);
     menu.hidden = true;
     // Set true at the end of a drag so the click that follows a drag doesn't open the menu.
     let suppressNextClick = false;
 
     const closeMenu = () => {
       menu.hidden = true;
+      options.setAttribute('aria-expanded', 'false');
       menu.style.left = '';
       menu.style.top = '';
       if (closeOpenExportMenu === closeMenu) closeOpenExportMenu = null;
@@ -8265,6 +8277,27 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     };
     const onDocClick = (e) => {
       if (!wrap.contains(e.target) && !menu.contains(e.target)) closeMenu();
+    };
+    const focusableItems = () => Array.from(menu.querySelectorAll('.xa-ctl-item'));
+    const onMenuKeyDown = (event) => {
+      const items = focusableItems();
+      if (!items.length) return;
+      const current = Math.max(0, items.indexOf(document.activeElement));
+      let next = null;
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeMenu();
+        options.focus();
+        return;
+      }
+      if (event.key === 'ArrowDown') next = items[(current + 1) % items.length];
+      else if (event.key === 'ArrowUp') next = items[(current - 1 + items.length) % items.length];
+      else if (event.key === 'Home') next = items[0];
+      else if (event.key === 'End') next = items[items.length - 1];
+      if (next) {
+        event.preventDefault();
+        next.focus();
+      }
     };
     const placeMenu = () => {
       const anchor = options.getBoundingClientRect();
@@ -8287,17 +8320,23 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const openMenu = () => {
       if (closeOpenExportMenu) closeOpenExportMenu();
       menu.hidden = false;
+      options.setAttribute('aria-expanded', 'true');
       placeMenu();
       closeOpenExportMenu = closeMenu;
       document.addEventListener('click', onDocClick, true);
       window.addEventListener('resize', closeMenu, true);
       window.addEventListener('scroll', closeMenu, true);
+      const first = focusableItems()[0];
+      if (first) first.focus();
     };
+
+    menu.addEventListener('keydown', onMenuKeyDown);
 
     menuItems.forEach((entry) => {
       if (entry.divider) {
         const sep = document.createElement('div');
         sep.className = 'xa-ctl-sep';
+        sep.setAttribute('role', 'separator');
         menu.appendChild(sep);
         return;
       }
@@ -8305,6 +8344,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const item = document.createElement('button');
       item.type = 'button';
       item.className = 'xa-ctl-item';
+      item.setAttribute('role', 'menuitem');
       item.textContent = label;
       item.addEventListener('click', (e) => {
         e.preventDefault();

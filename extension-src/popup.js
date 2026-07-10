@@ -34,24 +34,55 @@ function setChecked(name, value) {
   if (input) input.checked = true;
 }
 
+function pageContextLabel(pageType) {
+  if (pageType === 'article') return 'Article';
+  if (pageType === 'post') return 'Post or thread';
+  return 'X page';
+}
+
 async function initPopup() {
   const status = document.querySelector('#status');
+  const statusTitle = document.querySelector('#status-title');
+  const statusCard = document.querySelector('#status-card');
   const settings = document.querySelector('#settings');
   const openX = document.querySelector('#open-x');
+  const saveFeedback = document.querySelector('#save-feedback');
+  const showState = (state, title, message) => {
+    statusCard.dataset.state = state;
+    statusTitle.textContent = title;
+    status.textContent = message;
+  };
+  let feedbackTimer = null;
+  const showFeedback = (message, error = false) => {
+    clearTimeout(feedbackTimer);
+    saveFeedback.textContent = message;
+    saveFeedback.classList.toggle('error', error);
+    if (!error) feedbackTimer = setTimeout(() => (saveFeedback.textContent = ''), 1800);
+  };
   document.querySelector('#version').textContent = `v${chrome.runtime.getManifest().version}`;
   const tab = await activeTab();
   if (!tab || !isSupportedXUrl(tab.url || '')) {
-    status.textContent = 'SourceCapsule runs on X. Open X to capture a post, thread, or Article.';
+    showState('error', 'Open X to begin', 'Capture posts, threads, and Articles from an X tab.');
     openX.hidden = false;
     return;
   }
   const state = await sendToController(tab.id, 'get-state');
   if (!state || !state.ok) {
-    status.textContent =
-      'This X tab needs refreshing after SourceCapsule was installed or updated.';
+    showState(
+      'error',
+      'Refresh this X tab',
+      'SourceCapsule was installed or updated after the page loaded.'
+    );
     return;
   }
-  status.textContent = 'SourceCapsule is ready on this page.';
+  const context = pageContextLabel(state.pageType);
+  showState(
+    'ready',
+    `${context} ready`,
+    state.recoveryReady === false
+      ? 'Export controls are ready; passive recovery is still connecting.'
+      : 'Quote, long-form, and media recovery are active.'
+  );
   settings.hidden = false;
   setChecked('layout', state.prefs.layout);
   setChecked('contents', state.prefs.contents);
@@ -59,12 +90,16 @@ async function initPopup() {
   document.querySelector('#strict-export').checked = state.prefs.strictExport !== false;
   document.querySelector('#reply-context').checked = state.prefs.replyContext !== false;
   const changeFolder = document.querySelector('#change-folder');
+  const deliveryTitle = document.querySelector('#delivery-title');
+  const deliveryCopy = document.querySelector('#delivery-copy');
   if (state.folderPickerSupported === false) {
     changeFolder.disabled = true;
-    changeFolder.textContent = 'Folder selection unavailable';
+    changeFolder.textContent = 'Folder picker unavailable';
+    deliveryTitle.textContent = 'ZIP delivery';
+    deliveryCopy.textContent = 'This browser downloads one ZIP with the same library structure.';
     const help = document.querySelector('#folder-help');
     help.hidden = false;
-    help.textContent = 'This browser saves each library capture as a ZIP download instead.';
+    help.textContent = 'No content is lost; the folder tree is packed into the ZIP.';
   }
 
   settings.addEventListener('change', async (event) => {
@@ -77,13 +112,22 @@ async function initPopup() {
     else if (target.id === 'strict-export') value = { key: 'strictExport', value: target.checked };
     else if (target.id === 'reply-context') value = { key: 'replyContext', value: target.checked };
     else return;
+    target.disabled = true;
     const result = await sendToController(tab.id, 'set-preference', value);
-    if (!result || !result.ok) status.textContent = result.error || 'Could not save that setting.';
+    target.disabled = false;
+    if (!result || !result.ok) {
+      showFeedback((result && result.error) || 'Could not save that setting.', true);
+      return;
+    }
+    showFeedback('Setting saved');
   });
   changeFolder.addEventListener('click', async () => {
+    changeFolder.disabled = true;
     const result = await sendToController(tab.id, 'pick-folder');
+    changeFolder.disabled = false;
     const help = document.querySelector('#folder-help');
     help.hidden = false;
+    help.classList.toggle('error', !(result && result.ok));
     help.textContent =
       result && result.ok
         ? 'Finish choosing the folder in the SourceCapsule prompt on the X page.'
@@ -101,5 +145,5 @@ if (typeof document !== 'undefined') {
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { controllerMessage, isSupportedXUrl };
+  module.exports = { controllerMessage, isSupportedXUrl, pageContextLabel };
 }
