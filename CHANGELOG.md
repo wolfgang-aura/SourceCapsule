@@ -55,6 +55,24 @@ All notable changes to this project are documented here. The format is based on
   the manifest (`quoteTombstones` count + warning), and the capture receipt ("Quoted
   posts gone on X" row) — instead of being silently omitted while the receipt claimed
   Complete. Intentionally never a strict-gate blocker: there is nothing to capture.
+- **Reply context (pref, default on).** When the exported post is a reply, the post it
+  answers is fetched from syndication and prepended as a labelled "In reply to" card in
+  the HTML and as "Reply Context Post 1" in the `.llm.md` — a reply archived alone often
+  loses its meaning. A parent that is itself gone on X gets an honest "Replied-to post
+  unavailable on X" note (never a blocker); a parent already captured inside a
+  same-author thread export is never duplicated. Toggleable via the userscript-manager
+  menu ("Reply context") and the extension popup ("Include reply context").
+- **Parallel media downloads.** The main inline pass now fetches up to 3 media items at
+  once (`CONFIG.mediaFetchConcurrency`), cutting big-thread export time roughly 3x. The
+  rescue and repair passes intentionally stay sequential — they retry failures, where
+  gentler pacing is what makes retries succeed.
+- **Link-card thumbnails.** External-link preview cards now embed their preview image
+  (X's `card_img`) in the offline HTML. Strictly decorative: a failed thumbnail renders
+  nothing (no placeholder), never counts as missing media, and never gates the export.
+- **Per-export syndication cache.** Successful `tweet-result` payloads are reused across
+  all recovery layers within one export (pool recovery, quote/thread/focused enrichment,
+  reply context), removing duplicate network round-trips. Failures are never cached, so
+  the auto-repair round and the modal's Retry recovery always get a fresh attempt.
 
 ### Changed
 

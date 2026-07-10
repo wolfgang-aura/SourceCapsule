@@ -40,7 +40,9 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
    are already resolved and no round-trip is needed. Threads get a per-post media/link
    diff (`enrichThreadViaSyndication`); focused single posts get the same diff via
    `enrichFocusedPostViaSyndication` (both share `applySyndicationDataToSegment`), so a
-   lazily-lost image that never produced a DOM block is still recovered.
+   lazily-lost image that never produced a DOM block is still recovered. Successful
+   payloads are cached per export (`syndicationSuccessCache`; failures never cached), and
+   replies prepend their parent post via `enrichReplyContextViaSyndication` (pref-gated).
 4. **Ship-blocker layer** (strict export): `assessExportCompleteness(model)` walks the
    fully-recovered model and returns any dead-end the reader would see (missing quote
    permalinks, uncaptured quote content, failed images, videos with no bytes or poster).
@@ -69,10 +71,13 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
 - The `.llm.md` is honest about itself: a `## What This File Is` header states it is text +
   metadata; in bundle mode it references the real `media/...` files (`collectBundleMediaFiles` →
   `pathById` → `renderLlmMarkdown(..., { mediaFiles })`); it never names a file that is not on disk.
-- Three prefs (`layout` date|flat, `contents` full|lean, `strictExport` bool) live in
-  `localStorage`. Toggled via userscript-manager **menu commands**
-  (`registerSettingsMenu`) OR the MV3 popup — no in-app panel. `strictExport` defaults on;
-  when on, the ship-blocker layer runs before assembly.
+- Four prefs (`layout` date|flat, `contents` full|lean, `strictExport` bool,
+  `replyContext` bool) live in `localStorage`. Toggled via userscript-manager
+  **menu commands** (`registerSettingsMenu`) OR the MV3 popup — no in-app panel.
+  `strictExport` defaults on; when on, the ship-blocker layer runs before assembly.
+  `replyContext` defaults on; when on, a reply export prepends the replied-to post as a
+  labelled context card (`enrichReplyContextViaSyndication`; honest tombstone note when
+  the parent is gone on X, skipped when the parent is already a captured thread post).
 - Status-page quick save captures the visible same-author thread by default. It progressively
   scrolls from the top and keeps cloned tweet nodes so X virtualization does not erase earlier
   posts. Capture remains best-effort and is labelled as such. Every focused-post button also
