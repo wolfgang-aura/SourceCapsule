@@ -4069,7 +4069,7 @@
       try {
         const data = await fetchTweet(id);
         if (data && data.user && (data.__typename === 'Tweet' || data.text != null)) {
-          const fresh = syndicationToQuoteBlock(data);
+          const fresh = mergeQuoteAfterSyndication(quote, syndicationToQuoteBlock(data));
           quote.author = fresh.author;
           quote.blocks = fresh.blocks;
           // Keep the permalink we already verified unless the rebuild produced
@@ -7353,6 +7353,26 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return blocks;
   }
 
+  function syndicationLinkBlocks(t, sourceUrl) {
+    const blocks = [];
+    const seen = new Set();
+    const urls = (t && t.entities && t.entities.urls) || [];
+    urls.forEach((entity) => {
+      const expanded = safeUrl(entity && (entity.expanded_url || entity.url));
+      if (!expanded || isStatusPermalink(expanded) || seen.has(expanded)) return;
+      seen.add(expanded);
+      blocks.push({
+        kind: 'link-card',
+        url: expanded,
+        shortUrl: safeUrl(entity.url),
+        title: entity.display_url || '',
+        domain: urlHostname(expanded),
+        sourceUrl,
+      });
+    });
+    return blocks;
+  }
+
   /** Turn a syndication tweet object into a `quote` model block. */
   function syndicationToQuoteBlock(t) {
     const user = t.user || {};
@@ -7363,6 +7383,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const html = syndicationTextHtml(t);
     if (html) blocks.push({ kind: 'paragraph', html });
     syndicationMediaBlocks(t, sourceUrl).forEach((b) => blocks.push(b));
+    syndicationLinkBlocks(t, sourceUrl).forEach((b) => blocks.push(b));
     if (t.quoted_tweet) blocks.push(syndicationToQuoteBlock(t.quoted_tweet));
     return {
       kind: 'quote',
@@ -7379,6 +7400,61 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       // definitive truncation signal (not a guess), so mark it for honest reporting.
       truncated: !!t.note_tweet,
     };
+  }
+
+  /**
+   * Syndication is authoritative for text/media but omits some UI-backed post
+   * types (notably polls and rich card metadata). Keep those DOM blocks while
+   * upgrading everything syndication did provide. Nested quote trees are
+   * merged recursively so a poll inside a quote of a quote does not disappear.
+   */
+  function mergeQuoteAfterSyndication(existing, fresh) {
+    if (!existing || !fresh) return fresh;
+    const oldBlocks = existing.blocks || [];
+    const nextBlocks = (fresh.blocks || []).slice();
+    const extras = [];
+
+    oldBlocks
+      .filter((block) => block.kind === 'link-card')
+      .forEach((oldCard) => {
+        const match = nextBlocks.find(
+          (block) => block.kind === 'link-card' && [block.url, block.shortUrl].includes(oldCard.url)
+        );
+        if (!match) {
+          extras.push(oldCard);
+          return;
+        }
+        // Keep the expanded syndication URL, but the DOM often has the richer
+        // title and thumbnail that the public payload omits.
+        if (oldCard.title) match.title = oldCard.title;
+        if (oldCard.domain) match.domain = oldCard.domain;
+        if (oldCard.imageUrl) match.imageUrl = oldCard.imageUrl;
+        if (oldCard.imageDataUri) match.imageDataUri = oldCard.imageDataUri;
+      });
+
+    oldBlocks
+      .filter((block) => block.kind === 'poll')
+      .forEach((poll) => {
+        if (!nextBlocks.some((block) => block.kind === 'poll')) extras.push(poll);
+      });
+
+    const oldQuotes = oldBlocks.filter((block) => block.kind === 'quote');
+    const freshQuotes = nextBlocks.filter((block) => block.kind === 'quote');
+    freshQuotes.forEach((freshQuote, index) => {
+      const freshId = statusIdFromUrl(freshQuote.sourceUrl);
+      const oldQuote =
+        oldQuotes.find(
+          (candidate) => freshId && statusIdFromUrl(candidate.sourceUrl) === freshId
+        ) || oldQuotes[index];
+      if (oldQuote) mergeQuoteAfterSyndication(oldQuote, freshQuote);
+    });
+
+    if (extras.length) {
+      const nestedAt = nextBlocks.findIndex((block) => block.kind === 'quote');
+      nextBlocks.splice(nestedAt < 0 ? nextBlocks.length : nestedAt, 0, ...extras);
+    }
+    fresh.blocks = nextBlocks;
+    return fresh;
   }
 
   function normalizedPostText(value) {
@@ -7568,7 +7644,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         try {
           const data = await fetchTweetSyndication(id);
           if (data && data.user && (data.__typename === 'Tweet' || data.text != null)) {
-            const fresh = syndicationToQuoteBlock(data);
+            const fresh = mergeQuoteAfterSyndication(q, syndicationToQuoteBlock(data));
             q.author = fresh.author;
             q.blocks = fresh.blocks;
             // Only adopt the rebuilt permalink when it is canonical; a payload
@@ -7658,7 +7734,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           return h && h === qHandle;
         }) || (missingInSegment.length === 1 ? missingInSegment[0] : null);
       if (target) {
-        const fresh = syndicationToQuoteBlock(qt);
+        const fresh = mergeQuoteAfterSyndication(target, syndicationToQuoteBlock(qt));
         target.sourceUrl =
           fresh.sourceUrl || `https://x.com/${qt.user.screen_name}/status/${qt.id_str}`;
         if (fresh.blocks && fresh.blocks.length) {
@@ -9363,6 +9439,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       syndicationToken,
       syndicationToQuoteBlock,
       syndicationMediaBlocks,
+      syndicationLinkBlocks,
+      mergeQuoteAfterSyndication,
       syndicationRelationCandidates,
       recoverMissingQuoteSourcesViaSyndication,
       recoverMissingQuoteSourcesFromCapture,

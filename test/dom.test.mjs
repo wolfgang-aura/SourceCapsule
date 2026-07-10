@@ -1071,6 +1071,11 @@ check('syndicationToQuoteBlock builds an authoritative quote (text, media, neste
   const img = q.blocks.find((b) => b.kind === 'image');
   assert.ok(img.url.includes('Chart') && img.url.includes('name=orig'), `image: ${img && img.url}`);
 
+  const card = q.blocks.find((b) => b.kind === 'link-card');
+  assert.equal(card.url, 'https://example.com/page');
+  assert.equal(card.shortUrl, 'https://t.co/link');
+  assert.equal(card.domain, 'example.com');
+
   const vid = q.blocks.find((b) => b.kind === 'video');
   assert.equal(
     vid.mp4Url,
@@ -1091,6 +1096,47 @@ check('syndicationToQuoteBlock builds an authoritative quote (text, media, neste
     nested.blocks.some((b) => b.kind === 'paragraph' && b.html.includes('nested quote text'))
   );
 });
+
+check(
+  'syndication quote upgrade preserves DOM-only polls and rich card metadata recursively',
+  () => {
+    const existing = {
+      kind: 'quote',
+      blocks: [
+        { kind: 'paragraph', html: 'stale text' },
+        {
+          kind: 'link-card',
+          url: 'https://t.co/link',
+          title: 'Rich title from X card',
+          imageUrl: 'https://pbs.twimg.com/card_img/preview.jpg',
+        },
+        { kind: 'poll', choices: [{ label: 'Yes' }, { label: 'No' }] },
+        {
+          kind: 'quote',
+          sourceUrl: 'https://x.com/nested/status/999',
+          blocks: [{ kind: 'poll', choices: [{ label: 'Nested choice' }] }],
+        },
+      ],
+    };
+    const fresh = engine.mergeQuoteAfterSyndication(
+      existing,
+      engine.syndicationToQuoteBlock(SAMPLE_SYNDICATION)
+    );
+    const card = fresh.blocks.find((block) => block.kind === 'link-card');
+    assert.equal(card.url, 'https://example.com/page', 'expanded URL remains authoritative');
+    assert.equal(card.title, 'Rich title from X card');
+    assert.equal(card.imageUrl, 'https://pbs.twimg.com/card_img/preview.jpg');
+    assert.ok(
+      fresh.blocks.some((block) => block.kind === 'poll'),
+      'outer poll preserved'
+    );
+    const nested = fresh.blocks.find((block) => block.kind === 'quote');
+    assert.ok(
+      nested.blocks.some((block) => block.kind === 'poll'),
+      'nested poll preserved'
+    );
+  }
+);
 
 check('syndication tweet text is not double-escaped (X pre-encodes & < >)', () => {
   const q = engine.syndicationToQuoteBlock({
