@@ -49,6 +49,12 @@ All notable changes to this project are documented here. The format is based on
   quote recovery and thread media recovery) now retry transient failures with backoff;
   404 (deleted/protected) stops immediately. Previously a single dropped request silently
   degraded a quote card to its DOM scrape.
+- **Honest tombstone notes.** A quoted post that is already gone on X itself (deleted,
+  banned/suspended, or restricted account — X's "This Post is unavailable" box) is now
+  captured as an explicit "Quoted post unavailable on X" note in the HTML, the `.llm.md`,
+  the manifest (`quoteTombstones` count + warning), and the capture receipt ("Quoted
+  posts gone on X" row) — instead of being silently omitted while the receipt claimed
+  Complete. Intentionally never a strict-gate blocker: there is nothing to capture.
 
 ### Changed
 

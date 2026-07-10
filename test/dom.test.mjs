@@ -2580,6 +2580,85 @@ check('media rescue retries never-attempted avatars from repaired quote cards', 
   assert.equal(avatarTasks.length, 2, 'both the failed and the never-attempted avatar retried');
 });
 
+// ---------------------------------------------------------------------------
+// Quoted-post tombstones: the quoted post is gone on X itself (banned/deleted).
+// Captured as an honest note, never a strict-gate blocker.
+// ---------------------------------------------------------------------------
+
+check('quoted-post tombstone (banned/deleted account) is captured as an honest note', () => {
+  const d = dom.window.document;
+  const tweetEl = d.createElement('article');
+  tweetEl.setAttribute('data-testid', 'tweet');
+  tweetEl.innerHTML = [
+    '<div data-testid="tweetText">Aurory off the shelf</div>',
+    '<div data-testid="tombstone"><span>This Post is from an account that no longer exists. ',
+    '<a href="https://help.x.com/rules-and-policies">Learn more</a></span></div>',
+  ].join('');
+  const { blocks } = engine.buildTweetBlocks(tweetEl);
+  const tombstone = blocks.find((b) => b.kind === 'quote-tombstone');
+  assert.ok(tombstone, 'tombstone captured as a block');
+  assert.match(tombstone.notice, /account that no longer exists/);
+  // Never a strict-gate blocker: nothing was capturable, X itself shows a dead box.
+  const assessment = engine.assessExportCompleteness({ type: 'post', blocks });
+  assert.equal(assessment.verdict, 'clean');
+});
+
+check('tombstone inside a real quote card belongs to the quote, not the outer post', () => {
+  const d = dom.window.document;
+  const tweetEl = d.createElement('article');
+  tweetEl.setAttribute('data-testid', 'tweet');
+  tweetEl.innerHTML = [
+    '<div data-testid="tweetText">Outer text</div>',
+    '<div role="link" tabindex="0">',
+    '<div data-testid="User-Name">Quoted Author @quoted</div>',
+    '<div data-testid="tweetText">Quoted text</div>',
+    '<div data-testid="tombstone"><span>This Post is unavailable.</span></div>',
+    '</div>',
+  ].join('');
+  const { blocks } = engine.buildTweetBlocks(tweetEl);
+  assert.ok(
+    !blocks.some((b) => b.kind === 'quote-tombstone'),
+    'outer level must not claim the nested tombstone'
+  );
+  const quote = blocks.find((b) => b.kind === 'quote');
+  assert.ok(quote, 'quote card still captured');
+  assert.ok(
+    quote.blocks.some((b) => b.kind === 'quote-tombstone'),
+    'nested tombstone captured inside the quote'
+  );
+});
+
+check('quote-tombstone renders honestly in HTML, Markdown, stats, and stays complete', () => {
+  const model = {
+    type: 'post',
+    title: 'Tombstone post',
+    heading: '',
+    author: { name: 'Author', handle: '@author' },
+    sourceUrl: 'https://x.com/author/status/1',
+    exportedAt: new Date('2026-07-10T00:00:00Z').toISOString(),
+    blocks: [
+      { kind: 'paragraph', html: 'Post text pointing at a dead quote.' },
+      {
+        kind: 'quote-tombstone',
+        notice: 'This Post is from an account that no longer exists.',
+        sourceUrl: 'https://x.com/author/status/1',
+      },
+    ],
+  };
+  const html = engine.assembleHtml(model);
+  assert.match(html, /Quoted post unavailable on X/);
+  assert.match(html, /account that no longer exists/);
+  assert.match(html, /data-xa-missing-type="quoted-post-tombstone"/);
+  const md = engine.renderLlmMarkdown(model);
+  assert.match(md, /ALREADY unavailable on X at capture time/);
+  assert.match(md, /not a capture failure/);
+  const stats = engine.archiveStats(model);
+  assert.equal(stats.quoteTombstones, 1);
+  assert.equal(stats.missingMedia, 0, 'tombstone must not count as missing media');
+  assert.equal(stats.incompleteMedia, 0);
+  assert.match(stats.warnings.join('\n'), /already unavailable on X at capture time/);
+});
+
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);
   process.exit(1);

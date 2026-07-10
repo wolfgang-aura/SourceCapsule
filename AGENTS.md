@@ -94,6 +94,11 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
   library settings menu also needs `@grant GM_registerMenuCommand` / `GM_unregisterMenuCommand`.
 - **Selectors break periodically** when X reships its markup → fix in `CONFIG`, keep old
   selectors as fallbacks. Misses log `[SourceCapsule] …` warnings, never crash.
+- **Quoted-post tombstones are honest notes, not blockers.** `[data-testid="tombstone"]`
+  where a quote card would be means the quoted post is gone on X itself (banned/deleted/
+  restricted). Captured as a `quote-tombstone` block that renders an explicit note plus a
+  receipt/manifest count (`quoteTombstones`); never counted missing and never gates the
+  export — do not "fix" that by making it a blocker.
 - **Video preservation is best-effort.** Full MP4s inline when X exposes them (no size cap,
   so archives can be large); HLS-only/blocked/failed videos fall back to poster + source link
   and are recorded as incomplete media — never counted as "captured." Long-form ("note")
