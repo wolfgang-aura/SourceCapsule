@@ -92,6 +92,9 @@
       videoPlayer: ['div[data-testid="videoPlayer"]', 'div[data-testid="videoComponent"]'],
       // External link-preview card within a tweet (the payload of a link post).
       card: ['div[data-testid="card.wrapper"]', 'a[data-testid="card.wrapper"]'],
+      // Clickable quoted-post wrapper. X has periodically added/removed the
+      // tabindex attribute without changing the card semantics.
+      quoteCard: ['div[role="link"][tabindex="0"]', 'div[role="link"]'],
       // "Show more" link X renders on long-form (note) posts in timeline views;
       // its presence means the visible text is only a preview.
       showMore: ['[data-testid="tweet-text-show-more-link"]'],
@@ -2067,12 +2070,14 @@
     // Quoted tweets are rendered as nested, clickable blocks that contain their
     // own author block + text/media. Capture all top-level quote cards; nested
     // cards are handled when each quote is processed recursively.
-    const candidates = tweetEl.querySelectorAll('div[role="link"][tabindex="0"]');
+    const candidates = pickAllMatchesIncludingRoot(tweetEl, CONFIG.selectors.quoteCard).filter(
+      (candidate) => candidate !== tweetEl
+    );
     const quotes = [];
     for (const c of candidates) {
       if (quotes.some((q) => q.contains(c))) continue;
       const hasUser = pick(c, CONFIG.selectors.userName, { quiet: true });
-      const hasText = c.querySelector('div[data-testid="tweetText"]');
+      const hasText = pick(c, CONFIG.selectors.tweetText, { quiet: true });
       if (hasUser || hasText) quotes.push(c);
     }
     return quotes;
