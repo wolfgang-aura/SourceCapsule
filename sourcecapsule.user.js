@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         SourceCapsule - Save X/Twitter Threads & Articles as Markdown for LLMs + Offline HTML
 // @namespace    https://github.com/wolfgang-aura/SourceCapsule
-// @version      1.3.0
-// @description  One click saves an X (Twitter) thread, Article, or post as clean Markdown for LLM context (Claude, ChatGPT) plus a self-contained offline HTML archive - images, video, and quoted posts embedded, with honest completeness reporting. Local-first, with optional expiring share links.
+// @version      1.4.0
+// @description  One click saves an X (Twitter) thread, Article, or post as clean Markdown for LLM context (Claude, ChatGPT) plus a self-contained offline HTML archive - images, video, and quoted posts embedded, with honest completeness reporting. Local-first, with optional expiring AI readable links.
 // @author       wolfgang-aura
 // @license      MIT
 // @match        https://x.com/*
@@ -161,6 +161,8 @@
     forceLoad: true,
     forceLoadMaxMs: 45000,
     forceLoadSettleMs: 2500,
+    mediaFetchRetries: 4,
+    mediaFetchRetryBaseMs: 650,
     videoNudgeTimeoutMs: 700,
     // Fetch each embedded/quoted tweet by id from X's public syndication endpoint
     // to get its authoritative text + media, instead of scraping the fragile,
@@ -179,7 +181,7 @@
   };
 
   const APP = 'SourceCapsule';
-  const VERSION = '1.3.0';
+  const VERSION = '1.4.0';
 
   // ===========================================================================
   // Small utilities
@@ -296,6 +298,17 @@
     const s = String(u == null ? '' : u).trim();
     if (!s) return '';
     return /^(?:https?:|mailto:)/i.test(s) ? s : '';
+  }
+
+  // https://x.com/<handle> from a stored "@handle" or "handle". Empty when the handle
+  // isn't a valid X username. Used as a last-resort link when a quoted post's exact
+  // permalink couldn't be recovered - a working profile link is always preferable to
+  // a dead-end "source unavailable" notice.
+  function authorProfileUrl(handle) {
+    const raw = String(handle || '')
+      .trim()
+      .replace(/^@/, '');
+    return /^[A-Za-z0-9_]{1,15}$/.test(raw) ? `https://x.com/${raw}` : '';
   }
 
   // X's syndication API returns tweet text with &, <, > already HTML-encoded (the classic
@@ -686,7 +699,7 @@
   }
 
   /** Fetch raw bytes through the userscript manager (bypasses page CORS). */
-  function gmFetchBytes(url) {
+  function gmFetchBytesOnce(url) {
     return new Promise((resolve, reject) => {
       if (typeof GM_xmlhttpRequest !== 'function') {
         reject(new Error('GM_xmlhttpRequest unavailable - is the userscript manager granting it?'));
@@ -699,6 +712,10 @@
       GM_xmlhttpRequest({
         method: 'GET',
         url,
+        headers: {
+          Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,video/*,*/*;q=0.8',
+          'Cache-Control': 'no-cache',
+        },
         responseType: 'arraybuffer',
         timeout: CONFIG.fetchTimeoutMs,
         onload: (res) => {
@@ -717,6 +734,24 @@
         ontimeout: () => reject(new Error(`Timeout (${CONFIG.fetchTimeoutMs}ms) for ${url}`)),
       });
     });
+  }
+
+  async function gmFetchBytes(url) {
+    const attempts = Math.max(1, Number(CONFIG.mediaFetchRetries) || 1);
+    let lastError = null;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        const result = await gmFetchBytesOnce(url);
+        if (!result.bytes || !result.bytes.length) throw new Error(`Empty response for ${url}`);
+        return result;
+      } catch (error) {
+        lastError = error;
+        if (attempt < attempts) {
+          await sleep(CONFIG.mediaFetchRetryBaseMs * attempt);
+        }
+      }
+    }
+    throw lastError || new Error(`Fetch failed for ${url}`);
   }
 
   function guessMime(url) {
@@ -2759,6 +2794,93 @@
     return model;
   }
 
+  function collectMediaRescueTasks(model) {
+    const tasks = [];
+    const authors = new Set();
+    const addAuthor = (author) => {
+      if (
+        author &&
+        author.avatarUrl &&
+        author.avatarFailed &&
+        !author.avatarDataUri &&
+        !authors.has(author)
+      ) {
+        authors.add(author);
+        tasks.push({ kind: 'avatar', _author: author });
+      }
+    };
+    const collect = (blocks) => {
+      for (const b of blocks || []) {
+        if (b.kind === 'image' && !b.dataUri && b.url) tasks.push(b);
+        else if (
+          b.kind === 'video' &&
+          ((!b.dataUri && (b.mp4Url || (b.videoCandidates || []).some((c) => c.kind === 'mp4'))) ||
+            (b.posterUrl && !b.posterDataUri))
+        ) {
+          tasks.push(b);
+        } else if (b.kind === 'quote') {
+          addAuthor(b.author);
+          collect(b.blocks);
+        } else if (b.kind === 'blockquote') collect(b.blocks);
+      }
+    };
+    addAuthor(model.author);
+    collect(model.blocks);
+    return tasks;
+  }
+
+  async function rescueMissingMedia(model, onProgress) {
+    const tasks = collectMediaRescueTasks(model);
+    let done = 0;
+    const total = tasks.length;
+    if (!total) return { attempted: 0, recovered: 0 };
+    onProgress && onProgress(0, total);
+    let recovered = 0;
+    for (const t of tasks) {
+      try {
+        if (t.kind === 'avatar') {
+          const { dataUri, size, mime, sha256 } = await fetchImageAsDataUri(t._author.avatarUrl);
+          t._author.avatarDataUri = dataUri;
+          t._author.avatarSize = size;
+          t._author.avatarMime = mime;
+          t._author.avatarSha256 = sha256;
+          t._author.avatarFailed = false;
+          recovered += 1;
+        } else if (t.kind === 'image') {
+          const { dataUri, size, mime, sha256 } = await fetchImageAsDataUri(t.url);
+          t.dataUri = dataUri;
+          t.size = size;
+          t.mime = mime;
+          t.sha256 = sha256;
+          t.failed = false;
+          recovered += 1;
+        } else if (t.kind === 'video') {
+          const hadVideo = !!t.dataUri;
+          const hadPoster = !!t.posterDataUri;
+          await inlineVideoBlock(t);
+          t.failed = !t.dataUri && !t.posterDataUri;
+          if ((!hadVideo && t.dataUri) || (!hadPoster && t.posterDataUri)) recovered += 1;
+        }
+      } catch (e) {
+        warn('media rescue failed:', e.message);
+      }
+      done++;
+      onProgress && onProgress(done, total);
+    }
+    return { attempted: total, recovered };
+  }
+
+  function recoverableMediaFailures(stats) {
+    const missing = (stats.missing || []).filter(
+      (item) =>
+        ['image', 'avatar', 'video-poster'].includes(item.type) && item.reason === 'download_failed'
+    );
+    const incomplete = (stats.incomplete || []).filter(
+      (item) => item.type === 'video' && item.reason === 'video_download_failed'
+    );
+    return [...missing, ...incomplete];
+  }
+
   function probeVideoMetadata(dataUri) {
     if (typeof document === 'undefined' || !dataUri) return Promise.resolve({});
     return new Promise((resolve) => {
@@ -3080,7 +3202,7 @@
       const { bytes, mime } = dataUriToBytes(dataUri);
       if (!bytes.length) return;
       const name = `media/${id}${suffix}.${mimeToExt(mime)}`;
-      files.push({ name, bytes });
+      files.push({ name, bytes, mime });
       pathById.set(id, name);
     };
     const walk = (blocks) => {
@@ -3319,14 +3441,26 @@
       case 'quote': {
         const qctx = childRenderContext(ctx, b);
         const sourcePostId = statusIdFromSourceUrl(b.sourceUrl);
+        const quoteSourceHref = safeUrl(b.sourceUrl);
+        const authorHref = authorProfileUrl(b.author && b.author.handle);
+        // A quoted post always deserves a working link. Prefer the exact permalink; fall
+        // back to the author's profile so the reader never sees a dead-end card.
+        const quoteLinkHref = quoteSourceHref || authorHref;
+        const quoteLinkLabel = quoteSourceHref
+          ? 'View on X &rarr;'
+          : b.author && b.author.handle
+            ? `View ${escapeHtml(b.author.handle)} on X &rarr;`
+            : '';
         if (!b.blocks || !b.blocks.length) {
           return `<article class="xa-missing xa-quote-missing" ${renderAttrs({
             'data-xa-missing-type': 'quoted-post',
             'data-xa-source-post-id': sourcePostId,
             'data-xa-source-url': b.sourceUrl,
           })}><strong>Quoted post unavailable</strong><span>This quoted post was private, deleted, or failed to load at export time.</span>${
-            safeUrl(b.sourceUrl)
-              ? `<a href="${escapeHtml(safeUrl(b.sourceUrl))}" target="_blank" rel="noopener noreferrer">Open source on X</a>`
+            quoteLinkHref
+              ? `<a href="${escapeHtml(quoteLinkHref)}" target="_blank" rel="noopener noreferrer">${
+                  quoteSourceHref ? 'Open source on X' : 'Open author on X'
+                }</a>`
               : ''
           }</article>`;
         }
@@ -3337,18 +3471,17 @@
         return `<article class="${className}" ${renderAttrs({
           'data-xa-post-id': sourcePostId,
           'data-xa-source-url': b.sourceUrl,
+          'data-xa-source-fallback': quoteSourceHref ? '' : authorHref ? 'author-profile' : '',
           'data-xa-published-at': safeIsoTime(b.publishedAt),
         })}>${renderAuthorLine(b.author)}<div class="xa-quote-body">${
           b.blocks ? renderBlocks(b.blocks, qctx) : ''
         }</div>${
-          !safeUrl(b.sourceUrl)
-            ? '<p class="xa-quote-source-missing">Source URL unavailable &mdash; X did not expose a canonical permalink at capture time.</p>'
-            : ''
-        }${
           b.truncated
             ? `<p class="xa-truncated" data-xa-truncated="1">&#9888; Long-form post &mdash; only the preview above was available at export; X did not expose the full text.${
-                safeUrl(b.sourceUrl)
-                  ? ` <a href="${escapeHtml(safeUrl(b.sourceUrl))}" target="_blank" rel="noopener noreferrer">Read the full post on X &rarr;</a>`
+                quoteLinkHref
+                  ? ` <a href="${escapeHtml(quoteLinkHref)}" target="_blank" rel="noopener noreferrer">${
+                      quoteSourceHref ? 'Read the full post on X &rarr;' : 'Open author on X &rarr;'
+                    }</a>`
                   : ''
               }</p>`
             : b.noteRecovered
@@ -3361,8 +3494,8 @@
               )}</time>`
             : ''
         }${
-          safeUrl(b.sourceUrl)
-            ? `<a class="xa-quote-link" href="${escapeHtml(safeUrl(b.sourceUrl))}" target="_blank" rel="noopener">View on X &rarr;</a>`
+          quoteLinkHref
+            ? `<a class="xa-quote-link" href="${escapeHtml(quoteLinkHref)}" target="_blank" rel="noopener">${quoteLinkLabel}</a>`
             : ''
         }</article>`;
       }
@@ -3525,8 +3658,11 @@
           if (b.noteRecovered) stats.recoveredNotes += 1;
           if (b.sourceUrl) stats.sourceLinks.add(b.sourceUrl);
           else if (b.blocks && b.blocks.length) {
+            const profileHref = authorProfileUrl(b.author && b.author.handle);
             stats.warnings.push(
-              'An embedded post was captured, but X did not expose its canonical source URL.'
+              profileHref
+                ? `An embedded post was captured without a canonical source URL; the author profile (${profileHref}) is linked instead.`
+                : 'An embedded post was captured, but X did not expose its canonical source URL.'
             );
           }
           if (!b.blocks || !b.blocks.length) {
@@ -3582,6 +3718,168 @@
       ...stats,
       sourceLinks: stats.sourceLinks.size,
     };
+  }
+
+  /**
+   * "Ship-blocker" gate for strict export mode. Walks the FULLY-recovered model and
+   * returns a structured report of anything the export would silently render as a
+   * dead-end (a "Source URL unavailable" card, a "Media unavailable" placeholder, or
+   * a quoted post whose content couldn't be fetched). Pure - no DOM, no side effects.
+   *
+   * Verdict logic:
+   *   - 'clean'      : nothing to warn the user about; ship without prompting.
+   *   - 'incomplete' : one or more ship-blockers; strict mode should confirm.
+   *
+   * What is a ship-blocker (visible dead-end for the reader):
+   *   - Quote card without a resolvable /status/ permalink (all recovery layers failed)
+   *   - Quote card whose content couldn't be captured (private / deleted / fetch failed)
+   *   - Image that was DETECTED but couldn't be inlined (renders as "Image unavailable")
+   *   - Video with neither MP4 bytes nor a poster still (renders as "Video unavailable")
+   *
+   * Deliberately NOT ship-blockers (documented best-effort per AGENTS.md):
+   *   - HLS-only videos with a poster (unsupported_media - can't fix without HLS reassembly)
+   *   - Long-form posts that stayed truncated (X did not deliver the full text to the browser)
+   *   - Quotes whose author-profile fallback link is in use (still a working link)
+   */
+  function assessExportCompleteness(model) {
+    const blockers = [];
+    const walk = (blocks) => {
+      (blocks || []).forEach((b) => {
+        if (b.kind === 'quote') {
+          const hasBlocks = b.blocks && b.blocks.length > 0;
+          const hasCanonicalUrl = !!statusIdFromUrl(b.sourceUrl);
+          if (!hasBlocks) {
+            blockers.push({
+              kind: 'quote-content-missing',
+              handle: (b.author && b.author.handle) || '',
+              sourceUrl: b.sourceUrl || '',
+              summary: `Embedded post ${
+                (b.author && b.author.handle) || 'from an unknown author'
+              } could not be captured (private, deleted, or fetch failed).`,
+            });
+          } else if (!hasCanonicalUrl) {
+            blockers.push({
+              kind: 'quote-permalink-missing',
+              handle: (b.author && b.author.handle) || '',
+              summary: `Embedded post ${
+                (b.author && b.author.handle) || 'from an unknown author'
+              } has no canonical permalink; only the author profile link is available.`,
+            });
+          }
+          walk(b.blocks);
+        } else if (b.kind === 'blockquote') {
+          walk(b.blocks);
+        } else if (b.kind === 'image') {
+          const isDetected = !!(b.url || b.dataUri);
+          if (isDetected && !b.dataUri) {
+            blockers.push({
+              kind: 'image-fetch-failed',
+              mediaId: b._xaMediaId || '',
+              url: b.url || '',
+              sourceUrl: b.sourceUrl || '',
+              summary: `Image ${b._xaMediaId || b.url || ''} was detected but its bytes couldn't be fetched.`,
+            });
+          }
+        } else if (b.kind === 'video') {
+          // Nothing at all captured (no MP4, no poster) is a hard failure regardless of
+          // whether the format was unsupported - the reader sees a "Video unavailable" card.
+          if (!b.dataUri && !b.posterDataUri) {
+            blockers.push({
+              kind: 'video-nothing-captured',
+              mediaId: b._xaMediaId || '',
+              sourceUrl: b.sourceUrl || '',
+              unsupported: !!b.unsupported,
+              summary:
+                `Video ${b._xaMediaId || ''} has neither video bytes nor a poster still captured.`.trim(),
+            });
+          }
+        }
+      });
+    };
+    walk(model.blocks);
+    // Deduplicate by (kind + key identifiers) to avoid a wall of duplicate rows when the
+    // same quote or media appears in multiple thread posts. Keeps counts honest.
+    const seen = new Set();
+    const deduped = [];
+    for (const b of blockers) {
+      const key = `${b.kind}|${b.handle || ''}|${b.mediaId || ''}|${b.sourceUrl || ''}|${b.url || ''}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(b);
+    }
+    const counts = {
+      quotePermalinkMissing: deduped.filter((b) => b.kind === 'quote-permalink-missing').length,
+      quoteContentMissing: deduped.filter((b) => b.kind === 'quote-content-missing').length,
+      imageFetchFailed: deduped.filter((b) => b.kind === 'image-fetch-failed').length,
+      videoNothingCaptured: deduped.filter((b) => b.kind === 'video-nothing-captured').length,
+    };
+    return {
+      verdict: deduped.length ? 'incomplete' : 'clean',
+      blockers: deduped,
+      counts,
+    };
+  }
+
+  /**
+   * Compact, paste-able diagnostic bundle for when strict mode blocks an export.
+   * Contains the metadata needed to reproduce (URL, version, capture diagnostics,
+   * verdict, and a lightweight model skeleton) but NEVER media bytes - so it fits
+   * in a chat message. The skeleton preserves block kinds and identifying fields
+   * but strips `dataUri`, `posterDataUri`, and the debug JSON.
+   */
+  function buildDiagnosticBundle(model, assessment, extra = {}) {
+    const stripBytes = (obj) => {
+      if (!obj || typeof obj !== 'object') return obj;
+      if (Array.isArray(obj)) return obj.map(stripBytes);
+      const out = {};
+      for (const key of Object.keys(obj)) {
+        if (key === 'dataUri' || key === 'posterDataUri' || key === 'avatarDataUri') {
+          out[key] = obj[key] ? `[stripped: ${String(obj[key]).length} bytes]` : '';
+          continue;
+        }
+        if (key === '_debug') continue;
+        out[key] = stripBytes(obj[key]);
+      }
+      return out;
+    };
+    const bundle = {
+      generator: `${APP} v${VERSION}`,
+      capturedAt: new Date().toISOString(),
+      pageUrl:
+        (typeof location !== 'undefined' && location && location.href) || model.sourceUrl || '',
+      modelSourceUrl: model.sourceUrl || '',
+      modelType: model.type || '',
+      isThread: !!model.thread,
+      threadPosts:
+        model.thread && Number.isFinite(model.thread.capturedPosts)
+          ? model.thread.capturedPosts
+          : undefined,
+      verdict: assessment.verdict,
+      counts: assessment.counts,
+      blockers: assessment.blockers,
+      networkCapture:
+        typeof networkCaptureDiagnostics === 'object'
+          ? {
+              mode: networkCaptureDiagnostics.mode,
+              installed: networkCaptureDiagnostics.installed,
+              responsesSeen: networkCaptureDiagnostics.responsesSeen,
+              interestingResponses: networkCaptureDiagnostics.interestingResponses,
+              noteTweets: networkCaptureDiagnostics.noteTweets,
+              quotedRefs: networkCaptureDiagnostics.quotedRefs,
+              errors: (networkCaptureDiagnostics.errors || []).slice(-3),
+            }
+          : undefined,
+      modelSkeleton: stripBytes({
+        title: model.title,
+        heading: model.heading,
+        author: model.author,
+        publishedAt: model.publishedAt,
+        thread: model.thread,
+        blocks: model.blocks,
+      }),
+      ...extra,
+    };
+    return JSON.stringify(bundle, null, 2);
   }
 
   function buildArchiveManifest(model, rawDebug, stats, documentLang) {
@@ -4129,7 +4427,14 @@
     if (author.handle) lines.push(`Handle: ${markdownLineText(author.handle)}`);
     if (postId) lines.push(`Post ID: ${postId}`);
     if (block.sourceUrl) lines.push(`URL: ${block.sourceUrl}`);
-    else lines.push('URL: unavailable (X did not expose a canonical permalink at capture time)');
+    else {
+      const profileHref = authorProfileUrl(author.handle);
+      lines.push(
+        profileHref
+          ? `URL: unavailable (exact permalink not exposed); Author profile: ${profileHref}`
+          : 'URL: unavailable (X did not expose a canonical permalink at capture time)'
+      );
+    }
     if (safeIsoTime(block.publishedAt))
       lines.push(`Timestamp: ${readableUtcTime(block.publishedAt)}`);
     if (block.truncated) {
@@ -4262,6 +4567,7 @@
     const stats = archiveStats(model, media);
     const manifest = buildArchiveManifest(model, debugJson, stats, documentLang);
     const links = collectLlmSourceLinks(model);
+    const share = options.share || null;
     const attachments = collectLlmMediaAttachments(model);
     const title = markdownLineText(model.heading || model.title || 'X Export');
     const imageMedia = media.filter((item) => item.type === 'image');
@@ -4298,6 +4604,12 @@
     if (model.userNote) lines.push(`Saved because: ${markdownLineText(model.userNote)}`);
     if (Array.isArray(model.tags) && model.tags.length)
       lines.push(`Tags: ${model.tags.map(markdownLineText).join(', ')}`);
+    if (share && share.viewUrl) {
+      lines.push(`AI readable link: ${share.viewUrl}`);
+      if (share.markdownUrl) lines.push(`AI readable Markdown link: ${share.markdownUrl}`);
+      if (share.expiresAt)
+        lines.push(`AI readable link expires: ${readableUtcTime(share.expiresAt)}`);
+    }
     const companionNote = options.sharedLink
       ? 'The images and video poster frames are hosted at the absolute media URLs referenced below. Full videos are NOT uploaded; each video provides its poster frame and original source link instead.'
       : llmMediaFiles
@@ -4412,6 +4724,7 @@
 
   function assembleHtml(model, debugJson = '', options = {}) {
     prepareArchiveModel(model);
+    const share = options.share || null;
     const ctx = createRenderContext(model);
     const body = renderBlocks(model.blocks, ctx);
     const documentLang = inferDocumentLang(model);
@@ -4425,6 +4738,30 @@
     const installFooter =
       options.distribution === 'shared'
         ? `    <aside class="xa-install-cta"><strong>Captured with SourceCapsule</strong><span>Preserve complete X threads for AI and offline reading.</span><a href="${escapeAttr(CONFIG.installUrl)}" target="_blank" rel="noopener noreferrer">Install SourceCapsule</a></aside>`
+        : '';
+    const savedContextHtml =
+      model.userNote || (Array.isArray(model.tags) && model.tags.length)
+        ? `<div class="xa-saved-context">${
+            model.userNote
+              ? `<div><strong>Saved because</strong><p>${escapeHtml(model.userNote)}</p></div>`
+              : ''
+          }${
+            Array.isArray(model.tags) && model.tags.length
+              ? `<div><strong>Tags</strong><p>${model.tags.map(escapeHtml).join(', ')}</p></div>`
+              : ''
+          }</div>`
+        : '';
+    const shareContextHtml =
+      share && share.viewUrl
+        ? `<aside class="xa-ai-link" aria-label="AI readable link"><strong>AI readable link</strong><p><a href="${escapeAttr(
+            safeUrl(share.viewUrl)
+          )}" target="_blank" rel="noopener noreferrer">${escapeHtml(share.viewUrl)}</a>${
+            share.markdownUrl
+              ? `<br><a href="${escapeAttr(safeUrl(share.markdownUrl))}" target="_blank" rel="noopener noreferrer">Markdown endpoint</a>`
+              : ''
+          }${
+            share.expiresAt ? `<br>Expires ${escapeHtml(readableUtcTime(share.expiresAt))}` : ''
+          }</p></aside>`
         : '';
 
     const html = `<!doctype html>
@@ -4447,11 +4784,16 @@ ${READER_CSS}
     ${model.heading ? `<h1 class="xa-title">${escapeHtml(model.heading)}</h1>` : ''}
     ${renderAuthorLine(model.author)}
     <div class="xa-meta">
-      ${
-        safeUrl(model.sourceUrl)
-          ? `<a href="${escapeHtml(safeUrl(model.sourceUrl))}" target="_blank" rel="noopener">View original on X &#8599;</a>`
-          : '<span>Source URL unavailable</span>'
-      }
+      ${(() => {
+        const srcHref = safeUrl(model.sourceUrl);
+        if (srcHref) {
+          return `<a href="${escapeHtml(srcHref)}" target="_blank" rel="noopener">View original on X &#8599;</a>`;
+        }
+        const authorHref = authorProfileUrl(model.author && model.author.handle);
+        return authorHref
+          ? `<a href="${escapeHtml(authorHref)}" target="_blank" rel="noopener">View ${escapeHtml(model.author.handle)} on X &#8599;</a>`
+          : '';
+      })()}
       ${
         safeIsoTime(model.publishedAt)
           ? `<span>&middot; Published <time datetime="${escapeAttr(safeIsoTime(model.publishedAt))}">${escapeHtml(
@@ -4463,19 +4805,7 @@ ${READER_CSS}
         exportedReadable
       )}</time></span>
     </div>
-${
-  model.userNote || (Array.isArray(model.tags) && model.tags.length)
-    ? `<div class="xa-saved-context">${
-        model.userNote
-          ? `<div><strong>Saved because</strong><p>${escapeHtml(model.userNote)}</p></div>`
-          : ''
-      }${
-        Array.isArray(model.tags) && model.tags.length
-          ? `<div><strong>Tags</strong><p>${model.tags.map(escapeHtml).join(', ')}</p></div>`
-          : ''
-      }</div>`
-    : ''
-}
+${savedContextHtml ? `\n${savedContextHtml}` : ''}${shareContextHtml ? `\n${shareContextHtml}` : ''}
   </header>
   ${renderCaptureSummary(stats)}
   <article class="xa-body">
@@ -4621,7 +4951,6 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
 .xa-quote-body .xa-media-single img,.xa-quote-body .xa-gallery{border-radius:12px}
 .xa-quote-body figure video{border-radius:12px}
 .xa-quote-link{display:inline-block;margin-top:6px;font-size:14px;color:var(--accent);text-decoration:none}
-.xa-quote-source-missing{margin:8px 0 0;font-size:13px;color:var(--muted)}
 .xa-truncated{margin:8px 0 0;padding:8px 10px;border-radius:8px;font-size:13px;line-height:1.4;
   background:rgba(255,180,0,.12);border:1px solid rgba(255,180,0,.35);color:var(--fg)}
 .xa-truncated a{color:var(--accent);text-decoration:none}
@@ -4639,6 +4968,10 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
 .xa-thread-marker a{color:var(--accent);text-decoration:none}.xa-thread-marker time{margin-left:auto}
 .xa-saved-context{display:grid;gap:8px;margin-top:16px;padding:12px 14px;border:1px solid var(--line);
   border-radius:12px;background:var(--card);font-size:14px}.xa-saved-context p{margin:3px 0 0;color:var(--muted)}
+.xa-ai-link{margin-top:16px;padding:14px 16px;border:1px solid var(--accent);border-left-width:4px;
+  border-radius:12px;background:color-mix(in srgb,var(--accent) 10%,var(--bg));font-size:14px}
+.xa-ai-link strong{display:block;font-size:15px}.xa-ai-link p{margin:5px 0 0;color:var(--muted)}
+.xa-ai-link a{color:var(--accent);font-weight:700;word-break:break-all}
 .xa-footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
 .xa-footer h2{font-size:15px;line-height:1.3;margin:0 0 10px;color:var(--fg)}
 .xa-footer dl{display:grid;gap:8px;margin:0 0 14px}
@@ -4874,6 +5207,11 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
         // article-header Export buttons are the primary entry point.
         floatingButton: parsed.floatingButton === true,
         shareApiBase: String(parsed.shareApiBase || CONFIG.share.defaultApiBase).replace(/\/$/, ''),
+        // Strict export is ON by default: if the finished model still has any dead-end
+        // quote cards or failed media after all recovery layers, block the download and
+        // prompt for explicit confirmation instead of silently shipping a broken export.
+        // Explicit `false` disables; anything else (including missing / true) enables.
+        strictExport: parsed.strictExport !== false,
       };
     } catch {
       return {
@@ -4881,6 +5219,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
         contents: 'full',
         floatingButton: false,
         shareApiBase: CONFIG.share.defaultApiBase,
+        strictExport: true,
       };
     }
   }
@@ -4919,7 +5258,8 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       const valid =
         (value.key === 'layout' && ['date', 'flat'].includes(value.value)) ||
         (value.key === 'contents' && ['full', 'lean'].includes(value.value)) ||
-        (value.key === 'floatingButton' && typeof value.value === 'boolean');
+        (value.key === 'floatingButton' && typeof value.value === 'boolean') ||
+        (value.key === 'strictExport' && typeof value.value === 'boolean');
       if (!valid) return { ok: false, error: 'That preference value is not supported.' };
       const prefs = setPrefs({ [value.key]: value.value });
       registerSettingsMenu();
@@ -4959,6 +5299,19 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     }
   }
 
+  function setShareLinks(records) {
+    try {
+      localStorage.setItem(SHARES_KEY, JSON.stringify((records || []).slice(0, 50)));
+    } catch (e) {
+      errlog(e);
+    }
+  }
+
+  function shareLinkExpired(record, now = Date.now()) {
+    const expires = Date.parse(record && record.expiresAt);
+    return Number.isFinite(expires) && expires <= now;
+  }
+
   function rememberShareLink(created, model) {
     const record = {
       id: created.id,
@@ -4966,19 +5319,67 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       markdownUrl: created.markdownUrl,
       deleteUrl: created.deleteUrl,
       deleteToken: created.deleteToken || created.uploadToken,
+      createdAt: created.createdAt || new Date().toISOString(),
       expiresAt: created.expiresAt,
       title: model.heading || model.title || 'X capture',
       sourceUrl: model.sourceUrl || '',
     };
-    try {
-      const next = [record, ...getShareLinks().filter((item) => item.id !== record.id)].slice(
-        0,
-        50
-      );
-      localStorage.setItem(SHARES_KEY, JSON.stringify(next));
-    } catch (e) {
-      errlog(e);
+    setShareLinks([record, ...getShareLinks().filter((item) => item.id !== record.id)]);
+    return record;
+  }
+
+  function forgetShareLink(id) {
+    setShareLinks(getShareLinks().filter((item) => item.id !== id));
+  }
+
+  async function deleteSharedCapsule(record) {
+    if (!record || !record.deleteUrl || !record.deleteToken) {
+      forgetShareLink(record && record.id);
+      return { remoteDeleted: false };
     }
+    await gmHttp({
+      method: 'DELETE',
+      url: record.deleteUrl,
+      headers: { Authorization: `Bearer ${record.deleteToken}` },
+    });
+    forgetShareLink(record.id);
+    return { remoteDeleted: true };
+  }
+
+  function aiLinkReceiptText(created, model) {
+    const stats = archiveStats(model);
+    const lines = [
+      `${APP} AI readable link`,
+      '',
+      `Title: ${model.heading || model.title || 'X capture'}`,
+      `Source: ${model.sourceUrl || 'unavailable'}`,
+      `AI readable link: ${created.viewUrl || ''}`,
+      `Markdown link: ${created.markdownUrl || ''}`,
+      `Created at: ${readableUtcTime(created.createdAt || new Date().toISOString())}`,
+      `Expires at: ${readableUtcTime(created.expiresAt)}`,
+      '',
+      'Privacy:',
+      '- Anyone with the AI readable link can view this capsule until it expires or is deleted.',
+      '- Full video files are not uploaded; images and video poster frames may be included.',
+      '',
+      'Capture status:',
+      `- Missing media: ${stats.missingMedia}`,
+      `- Incomplete media: ${stats.incompleteMedia}`,
+    ];
+    if (stats.missingMedia || stats.incompleteMedia) {
+      lines.push('- Re-export from X if you need a complete media capture.');
+    }
+    return `${lines.join('\n')}\n`;
+  }
+
+  function shareMetadataFromCreated(created) {
+    if (!created) return null;
+    return {
+      viewUrl: created.viewUrl || '',
+      markdownUrl: created.markdownUrl || '',
+      createdAt: created.createdAt || new Date().toISOString(),
+      expiresAt: created.expiresAt || '',
+    };
   }
 
   function idbOpen() {
@@ -5163,10 +5564,21 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
         ensureButton();
       }
     );
+    reg(
+      `${APP}: Strict export - ${prefs.strictExport ? 'on (block incomplete)' : 'off'} (click to switch)`,
+      () => {
+        const next = setPrefs({ strictExport: !prefs.strictExport });
+        showToast(
+          `Strict export: ${next.strictExport ? 'on - broken exports will be blocked' : 'off - exports ship regardless'}`
+        );
+        registerSettingsMenu();
+      }
+    );
     reg(`${APP}: Change export folder...`, async () => {
       const handle = await getRootDir({ forcePick: true });
       showToast(handle ? `Export folder set: ${handle.name}` : 'Export folder unchanged');
     });
+    reg(`${APP}: Recent AI readable links`, () => showRecentShareLinks());
     reg(`${APP}: Share service - ${prefs.shareApiBase} (click to change)`, () => {
       const value = window.prompt('SourceCapsule share service URL', prefs.shareApiBase);
       if (!value) return;
@@ -5209,32 +5621,32 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
 .xa-ctl-options{margin-left:4px;padding:8px 9px;border:0;border-radius:999px;background:#1d9bf0;color:#fff;
   font:700 12px/1 inherit;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.2)}
 .xa-ctl-options:hover{background:#1a8cd8}.xa-ctl-options[disabled]{opacity:.7;cursor:default}
-.xa-ctl-menu{position:absolute;display:flex;flex-direction:column;min-width:164px;padding:6px;
-  border-radius:12px;background:#fff;box-shadow:0 8px 28px rgba(0,0,0,.28);z-index:100000}
+.xa-ctl-menu{position:fixed;display:flex;flex-direction:column;width:min(280px,calc(100vw - 24px));padding:8px;
+  border:1px solid rgba(15,20,25,.12);border-radius:12px;background:#fff;box-shadow:0 14px 44px rgba(0,0,0,.34);z-index:2147483647}
 .xa-ctl-menu[hidden]{display:none}
-.xa-ctl-item{display:block;width:100%;text-align:left;padding:9px 12px;border:none;border-radius:8px;
-  background:transparent;color:#0f1419;font:500 13px/1.2 inherit;cursor:pointer;white-space:nowrap}
+.xa-ctl-item{display:block;width:100%;min-height:36px;text-align:left;padding:9px 12px;border:none;border-radius:8px;
+  background:transparent;color:#0f1419;font:600 13px/1.35 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;cursor:pointer;white-space:normal}
 .xa-ctl-item:hover{background:#e8f5fd;color:#1d9bf0}
-.xa-ctl-sep{height:1px;margin:5px 10px;background:rgba(15,20,25,.12)}
-.xa-ctl-floating .xa-ctl-menu{right:0;bottom:calc(100% + 8px)}
+.xa-ctl-sep{height:1px;margin:6px 10px;background:rgba(15,20,25,.12)}
+.xa-ctl-floating .xa-ctl-menu{right:auto;bottom:auto}
 /* Per-post control. Primary placement is inline in the header, beside X's "..." menu /
    Subscribe; it falls back to an absolute overlay only when that header anchor isn't found. */
 .${CONFIG.postControlClass} .xa-ctl-trigger{padding:4px 11px;font-size:12px;
   box-shadow:0 2px 8px rgba(0,0,0,.2);transition:opacity .12s ease}
-.${CONFIG.postControlClass} .xa-ctl-menu{right:0;top:calc(100% + 6px)}
+.${CONFIG.postControlClass} .xa-ctl-menu{right:auto;top:auto}
 /* Inline-in-header: full opacity and sized to match X's header buttons (Subscribe/More);
    sits left of the "..." menu. */
 .${CONFIG.postControlClass}.xa-ctl-inline{position:static;display:inline-flex;align-items:center;margin-right:8px}
 .${CONFIG.postControlClass}.xa-ctl-inline .xa-ctl-trigger{opacity:1;font-size:14px;padding:7px 16px}
 .${CONFIG.postControlClass}.xa-ctl-inline .xa-ctl-options{padding:7px 8px}
-/* Absolute fallback (no header caret found): hover-reveal overlay below the header row. */
+/* Absolute fallback (no header caret found): visible overlay below the header row. */
 .${CONFIG.postControlClass}:not(.xa-ctl-inline){position:absolute;top:52px;right:10px;z-index:50}
-.${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger{opacity:0;pointer-events:none}
+.${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger{opacity:.96;pointer-events:auto}
 article[data-testid="tweet"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger,
 article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger,
 .${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger[disabled]{opacity:1;pointer-events:auto}
 @media (prefers-color-scheme:dark){
-  .xa-ctl-menu{background:#1f2733}
+  .xa-ctl-menu{background:#0f1419;border-color:#2f3336}
   .xa-ctl-item{color:#e7e9ea}
   .xa-ctl-item:hover{background:#16202b;color:#1d9bf0}
   .xa-ctl-sep{background:rgba(231,233,234,.14)}
@@ -5259,12 +5671,21 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 .xa-modal-open{display:inline-flex;align-items:center;padding:9px 14px;border-radius:999px;
   font:650 14px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;text-decoration:none}
 .xa-share-url{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.xa-share-status{min-height:20px}
+.xa-recent-links{display:flex;flex-direction:column;gap:10px;margin-top:12px}.xa-recent-link{padding:11px;border:1px solid #cfd9de;border-radius:8px}
+.xa-recent-link.expired{opacity:.58}.xa-recent-link-title{font-weight:750;overflow-wrap:anywhere}.xa-recent-link-meta{margin-top:4px;color:#536471;font-size:12px;overflow-wrap:anywhere}
+.xa-recent-link-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:9px}.xa-recent-link-actions button,.xa-recent-link-actions a{padding:7px 10px;border:0;border-radius:999px;background:#eff3f4;color:#0f1419;font:650 12px/1 inherit;text-decoration:none;cursor:pointer}
+.xa-recent-link-actions .danger{color:#b00020}
 .xa-receipt-grid{display:grid;grid-template-columns:1fr auto;gap:6px 14px;margin:14px 0}.xa-receipt-grid dt{color:#536471}.xa-receipt-grid dd{margin:0;font-weight:700;text-align:right}
 .xa-receipt-location{padding:9px;border-radius:8px;background:#eff3f4;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}
-.xa-receipt-status{font-weight:700}.xa-receipt-status.warning,.xa-receipt-action-status.error{color:#b00020}.xa-receipt-details{margin-top:10px}.xa-receipt-details[open]{max-height:min(42vh,360px);overflow:auto;overscroll-behavior:contain}.xa-receipt-actions{flex-wrap:wrap}
+.xa-receipt-status{font-weight:700}.xa-receipt-status.warning,.xa-receipt-action-status.error{color:#b00020}.xa-receipt-action-status.warning{color:#b00020}.xa-receipt-details{margin-top:10px}.xa-receipt-details[open]{max-height:min(42vh,360px);overflow:auto;overscroll-behavior:contain}.xa-receipt-actions{flex-wrap:wrap}
+.xa-strict-summary{margin:8px 0;padding-left:20px}.xa-strict-summary li{margin:4px 0}
+.xa-strict-detail-list{margin:6px 0;padding-left:20px;font-size:13px}.xa-strict-detail-list li{margin:3px 0}
+.xa-strict-ship{background:#f4212e;color:#fff}
+.xa-strict-copy{background:#eff3f4;color:#0f1419}
 @media (prefers-color-scheme:dark){.xa-modal{background:#15202b;color:#e7e9ea}.xa-modal p{color:#8b98a5}
   .xa-modal input,.xa-modal textarea,.xa-modal select{background:#1f2733;color:#e7e9ea;border-color:#536471}
-  .xa-modal-cancel{background:#273340;color:#e7e9ea}.xa-receipt-location{background:#273340}.xa-receipt-grid dt{color:#8b98a5}}
+  .xa-modal-cancel{background:#273340;color:#e7e9ea}.xa-receipt-location{background:#273340}.xa-receipt-grid dt{color:#8b98a5}
+  .xa-recent-link{border-color:#536471}.xa-recent-link-meta{color:#8b98a5}.xa-recent-link-actions button,.xa-recent-link-actions a{background:#273340;color:#e7e9ea}}
 `;
     (document.head || document.documentElement).appendChild(s);
   }
@@ -5279,7 +5700,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     }
     t.textContent = msg;
     t.classList.toggle('error', error);
-    requestAnimationFrame(() => t.classList.add('show'));
+    const raf =
+      typeof requestAnimationFrame === 'function'
+        ? requestAnimationFrame
+        : (callback) => setTimeout(callback, 0);
+    raf(() => t.classList.add('show'));
     if (t._timer) clearTimeout(t._timer);
     if (!sticky) {
       t._timer = setTimeout(() => t.classList.remove('show'), error ? 6000 : 3500);
@@ -5302,8 +5727,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const status = receipt.querySelector('.xa-receipt-action-status');
       status.classList.remove('error');
       status.textContent = copied
-        ? 'Share link created and copied.'
-        : 'Share link created. Automatic copy was blocked; use the link below.';
+        ? 'AI readable link created and copied.'
+        : 'AI readable link created. Automatic copy was blocked; use the link below.';
       let link = receipt.querySelector('.xa-receipt-share-link');
       if (!link) {
         link = document.createElement('a');
@@ -5328,7 +5753,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     modal.setAttribute('aria-labelledby', 'xa-share-title');
     const title = document.createElement('h2');
     title.id = 'xa-share-title';
-    title.textContent = 'Share link ready';
+    title.textContent = 'AI readable link ready';
     const status = document.createElement('p');
     status.className = 'xa-share-status';
     status.textContent = copied
@@ -5336,7 +5761,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       : 'Chrome could not copy automatically. Use Copy link below.';
     const label = document.createElement('label');
     label.setAttribute('for', 'xa-share-url');
-    label.textContent = 'SourceCapsule link';
+    label.textContent = 'AI readable link';
     const input = document.createElement('input');
     input.id = 'xa-share-url';
     input.className = 'xa-share-url';
@@ -5383,11 +5808,220 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     input.select();
   }
 
+  function showRecentShareLinks() {
+    ensureStyle();
+    const existing = document.querySelector('.xa-recent-links-modal');
+    if (existing) existing.remove();
+    const records = getShareLinks();
+    const backdrop = document.createElement('div');
+    backdrop.className = 'xa-modal-backdrop xa-recent-links-modal';
+    const modal = document.createElement('section');
+    modal.className = 'xa-modal';
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-labelledby', 'xa-recent-links-title');
+    const title = document.createElement('h2');
+    title.id = 'xa-recent-links-title';
+    title.textContent = 'Recent AI readable links';
+    const intro = document.createElement('p');
+    intro.textContent = records.length
+      ? 'Links are stored on this browser profile. Expired links stay visible but are greyed out.'
+      : 'No AI readable links have been created from this browser profile yet.';
+    const list = document.createElement('div');
+    list.className = 'xa-recent-links';
+
+    const render = () => {
+      list.textContent = '';
+      const current = getShareLinks();
+      if (!current.length) {
+        const empty = document.createElement('p');
+        empty.textContent =
+          'Create an AI readable link from a SourceCapsule export to see it here.';
+        list.appendChild(empty);
+        return;
+      }
+      current.forEach((record) => {
+        const expired = shareLinkExpired(record);
+        const viewUrl = safeUrl(record.viewUrl);
+        const markdownUrl = safeUrl(record.markdownUrl);
+        const item = document.createElement('article');
+        item.className = `xa-recent-link${expired ? ' expired' : ''}`;
+        const itemTitle = document.createElement('div');
+        itemTitle.className = 'xa-recent-link-title';
+        itemTitle.textContent = record.title || 'X capture';
+        const meta = document.createElement('div');
+        meta.className = 'xa-recent-link-meta';
+        const expires = record.expiresAt ? readableUtcTime(record.expiresAt) : 'unknown expiry';
+        meta.textContent = `${expired ? 'Expired' : 'Expires'}: ${expires}${
+          record.sourceUrl ? ` | Source: ${record.sourceUrl}` : ''
+        }`;
+        const actions = document.createElement('div');
+        actions.className = 'xa-recent-link-actions';
+        const copy = document.createElement('button');
+        copy.type = 'button';
+        copy.textContent = 'Copy link';
+        copy.addEventListener('click', async () => {
+          try {
+            await copyText(viewUrl);
+            showToast('AI readable link copied.');
+          } catch {
+            showToast('Copy blocked. Open the link and copy from the address bar.', {
+              error: true,
+            });
+          }
+        });
+        const open = document.createElement('a');
+        open.href = viewUrl || '#';
+        open.target = '_blank';
+        open.rel = 'noopener';
+        open.textContent = 'Open';
+        const copyMd = document.createElement('button');
+        copyMd.type = 'button';
+        copyMd.textContent = 'Copy Markdown link';
+        copyMd.disabled = !markdownUrl;
+        copyMd.addEventListener('click', async () => {
+          try {
+            await copyText(markdownUrl);
+            showToast('Markdown link copied.');
+          } catch {
+            showToast('Copy blocked.', { error: true });
+          }
+        });
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'danger';
+        del.textContent = 'Delete link';
+        del.addEventListener('click', async () => {
+          if (!window.confirm('Delete this AI readable link? This cannot be undone.')) return;
+          del.disabled = true;
+          try {
+            await deleteSharedCapsule(record);
+            showToast('AI readable link deleted.');
+            render();
+          } catch (error) {
+            del.disabled = false;
+            showToast(`Delete failed: ${error.message}`, { error: true });
+          }
+        });
+        actions.append(copy, open, copyMd, del);
+        item.append(itemTitle, meta, actions);
+        list.appendChild(item);
+      });
+    };
+
+    const actions = document.createElement('div');
+    actions.className = 'xa-modal-actions';
+    const closeButton = document.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'xa-modal-cancel';
+    closeButton.textContent = 'Close';
+    actions.appendChild(closeButton);
+    modal.append(title, intro, list, actions);
+    backdrop.appendChild(modal);
+    const close = () => backdrop.remove();
+    closeButton.addEventListener('click', close);
+    backdrop.addEventListener('click', (event) => {
+      if (event.target === backdrop) close();
+    });
+    render();
+    document.body.appendChild(backdrop);
+    closeButton.focus();
+  }
+
   function setReceiptActionStatus(message, { error = false } = {}) {
     const status = document.querySelector('.xa-capture-receipt .xa-receipt-action-status');
     if (!status) return;
     status.textContent = message;
     status.classList.toggle('error', error);
+  }
+
+  /**
+   * Ship-blocker modal: shown when strict export mode detects dead-ends in the
+   * finished model. Blocks the download until the user either explicitly confirms
+   * ("Ship it anyway") or cancels. Returns a Promise&lt;boolean&gt; - true = proceed,
+   * false = cancel.
+   *
+   * The whole point of this modal is to make silent bad exports impossible. So it
+   * lists exactly what would ship broken, in the categories the user actually
+   * cares about (quotes + media), and offers a one-click "Copy diagnostic bundle"
+   * button so users can paste a reproducible report when reporting the issue.
+   */
+  function confirmShipDespiteIncomplete({ model, assessment, debugJson = '' }) {
+    if (typeof document === 'undefined') return Promise.resolve(true);
+    ensureStyle();
+    hideToast();
+    document.querySelector('.xa-strict-gate')?.remove();
+    const c = assessment.counts;
+    const rows = [];
+    if (c.quotePermalinkMissing)
+      rows.push(
+        `<li><strong>${c.quotePermalinkMissing}</strong> embedded post(s) with no canonical permalink (only the author profile link would be usable).</li>`
+      );
+    if (c.quoteContentMissing)
+      rows.push(
+        `<li><strong>${c.quoteContentMissing}</strong> embedded post(s) whose content couldn't be captured (private, deleted, or fetch failed).</li>`
+      );
+    if (c.imageFetchFailed)
+      rows.push(
+        `<li><strong>${c.imageFetchFailed}</strong> image(s) detected but not embedded (would render as "Image unavailable").</li>`
+      );
+    if (c.videoNothingCaptured)
+      rows.push(
+        `<li><strong>${c.videoNothingCaptured}</strong> video(s) with neither video bytes nor a poster still (would render as "Video unavailable").</li>`
+      );
+    const details = assessment.blockers
+      .slice(0, 20)
+      .map((b) => `<li>${escapeHtml(b.summary)}</li>`)
+      .join('');
+    const moreCount = Math.max(0, assessment.blockers.length - 20);
+    const backdrop = document.createElement('div');
+    backdrop.className = 'xa-modal-backdrop xa-strict-gate';
+    backdrop.innerHTML = `<section class="xa-modal" role="dialog" aria-modal="true" aria-labelledby="xa-strict-title">
+<h2 id="xa-strict-title">Export is incomplete</h2>
+<p>Strict export mode detected dead-ends the reader would see in the exported file. Fix or accept before shipping.</p>
+<ul class="xa-strict-summary">${rows.join('')}</ul>
+<details class="xa-receipt-details" open><summary>What would ship broken (${assessment.blockers.length})</summary><ul class="xa-strict-detail-list">${details}${
+      moreCount ? `<li>&hellip; and ${moreCount} more.</li>` : ''
+    }</ul></details>
+<p class="xa-receipt-action-status" aria-live="polite"></p>
+<div class="xa-modal-actions">
+  <button type="button" class="xa-strict-copy">Copy diagnostic bundle</button>
+  <button type="button" class="xa-modal-cancel">Cancel export</button>
+  <button type="button" class="xa-modal-submit xa-strict-ship">Ship it anyway</button>
+</div>
+</section>`;
+    document.body.appendChild(backdrop);
+    const status = backdrop.querySelector('.xa-receipt-action-status');
+    const setStatus = (msg, isError) => {
+      if (!status) return;
+      status.textContent = msg;
+      status.classList.toggle('warning', !!isError);
+    };
+    return new Promise((resolve) => {
+      const close = (result) => {
+        document.removeEventListener('keydown', onKeyDown, true);
+        backdrop.remove();
+        resolve(result);
+      };
+      const onKeyDown = (event) => {
+        if (event.key === 'Escape') close(false);
+      };
+      backdrop.querySelector('.xa-modal-cancel').addEventListener('click', () => close(false));
+      backdrop.querySelector('.xa-strict-ship').addEventListener('click', () => close(true));
+      backdrop.querySelector('.xa-strict-copy').addEventListener('click', async () => {
+        try {
+          const bundle = buildDiagnosticBundle(model, assessment, {
+            debugJsonLength: debugJson ? debugJson.length : 0,
+          });
+          await copyText(bundle);
+          setStatus('Diagnostic bundle copied to clipboard.');
+        } catch (error) {
+          setStatus(`Copy failed: ${error.message}`, true);
+        }
+      });
+      document.addEventListener('keydown', onKeyDown, true);
+      backdrop.querySelector('.xa-modal-cancel').focus();
+    });
   }
 
   function showCaptureReceipt({
@@ -5427,7 +6061,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         : '<li>No capture warnings.</li>'
     }</ul></details><p class="xa-receipt-action-status" aria-live="polite"></p><div class="xa-modal-actions xa-receipt-actions"><button type="button" class="xa-receipt-copy">Copy for AI</button>${
       typeof onShare === 'function'
-        ? '<button type="button" class="xa-receipt-share">Create share link</button>'
+        ? '<button type="button" class="xa-receipt-share">Create AI readable link</button>'
         : ''
     }<button type="button" class="xa-modal-cancel">Done</button></div></section>`;
     const done = backdrop.querySelector('.xa-modal-cancel');
@@ -5451,11 +6085,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (shareButton) {
       shareButton.addEventListener('click', async () => {
         shareButton.disabled = true;
-        setReceiptActionStatus('Preparing share confirmation…');
+        setReceiptActionStatus('Preparing AI readable link confirmation...');
         try {
           await onShare();
         } catch (error) {
-          setReceiptActionStatus(`Local save is safe. Share failed: ${error.message}`, {
+          setReceiptActionStatus(`Local save is safe. AI readable link failed: ${error.message}`, {
             error: true,
           });
         } finally {
@@ -5475,10 +6109,16 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const backdrop = document.createElement('div');
       backdrop.className = 'xa-modal-backdrop';
       backdrop.innerHTML = `<form class="xa-modal" role="dialog" aria-modal="true" aria-labelledby="xa-modal-title">
-        <h2 id="xa-modal-title">${share ? (saveLocal ? 'Save + share with AI' : 'Share with AI') : 'Add context'}</h2>
+        <h2 id="xa-modal-title">${
+          share
+            ? saveLocal
+              ? 'Save + create AI readable link'
+              : 'Create AI readable link'
+            : 'Add context'
+        }</h2>
         <p>${
           share
-            ? `${saveLocal ? 'A local library copy is saved first. ' : ''}This also creates an unlisted public link. Anyone with the link can view it. Full video files are not uploaded.`
+            ? `${saveLocal ? 'A local library copy is saved first. ' : ''}This creates an unlisted public AI-readable capsule. Anyone with the link can view it. Full video files are not uploaded.`
             : 'Optional: record why this source matters so you and your agents remember later.'
         }</p>
         <label for="xa-note">Why are you saving this?</label>
@@ -5575,6 +6215,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   // candidate URLs (which expire and are page-scoped) this survives SPA navigations.
   const capturedNoteTweets = new Map(); // status id -> { id, text, urls: [entity urls] }
   const CAPTURED_NOTE_TWEETS_MAX = 300;
+  // Passive index of parent-post -> quoted-post refs harvested from the same GraphQL
+  // payloads X's own web app already downloaded to render the thread. This is what
+  // lets us recover a quoted tweet's canonical permalink even when both the DOM and
+  // syndication drop the reference (a periodic X regression, see the "Alex Prompter"
+  // thread export that produced 3 dead quote cards). Keyed by parent status id ->
+  // { quotedId, quotedHandle }. Survives SPA navigations, capped like note tweets.
+  const capturedQuotedRefs = new Map();
+  const CAPTURED_QUOTED_REFS_MAX = 600;
   const networkCaptureDiagnostics = {
     installed: false,
     mode: 'not-installed',
@@ -5586,6 +6234,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     messages: 0,
     candidates: 0,
     noteTweets: 0,
+    quotedRefs: 0,
     errors: [],
     lastUrls: [],
   };
@@ -5780,6 +6429,104 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return capturedNoteTweets.get(String(statusId || '')) || null;
   }
 
+  /**
+   * Walk a captured GraphQL body (TweetDetail, TweetResultByRestId, etc.) and pull out
+   * every parent -> quoted-tweet relation the payload exposes. X's web app receives the
+   * full quoted_status_result for every rendered post; when the DOM later virtualizes
+   * away the quote's status anchor, this passive capture still has the ids we need to
+   * rebuild a permalink. Returns [{ parentId, quotedId, quotedHandle }] triples.
+   *
+   * Handles both legacy REST-ish shapes (`t.quoted_status_id_str` +
+   * `t.quoted_status.user.screen_name`) and the GraphQL result shape
+   * (`t.quoted_status_result.result.core.user_results.result.legacy.screen_name`).
+   */
+  function quotedRefsFromCapturedBody(body) {
+    const raw = String(body || '').trim();
+    if (!raw || (raw[0] !== '{' && raw[0] !== '[')) return [];
+    if (!/quoted_status/.test(raw)) return [];
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+    const out = [];
+    const seen = new Set();
+    const record = (parentId, quotedId, quotedHandle) => {
+      const pid = String(parentId || '');
+      const qid = String(quotedId || '');
+      if (!/^\d+$/.test(pid) || !/^\d+$/.test(qid)) return;
+      const handle = String(quotedHandle || '').replace(/^@/, '');
+      if (!/^[A-Za-z0-9_]{1,15}$/.test(handle)) return;
+      const key = `${pid}->${qid}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push({ parentId: pid, quotedId: qid, quotedHandle: handle });
+    };
+    const walk = (item) => {
+      if (!item || typeof item !== 'object') return;
+      if (Array.isArray(item)) {
+        item.forEach(walk);
+        return;
+      }
+      const legacy = item.legacy || item;
+      const parentId =
+        item.rest_id || legacy.id_str || (item.legacy && item.legacy.id_str) || item.id_str || '';
+      // GraphQL shape: quoted_status_result.result carries its own rest_id + core.user_results.
+      const gqResult =
+        item.quoted_status_result &&
+        item.quoted_status_result.result &&
+        (item.quoted_status_result.result.tweet || item.quoted_status_result.result);
+      if (gqResult) {
+        const qLegacy = gqResult.legacy || {};
+        const qId = gqResult.rest_id || qLegacy.id_str || '';
+        const userLegacy =
+          (gqResult.core &&
+            gqResult.core.user_results &&
+            gqResult.core.user_results.result &&
+            gqResult.core.user_results.result.legacy) ||
+          {};
+        record(parentId, qId, userLegacy.screen_name);
+      }
+      // Legacy shape (syndication-ish): quoted_status_id_str + quoted_status.user.screen_name.
+      if (legacy.quoted_status_id_str) {
+        const qUser =
+          (item.quoted_status && item.quoted_status.user) ||
+          (item.quoted_status &&
+            item.quoted_status.core &&
+            item.quoted_status.core.user_results &&
+            item.quoted_status.core.user_results.result &&
+            item.quoted_status.core.user_results.result.legacy) ||
+          {};
+        record(parentId, legacy.quoted_status_id_str, qUser.screen_name);
+      }
+      Object.keys(item).forEach((key) => walk(item[key]));
+    };
+    walk(data);
+    return out;
+  }
+
+  function rememberCapturedQuotedRef(ref) {
+    if (!ref || !ref.parentId || !ref.quotedId) return;
+    const existing = capturedQuotedRefs.get(ref.parentId);
+    // First one wins per parent; parent posts only quote a single tweet, so a later
+    // sighting from a different payload should carry the same data anyway.
+    if (existing) return;
+    if (capturedQuotedRefs.size >= CAPTURED_QUOTED_REFS_MAX) {
+      const oldest = capturedQuotedRefs.keys().next().value;
+      capturedQuotedRefs.delete(oldest);
+    }
+    capturedQuotedRefs.set(ref.parentId, {
+      quotedId: ref.quotedId,
+      quotedHandle: ref.quotedHandle || '',
+    });
+    networkCaptureDiagnostics.quotedRefs = capturedQuotedRefs.size;
+  }
+
+  function getCapturedQuotedRef(parentStatusId) {
+    return capturedQuotedRefs.get(String(parentStatusId || '')) || null;
+  }
+
   /** Full note text -> paragraph blocks (escaped, t.co urls linkified, \n-split). */
   function noteTweetParagraphBlocks(note) {
     let html = escapeHtml(decodeBasicEntities(String(note.text || '').trim()));
@@ -5889,6 +6636,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (notes.length) {
       notes.forEach(rememberCapturedNoteTweet);
       log('captured full long-form text for', notes.length, 'post(s) from', payload.url || '');
+    }
+    const quotedRefs = quotedRefsFromCapturedBody(payload.body || '');
+    if (quotedRefs.length) {
+      quotedRefs.forEach(rememberCapturedQuotedRef);
+      log('captured quoted-post refs for', quotedRefs.length, 'parent(s) from', payload.url || '');
     }
     return candidates;
   }
@@ -6373,6 +7125,64 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return candidateCount === 1 && missingQuoteCount === 1;
   }
 
+  /**
+   * Free, offline recovery pass: for each thread post (or the main post), pair up
+   * any embedded quote block whose sourceUrl went missing with the quoted-tweet ref
+   * X's own web app already delivered to this browser (harvested passively into
+   * `capturedQuotedRefs` from GraphQL responses).
+   *
+   * Runs BEFORE the syndication-based recovery so we skip network calls entirely
+   * when the ids are already in hand. Returns the count of quotes patched, for
+   * diagnostics/tests.
+   *
+   * `lookup` is DI'd for tests; production defaults to the module-scoped map.
+   */
+  function recoverMissingQuoteSourcesFromCapture(model, lookup = getCapturedQuotedRef) {
+    if (!model || !Array.isArray(model.blocks)) return 0;
+    // Group blocks by which parent post they belong to. In a thread export the
+    // segments are delimited by 'thread-marker' entries; in a single-post export
+    // everything belongs to the main post (model.sourceUrl).
+    const segments = [];
+    let currentParent = statusIdFromUrl(model.sourceUrl);
+    let bucket = [];
+    model.blocks.forEach((block) => {
+      if (block.kind === 'thread-marker') {
+        if (bucket.length) segments.push({ parentId: currentParent, blocks: bucket });
+        currentParent = block.statusId || '';
+        bucket = [];
+        return;
+      }
+      bucket.push(block);
+    });
+    if (bucket.length) segments.push({ parentId: currentParent, blocks: bucket });
+
+    let patched = 0;
+    for (const segment of segments) {
+      if (!segment.parentId) continue;
+      const ref = lookup(segment.parentId);
+      if (!ref || !ref.quotedId || !ref.quotedHandle) continue;
+      // A post can only quote a single tweet, so at most one quote in the segment
+      // is missing its source. If more than one is unresolved (unusual: nested
+      // quotes rebuilt from syndication both losing anchors), only patch the one
+      // whose author handle matches; otherwise fall back to the first.
+      const missing = segment.blocks.filter(
+        (b) => b.kind === 'quote' && !statusIdFromUrl(b.sourceUrl)
+      );
+      if (!missing.length) continue;
+      const handleMatch = missing.find((b) => {
+        const h = String((b.author && b.author.handle) || '')
+          .replace(/^@/, '')
+          .toLowerCase();
+        return h && h === ref.quotedHandle.toLowerCase();
+      });
+      const target = handleMatch || (missing.length === 1 ? missing[0] : null);
+      if (!target) continue;
+      target.sourceUrl = `https://x.com/${ref.quotedHandle}/status/${ref.quotedId}`;
+      patched += 1;
+    }
+    return patched;
+  }
+
   async function recoverMissingQuoteSourcesViaSyndication(
     model,
     onProgress,
@@ -6523,6 +7333,42 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           const segment = model.blocks.slice(index + 1, end);
           const additions = [];
 
+          // Position-based quote-source recovery: this post's own syndication response
+          // is the definitive source for its (single) quoted-tweet id. If any quote in
+          // the segment still has an empty sourceUrl at this point (both the capture
+          // recovery and the pool-based syndication recovery missed it), fix it now
+          // AND rebuild the card from the quoted_tweet payload we already have -
+          // saves a per-quote syndication round-trip and closes the "dead source link"
+          // path entirely for thread exports.
+          const qt = data && data.quoted_tweet;
+          if (qt && qt.id_str && qt.user && qt.user.screen_name) {
+            const qHandle = String(qt.user.screen_name).toLowerCase();
+            const missingInSegment = segment.filter(
+              (b) => b.kind === 'quote' && !statusIdFromUrl(b.sourceUrl)
+            );
+            const target =
+              missingInSegment.find((b) => {
+                const h = String((b.author && b.author.handle) || '')
+                  .replace(/^@/, '')
+                  .toLowerCase();
+                return h && h === qHandle;
+              }) || (missingInSegment.length === 1 ? missingInSegment[0] : null);
+            if (target) {
+              const fresh = syndicationToQuoteBlock(qt);
+              target.sourceUrl =
+                fresh.sourceUrl || `https://x.com/${qt.user.screen_name}/status/${qt.id_str}`;
+              if (fresh.blocks && fresh.blocks.length) {
+                target.author = fresh.author;
+                target.blocks = fresh.blocks;
+                target.truncated = fresh.truncated;
+                target.publishedAt = fresh.publishedAt || target.publishedAt;
+                if (target.truncated) {
+                  recoverQuoteNoteText(target, lookupNote(qt.id_str));
+                }
+              }
+            }
+          }
+
           const have = new Set(segment.map(blockMediaKey));
           syndicationMediaBlocks(data, marker.sourceUrl).forEach((candidate) => {
             const key = blockMediaKey(candidate);
@@ -6637,21 +7483,24 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     { key: 'library-note', label: 'Save with note / tags' },
     { divider: true },
     { key: 'copy', label: 'Copy clean Markdown' },
-    { key: 'share', label: 'Share with AI' },
-    { key: 'library-share', label: 'Save locally + share with AI' },
+    { key: 'share', label: 'Create AI readable link' },
+    { key: 'library-share', label: 'Save locally + create AI link' },
     { divider: true },
     { key: 'both', label: 'Download HTML + Markdown' },
   ];
   const POST_EXPORT_TYPES = [
+    { key: 'library-note', label: 'Save with note / tags' },
+    { divider: true },
+    { key: 'copy', label: 'Copy Markdown' },
+    { key: 'share', label: 'Create AI readable link' },
+    { key: 'library-share', label: 'Save locally + create AI link' },
+    { divider: true },
+    { key: 'both', label: 'Download HTML + Markdown' },
+  ];
+  const THREAD_EXPORT_TYPES = [
     { key: 'library-thread', label: 'Save full thread' },
     { divider: true },
-    { key: 'library-note', label: 'Save this post with note / tags' },
-    { divider: true },
-    { key: 'copy', label: 'Copy this post as Markdown' },
-    { key: 'share', label: 'Share this post with AI' },
-    { key: 'library-share', label: 'Save this post locally + share' },
-    { divider: true },
-    { key: 'both', label: 'Download this post HTML + Markdown' },
+    ...POST_EXPORT_TYPES,
   ];
 
   function postExportRequest(exportType) {
@@ -6661,17 +7510,74 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     };
   }
 
+  function hasOwnTweetText(tweetEl) {
+    const quoteEls = findQuotedTweetEls(tweetEl);
+    const textEls = pickAllMatchesIncludingRoot(tweetEl, CONFIG.selectors.tweetText);
+    return textEls.some((textEl) => {
+      if (quoteEls.some((quoteEl) => quoteEl.contains(textEl))) return false;
+      return (
+        String(textEl.textContent || '')
+          .replace(/\s+/g, ' ')
+          .trim().length > 0
+      );
+    });
+  }
+
+  function timelineArticlePreviewReason(tweetEl, { includeThread = false } = {}) {
+    if (!tweetEl || detectPageType()) return '';
+    if (includeThread) return 'Full-thread capture needs the opened post page.';
+    if (
+      pick(tweetEl, CONFIG.selectors.articleRoot, { quiet: true }) ||
+      pick(tweetEl, CONFIG.selectors.articleTextRoot, { quiet: true }) ||
+      pick(tweetEl, CONFIG.selectors.articleTitle, { quiet: true })
+    ) {
+      return 'This timeline card is an Article preview, not the full Article body.';
+    }
+    const articleLink = Array.from(tweetEl.querySelectorAll('a[href]')).some((a) =>
+      /\/(?:i\/)?article\//.test(a.getAttribute('href') || '')
+    );
+    if (articleLink) return 'This timeline card links to an Article preview.';
+    if (!hasOwnTweetText(tweetEl)) {
+      return 'This timeline card does not expose the post text or Article body.';
+    }
+    return '';
+  }
+
+  function showOpenPostFirstNotice(tweetEl, reason) {
+    const url = safeUrl(canonicalUrl(tweetEl, tweetStatusId(tweetEl)));
+    const message = `${reason} Open the post first, then use SourceCapsule there so the export can capture the full article/thread content.`;
+    showToast(message, { error: true, sticky: true });
+    if (url && window.confirm(`${message}\n\nOpen the post now?`)) {
+      location.href = url;
+    }
+  }
+
   function postControlCaptureMode(tweetEl, column) {
     const statusId = tweetStatusId(tweetEl);
     const isFocusedPost = !!statusId && statusId === currentStatusId();
     const isThread = isFocusedPost && buildTweetSequence(column || document, tweetEl).length > 1;
+    const openFirstReason = timelineArticlePreviewReason(tweetEl, { includeThread: isThread });
+    // Escape hatch: even when auto-detection returns isThread=false, ANY focused-post
+    // page must expose "Save full thread" in the menu. X's virtualization or a false-
+    // positive thread-boundary heading can hide follow-up posts at button-render time
+    // (`buildTweetSequence` reads the DOM once, at that instant), so the user is left
+    // with no way to force a thread capture even when they know it's one. Choosing
+    // "Save full thread" flips runExport into full-column scroll mode which loads
+    // every same-author reply BEFORE building the model - so this is safe even when
+    // the current DOM shows only the focused post.
+    const menuItems = isFocusedPost ? THREAD_EXPORT_TYPES : POST_EXPORT_TYPES;
     return {
       isThread,
       includeThread: isThread,
-      label: isThread ? 'Save thread' : 'Save post',
-      title: isThread
-        ? 'Quick-save this full thread to your SourceCapsule library'
-        : 'Quick-save only this post to your SourceCapsule library',
+      requiresOpenPost: !!openFirstReason,
+      openFirstReason,
+      label: openFirstReason ? 'Open post first' : isThread ? 'Save thread' : 'Save post',
+      title: openFirstReason
+        ? 'Open this post before exporting so SourceCapsule can capture the full article/thread content'
+        : isThread
+          ? 'Quick-save this full thread to your SourceCapsule library'
+          : 'Quick-save only this post to your SourceCapsule library',
+      menuItems,
     };
   }
 
@@ -6743,17 +7649,42 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 
     const closeMenu = () => {
       menu.hidden = true;
+      menu.style.left = '';
+      menu.style.top = '';
       if (closeOpenExportMenu === closeMenu) closeOpenExportMenu = null;
       document.removeEventListener('click', onDocClick, true);
+      window.removeEventListener('resize', closeMenu, true);
+      window.removeEventListener('scroll', closeMenu, true);
     };
     const onDocClick = (e) => {
-      if (!wrap.contains(e.target)) closeMenu();
+      if (!wrap.contains(e.target) && !menu.contains(e.target)) closeMenu();
+    };
+    const placeMenu = () => {
+      const anchor = options.getBoundingClientRect();
+      const width = Math.min(280, Math.max(220, window.innerWidth - 24));
+      menu.style.width = `${width}px`;
+      const preferredLeft = anchor.right - width;
+      const left = Math.min(
+        Math.max(12, preferredLeft),
+        Math.max(12, window.innerWidth - width - 12)
+      );
+      const below = anchor.bottom + 8;
+      const estimatedHeight = menu.offsetHeight || 220;
+      const top =
+        below + estimatedHeight <= window.innerHeight - 12
+          ? below
+          : Math.max(12, anchor.top - estimatedHeight - 8);
+      menu.style.left = `${left}px`;
+      menu.style.top = `${top}px`;
     };
     const openMenu = () => {
       if (closeOpenExportMenu) closeOpenExportMenu();
       menu.hidden = false;
+      placeMenu();
       closeOpenExportMenu = closeMenu;
       document.addEventListener('click', onDocClick, true);
+      window.addEventListener('resize', closeMenu, true);
+      window.addEventListener('scroll', closeMenu, true);
     };
 
     menuItems.forEach((entry) => {
@@ -6854,7 +7785,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 
     wrap.appendChild(trigger);
     wrap.appendChild(options);
-    wrap.appendChild(menu);
+    document.body.appendChild(menu);
     return { wrap, trigger, options };
   }
 
@@ -6921,38 +7852,31 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * gesture was still live (null on browsers without the API -> single .zip fallback). The raw
    * video bytes are never included - images + poster stills only - so the bundle stays small.
    */
-  async function saveToLibrary(model, debugJson, root) {
-    const prefs = getPrefs();
+  function buildLibraryEntries(model, debugJson, prefs, paths, share = null) {
     prepareArchiveModel(model);
     const { files, pathById } = collectBundleMediaFiles(model);
-    const markdown = renderLlmMarkdown(model, debugJson, { mediaFiles: pathById });
-    const paths = bundlePaths(model, prefs, localDateStamp());
-    const stats = archiveStats(model);
-    const indexEntry = libraryIndexEntry(model, paths, stats);
-
-    // Relative names inside the per-post folder.
+    const markdown = renderLlmMarkdown(model, debugJson, {
+      mediaFiles: pathById,
+      ...(share ? { share } : {}),
+    });
     const entries = [
       { name: `${paths.postName}.llm.md`, text: markdown },
       { name: 'README.txt', text: libraryReadme() },
       ...files.map((f) => ({ name: f.name, bytes: f.bytes })),
     ];
+    if (share && share.viewUrl) {
+      entries.push({ name: 'AI_LINK.txt', text: aiLinkReceiptText(share, model) });
+    }
     if (prefs.contents === 'full') {
-      entries.unshift({ name: `${paths.postName}.html`, text: assembleHtml(model, debugJson) });
+      entries.unshift({
+        name: `${paths.postName}.html`,
+        text: assembleHtml(model, debugJson, share ? { share } : {}),
+      });
     }
+    return { entries, markdown };
+  }
 
-    if (root) {
-      await writeEntriesToDir(root, paths.segments, entries);
-      await updateLibraryIndex(root, indexEntry);
-      return {
-        location: [root.name, ...paths.segments].join('/'),
-        markdown,
-        videosPreservedOffline: prefs.contents === 'full' ? stats.videosPreservedOffline : 0,
-      };
-    }
-    // No handle => the browser lacks the File System Access API (the caller already handled a
-    // user-cancelled picker). Fall back to a single .zip. Files sit at the ZIP ROOT (no inner
-    // folder): extracting "<name>.zip" already creates a "<name>/" folder, so an internal prefix
-    // would double-nest (<name>/<name>/...). The dated name keeps zips sortable and unique.
+  function downloadLibraryZip(paths, entries, indexEntry) {
     const zipName = [paths.dateFolder, paths.postName].filter(Boolean).join('_') || paths.postName;
     const zipEntries = entries.map((e) => ({
       name: e.name,
@@ -6963,10 +7887,48 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       bytes: new TextEncoder().encode(`${renderLibraryIndexItem(indexEntry)}\n`),
     });
     downloadBlob(`${zipName}.zip`, new Blob([buildZip(zipEntries)], { type: 'application/zip' }));
+    return `${zipName}.zip`;
+  }
+
+  async function saveToLibrary(model, debugJson, root, options = {}) {
+    const prefs = getPrefs();
+    prepareArchiveModel(model);
+    const paths = bundlePaths(model, prefs, localDateStamp());
+    const stats = archiveStats(model);
+    const indexEntry = libraryIndexEntry(model, paths, stats);
+    const share = options.share || null;
+    const { entries, markdown } = buildLibraryEntries(model, debugJson, prefs, paths, share);
+
+    if (root) {
+      await writeEntriesToDir(root, paths.segments, entries);
+      await updateLibraryIndex(root, indexEntry);
+      return {
+        location: [root.name, ...paths.segments].join('/'),
+        markdown,
+        videosPreservedOffline: prefs.contents === 'full' ? stats.videosPreservedOffline : 0,
+        root,
+        segments: paths.segments,
+        postName: paths.postName,
+        prefs,
+      };
+    }
+    // No handle => the browser lacks the File System Access API (the caller already handled a
+    // user-cancelled picker). Fall back to a single .zip. Files sit at the ZIP ROOT (no inner
+    // folder): extracting "<name>.zip" already creates a "<name>/" folder, so an internal prefix
+    // would double-nest (<name>/<name>/...). The dated name keeps zips sortable and unique.
+    const location = options.deferZipDownload
+      ? [paths.dateFolder, paths.postName].filter(Boolean).join('_') || paths.postName
+      : downloadLibraryZip(paths, entries, indexEntry);
     return {
-      location: `${zipName}.zip`,
+      location: options.deferZipDownload ? `${location}.zip` : location,
       markdown,
       videosPreservedOffline: prefs.contents === 'full' ? stats.videosPreservedOffline : 0,
+      postName: paths.postName,
+      paths,
+      entries,
+      indexEntry,
+      prefs,
+      zipDeferred: options.deferZipDownload === true,
     };
   }
 
@@ -6982,6 +7944,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   ) {
     const type = targetTweetEl ? 'post' : detectPageType();
     if (!type) return;
+    const openFirstReason = timelineArticlePreviewReason(targetTweetEl, { includeThread });
+    if (openFirstReason) {
+      showOpenPostFirstNotice(targetTweetEl, openFirstReason);
+      return;
+    }
     const restoreLabel = trigger ? trigger.textContent : '';
     const setBusy = (busy) => {
       if (!trigger) return;
@@ -7050,6 +8017,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       log('model', model);
 
       if (CONFIG.useSyndication) {
+        // Cheapest first: try passively-captured GraphQL refs before any network call.
+        // Most missing quote permalinks resolve here without a syndication round-trip.
+        const patchedFromCapture = recoverMissingQuoteSourcesFromCapture(model);
+        if (patchedFromCapture) {
+          log('recovered', patchedFromCapture, 'quote permalink(s) from captured GraphQL refs');
+        }
         await recoverMissingQuoteSourcesViaSyndication(model, (done, total) =>
           showToast(
             total ? `Resolving embedded post sources... ${done}/${total}` : 'Reading page...',
@@ -7077,9 +8050,38 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           sticky: true,
         });
       });
+      await rescueMissingMedia(model, (done, total) => {
+        showToast(
+          total ? `Recovering media downloads... ${done}/${total}` : 'Checking media downloads...',
+          {
+            sticky: true,
+          }
+        );
+      });
+
+      // Strict export gate: after ALL recovery layers ran, if the finished model still
+      // has dead-end quotes or failed media the reader would see, block and confirm.
+      // The user can toggle strict mode off from the manager menu; when off, the gate
+      // is skipped and the export ships regardless (the pre-strict-mode behavior).
+      const runtimePrefs = getPrefs();
+      if (runtimePrefs.strictExport) {
+        const assessment = assessExportCompleteness(model);
+        if (assessment.verdict !== 'clean') {
+          hideToast();
+          const proceed = await confirmShipDespiteIncomplete({ model, assessment, debugJson });
+          if (!proceed) {
+            log('export cancelled by strict-mode gate', assessment.counts);
+            showToast('Export cancelled. Turn off strict mode from the menu to ship anyway.', {
+              error: true,
+            });
+            return;
+          }
+          log('user chose to ship despite strict-mode gate', assessment.counts);
+        }
+      }
 
       showToast('Assembling files...', { sticky: true });
-      const publishAndCopyShare = async (expiryDays = metadata.expiryDays) => {
+      const publishAndCopyShare = async (expiryDays = metadata.expiryDays, savedTarget = null) => {
         const created = await createShareLink(
           model,
           debugJson,
@@ -7090,44 +8092,72 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             })
         );
         rememberShareLink(created, model);
+        if (savedTarget && savedTarget.root && savedTarget.segments) {
+          await saveToLibrary(model, debugJson, savedTarget.root, {
+            share: shareMetadataFromCreated(created),
+          });
+        }
         let copied = false;
         try {
           await copyText(created.viewUrl);
           copied = true;
         } catch (copyError) {
-          warn('share link created but automatic clipboard copy failed:', copyError.message);
+          warn('AI readable link created but automatic clipboard copy failed:', copyError.message);
         }
         showShareResult(created, { copied });
         showToast(
-          `Share link ready; expires ${readableUtcTime(created.expiresAt)}${copied ? ' (copied)' : ''}`
+          `AI readable link ready; expires ${readableUtcTime(created.expiresAt)}${copied ? ' (copied)' : ''}`
         );
+        return created;
       };
-      const shareFromReceipt = async () => {
+      const shareFromReceipt = async (savedTarget = null) => {
         const shareMetadata = await promptCaptureOptions({ share: true, saveLocal: true });
         if (!shareMetadata) {
-          setReceiptActionStatus('Share cancelled. Your local save is unchanged.');
+          setReceiptActionStatus('AI readable link cancelled. Your local save is unchanged.');
           return;
         }
         applyCaptureMetadata(model, shareMetadata);
-        await publishAndCopyShare(shareMetadata.expiryDays);
+        await publishAndCopyShare(shareMetadata.expiryDays, savedTarget);
       };
       if (outputType === 'library-share') {
-        const saved = await saveToLibrary(model, debugJson, libraryRoot);
+        const saved = await saveToLibrary(model, debugJson, libraryRoot, {
+          deferZipDownload: !libraryRoot,
+        });
         showCaptureReceipt({
           model,
           debugJson,
           savedLocation: saved.location,
           markdown: saved.markdown,
           videosPreservedOffline: saved.videosPreservedOffline,
-          onShare: shareFromReceipt,
+          onShare: () => shareFromReceipt(saved),
         });
         try {
-          await publishAndCopyShare();
+          const created = await publishAndCopyShare(undefined, saved);
+          if (saved.zipDeferred) {
+            const share = shareMetadataFromCreated(created);
+            const withLink = await saveToLibrary(model, debugJson, null, {
+              share,
+              deferZipDownload: true,
+            });
+            const zipLocation = downloadLibraryZip(
+              withLink.paths,
+              withLink.entries,
+              withLink.indexEntry
+            );
+            saved.location = zipLocation;
+          }
         } catch (shareError) {
           errlog(shareError);
-          setReceiptActionStatus(`Local save is safe. Share failed: ${shareError.message}`, {
-            error: true,
-          });
+          if (saved.zipDeferred) {
+            const zipLocation = downloadLibraryZip(saved.paths, saved.entries, saved.indexEntry);
+            saved.location = zipLocation;
+          }
+          setReceiptActionStatus(
+            `Local save is safe. AI readable link failed: ${shareError.message}`,
+            {
+              error: true,
+            }
+          );
         }
         return;
       }
@@ -7139,7 +8169,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           savedLocation: saved.location,
           markdown: saved.markdown,
           videosPreservedOffline: saved.videosPreservedOffline,
-          onShare: shareFromReceipt,
+          onShare: () => shareFromReceipt(saved),
         });
         return;
       }
@@ -7238,25 +8268,35 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (!CONFIG.perPostButtons) return;
     const column = pick(document, CONFIG.selectors.primaryColumn, { quiet: true });
     if (!column) return;
+    ensureStyle();
     topLevelTweetEls(column).forEach((tweetEl) => {
       if (!tweetStatusId(tweetEl)) return; // only real posts (skip compose box / ads)
       const mode = postControlCaptureMode(tweetEl, column);
       const existing = tweetEl.querySelector(`.${CONFIG.postControlClass}`);
       if (existing) {
-        // A continuation may render after the root control. Keep the label honest as X lazily
-        // fills the conversation; the click handler below also re-checks at click time.
-        const trigger = existing.querySelector('.xa-ctl-trigger');
-        if (trigger && !trigger.disabled) {
-          trigger.textContent = mode.label;
-          trigger.title = mode.title;
+        // Cache key reflects WHICH menu array is actually rendered, not just isThread.
+        // A focused post now gets THREAD_EXPORT_TYPES even when auto-detection says
+        // isThread=false (escape-hatch fix); a cache key based on isThread alone would
+        // leave stale POST_EXPORT_TYPES menus in place after code updates.
+        const menuMode = mode.menuItems === THREAD_EXPORT_TYPES ? 'thread' : 'post';
+        if (existing.getAttribute('data-sourcecapsule-menu-mode') !== menuMode) {
+          existing.remove();
+        } else {
+          // A continuation may render after the root control. Keep the label honest as X lazily
+          // fills the conversation; the click handler below also re-checks at click time.
+          const trigger = existing.querySelector('.xa-ctl-trigger');
+          if (trigger && !trigger.disabled) {
+            trigger.textContent = mode.label;
+            trigger.title = mode.title;
+          }
+          return;
         }
-        return;
       }
       const { wrap } = createExportControl({
         triggerLabel: mode.label,
         triggerTitle: mode.title,
         className: `xa-ctl ${CONFIG.postControlClass}`,
-        menuItems: POST_EXPORT_TYPES,
+        menuItems: mode.menuItems,
         onQuick: (trigger) => {
           const currentMode = postControlCaptureMode(tweetEl, column);
           return runExport('library', {
@@ -7275,6 +8315,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         },
       });
       wrap.setAttribute(CONFIG.postControlFlag, '1');
+      wrap.setAttribute(
+        'data-sourcecapsule-menu-mode',
+        mode.menuItems === THREAD_EXPORT_TYPES ? 'thread' : 'post'
+      );
       // Prefer placing the control inline in the header, right before X's "..." menu, so it
       // sits beside Subscribe/More and flows with them. Fall back to an absolute overlay if
       // the header caret can't be found.
@@ -7317,6 +8361,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const existing = document.getElementById(CONFIG.buttonId);
     if (!type) {
       if (existing) existing.remove();
+      ensurePerPostControls();
       return;
     }
     ensureStyle();
@@ -7703,19 +8748,36 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       mimeToExt,
       bundlePaths,
       collectBundleMediaFiles,
+      buildLibraryEntries,
+      collectMediaRescueTasks,
+      rescueMissingMedia,
+      recoverableMediaFailures,
       normalizeTags,
       applyCaptureMetadata,
       libraryIndexEntry,
       renderLibraryIndexItem,
       updateLibraryIndexText,
+      getShareLinks,
+      setShareLinks,
+      rememberShareLink,
+      forgetShareLink,
+      shareLinkExpired,
+      aiLinkReceiptText,
+      showRecentShareLinks,
       renderArchiveManifestJson,
       EXPORT_TYPES,
       POST_EXPORT_TYPES,
+      THREAD_EXPORT_TYPES,
       postExportRequest,
       postControlCaptureMode,
+      timelineArticlePreviewReason,
       showShareResult,
       showCaptureReceipt,
       archiveStats,
+      // Strict-mode ship-blocker: assessment + diagnostic bundle. The modal itself
+      // (confirmShipDespiteIncomplete) is DOM-bound and not exported.
+      assessExportCompleteness,
+      buildDiagnosticBundle,
       extensionControllerMessage,
       folderPickerAvailable,
       pickDirectoryViaExtensionBridge,
@@ -7724,17 +8786,23 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       safeUrl,
       highResImageUrl,
       imageFetchCandidates,
+      gmFetchBytes,
       validateMp4Download,
       videoCandidatesFromStructuredData,
       videoCandidatesFromCapturedBody,
       videoCandidateMatchesBlock,
       handleNetworkCapturePayload,
       validateNetworkCapturePayload,
+      ensureButton,
       // Long-form (note) full-text recovery from passively captured GraphQL payloads.
       noteTweetsFromCapturedBody,
       noteTweetParagraphBlocks,
       recoverQuoteNoteText,
       getCapturedNoteTweet,
+      // Passive quoted-post ref capture (from the same GraphQL payloads) - used to
+      // reconstruct a permalink when the DOM+syndication both drop the reference.
+      quotedRefsFromCapturedBody,
+      getCapturedQuotedRef,
       humanBytes,
       VERSION,
       // Extraction layer (exported for the jsdom DOM test).
@@ -7757,6 +8825,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       syndicationMediaBlocks,
       syndicationRelationCandidates,
       recoverMissingQuoteSourcesViaSyndication,
+      recoverMissingQuoteSourcesFromCapture,
       mediaKeyFromUrl,
       enrichThreadViaSyndication,
       extractLinkCard,
