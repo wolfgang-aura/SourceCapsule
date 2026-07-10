@@ -2365,6 +2365,40 @@ await checkAsync(
 );
 
 await checkAsync(
+  'focused-post syndication rebuilds a quote card the DOM never mounted',
+  async () => {
+    const model = {
+      type: 'post',
+      sourceUrl: 'https://x.com/parent/status/500',
+      blocks: [{ kind: 'paragraph', html: 'Parent text' }],
+    };
+    await engine.enrichFocusedPostViaSyndication(model, null, async () => ({
+      __typename: 'Tweet',
+      id_str: '500',
+      text: 'Parent text',
+      quoted_tweet: {
+        __typename: 'Tweet',
+        id_str: '501',
+        text: 'Quote that never mounted',
+        user: { name: 'Quoted', screen_name: 'quoted' },
+        entities: {},
+        mediaDetails: [
+          {
+            type: 'photo',
+            media_url_https: 'https://pbs.twimg.com/media/MissedQuote.jpg',
+          },
+        ],
+      },
+    }));
+    const quote = model.blocks.find((block) => block.kind === 'quote');
+    assert.ok(quote, 'authoritative parent payload should create the missing quote');
+    assert.equal(quote.sourceUrl, 'https://x.com/quoted/status/501');
+    assert.ok(quote.blocks.some((block) => block.kind === 'image'));
+    assert.match(quote.blocks.find((block) => block.kind === 'paragraph').html, /never mounted/);
+  }
+);
+
+await checkAsync(
   'enrichFocusedPostViaSyndication does not duplicate media the DOM already has',
   async () => {
     const model = {
