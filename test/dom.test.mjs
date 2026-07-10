@@ -2749,9 +2749,11 @@ await checkAsync('runWithConcurrency caps in-flight work and processes every ite
 await checkAsync('inlineMedia fetches link-card thumbnails and marks failures softly', async () => {
   global.GM_xmlhttpRequest = (options) => {
     if (options.url.includes('card_img/good')) {
+      const jpeg = new Uint8Array(32);
+      jpeg.set([0xff, 0xd8, 0xff, 0xe0], 0);
       options.onload({
         status: 200,
-        response: new Uint8Array([1, 2, 3, 4]).buffer,
+        response: jpeg.buffer,
         responseHeaders: 'content-type: image/jpeg\r\n',
       });
       return;
