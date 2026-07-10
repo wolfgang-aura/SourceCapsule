@@ -163,6 +163,17 @@
     forceLoadSettleMs: 2500,
     mediaFetchRetries: 4,
     mediaFetchRetryBaseMs: 650,
+    // Backoff multiplier applied when a fetch is rate-limited (HTTP 429): those
+    // need substantially more room than transient socket errors to clear.
+    rateLimitBackoffFactor: 4,
+    // Retries for cdn.syndication.twimg.com fetches. Every quote-recovery layer
+    // rides on this endpoint, so a single transient failure must not silently
+    // degrade a quote card to its (possibly empty) DOM scrape.
+    syndicationFetchRetries: 3,
+    syndicationFetchRetryBaseMs: 700,
+    // Pause before the strict-gate auto-repair round retries remaining blockers,
+    // giving transient conditions (rate limits, dropped connections) time to clear.
+    repairPauseMs: 1500,
     videoNudgeTimeoutMs: 700,
     // Fetch each embedded/quoted tweet by id from X's public syndication endpoint
     // to get its authoritative text + media, instead of scraping the fragile,
@@ -724,7 +735,9 @@
             const mime = (header && header[1] ? header[1] : guessMime(url)).trim();
             resolve({ bytes: new Uint8Array(res.response), mime });
           } else {
-            reject(new Error(`HTTP ${res.status} for ${url}`));
+            const error = new Error(`HTTP ${res.status} for ${url}`);
+            error.status = res.status;
+            reject(error);
           }
         },
         onerror: (event) =>
@@ -746,8 +759,12 @@
         return result;
       } catch (error) {
         lastError = error;
+        // 404 is authoritative for this exact URL - stop burning retries here so
+        // the caller can move on to its next size-variant candidate immediately.
+        if (error.status === 404) break;
         if (attempt < attempts) {
-          await sleep(CONFIG.mediaFetchRetryBaseMs * attempt);
+          const factor = error.status === 429 ? CONFIG.rateLimitBackoffFactor : 1;
+          await sleep(CONFIG.mediaFetchRetryBaseMs * attempt * factor);
         }
       }
     }
@@ -1096,7 +1113,12 @@
     add(url);
     try {
       const u = new URL(url, typeof location !== 'undefined' ? location.href : undefined);
-      if (u.hostname === 'pbs.twimg.com' && u.pathname.startsWith('/media/')) {
+      // Photo AND video-thumbnail paths accept the same `name=` size variants;
+      // the original URL stays first, so extra candidates only run on failure.
+      if (
+        u.hostname === 'pbs.twimg.com' &&
+        /^\/(media|ext_tw_video_thumb|amplify_video_thumb|tweet_video_thumb)\//.test(u.pathname)
+      ) {
         const originalName = u.searchParams.get('name');
         ['orig', '4096x4096', 'large', 'medium', 'small'].forEach((name) => {
           const next = new URL(u.toString());
@@ -2797,14 +2819,12 @@
   function collectMediaRescueTasks(model) {
     const tasks = [];
     const authors = new Set();
+    // Any author whose avatar bytes are missing gets a retry - whether the first
+    // attempt failed or the quote was rebuilt AFTER inlineMedia already ran (the
+    // strict-gate repair round adds fresh quote blocks whose avatars were never
+    // attempted, so requiring avatarFailed here would skip them).
     const addAuthor = (author) => {
-      if (
-        author &&
-        author.avatarUrl &&
-        author.avatarFailed &&
-        !author.avatarDataUri &&
-        !authors.has(author)
-      ) {
+      if (author && author.avatarUrl && !author.avatarDataUri && !authors.has(author)) {
         authors.add(author);
         tasks.push({ kind: 'avatar', _author: author });
       }
@@ -2923,7 +2943,7 @@
     // Always try to inline the poster image so there's something to show.
     if (block.posterUrl) {
       try {
-        const { dataUri, size, mime, sha256 } = await fetchAsDataUri(block.posterUrl);
+        const { dataUri, size, mime, sha256 } = await fetchImageAsDataUri(block.posterUrl);
         block.posterDataUri = dataUri;
         block.posterSize = size;
         block.posterMime = mime;
@@ -3880,6 +3900,73 @@
       ...extra,
     };
     return JSON.stringify(bundle, null, 2);
+  }
+
+  /** Quotes the strict gate flagged as dead BUT that still carry a canonical
+   *  permalink - the one case a syndication re-fetch can actually fix. */
+  function collectRepairableQuotes(blocks, out = []) {
+    for (const b of blocks || []) {
+      if (b.kind === 'quote') {
+        if ((!b.blocks || !b.blocks.length) && statusIdFromUrl(b.sourceUrl)) out.push(b);
+        collectRepairableQuotes(b.blocks, out);
+      } else if (b.kind === 'blockquote') {
+        collectRepairableQuotes(b.blocks, out);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * One automatic repair round that runs BEFORE the strict-mode gate surfaces
+   * anything to the user. Nearly every blocker the gate detects is transient
+   * (rate limit, dropped connection, capture that arrived late), so each is
+   * retried through the layer that owns it after a short pause:
+   *   - quote permalinks: re-check the passive GraphQL capture (free - new refs
+   *     may have arrived while media was downloading),
+   *   - dead quote cards with a permalink: re-fetch from syndication and rebuild,
+   *   - failed media (plus any media a quote rebuild just added): one more
+   *     rescue pass.
+   * Returns a fresh assessment; the modal only appears if this still comes back
+   * incomplete.
+   */
+  async function repairExportBlockers(
+    model,
+    assessment,
+    onProgress,
+    {
+      fetchTweet = fetchTweetSyndication,
+      rescue = rescueMissingMedia,
+      pauseMs = CONFIG.repairPauseMs,
+    } = {}
+  ) {
+    if (!assessment || assessment.verdict === 'clean') return assessment;
+    if (pauseMs) await sleep(pauseMs);
+    recoverMissingQuoteSourcesFromCapture(model);
+    // Permalink-missing quotes: retry the pool-based syndication matcher too -
+    // the main pass may have lost it to a transient fetch failure.
+    if (directQuotes(model.blocks).some((q) => !statusIdFromUrl(q.sourceUrl))) {
+      await recoverMissingQuoteSourcesViaSyndication(model, null, fetchTweet);
+    }
+    for (const quote of collectRepairableQuotes(model.blocks)) {
+      const id = statusIdFromUrl(quote.sourceUrl);
+      try {
+        const data = await fetchTweet(id);
+        if (data && data.user && (data.__typename === 'Tweet' || data.text != null)) {
+          const fresh = syndicationToQuoteBlock(data);
+          quote.author = fresh.author;
+          quote.blocks = fresh.blocks;
+          // Keep the permalink we already verified unless the rebuild produced
+          // an equally canonical one (payloads missing id_str yield a dead URL).
+          if (statusIdFromUrl(fresh.sourceUrl)) quote.sourceUrl = fresh.sourceUrl;
+          quote.truncated = fresh.truncated;
+          if (quote.truncated) recoverQuoteNoteText(quote, getCapturedNoteTweet(id));
+        }
+      } catch (e) {
+        warn('strict-gate quote repair failed for', id, '-', e.message);
+      }
+    }
+    await rescue(model, onProgress);
+    return assessExportCompleteness(model);
   }
 
   function buildArchiveManifest(model, rawDebug, stats, documentLang) {
@@ -5946,45 +6033,50 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * cares about (quotes + media), and offers a one-click "Copy diagnostic bundle"
    * button so users can paste a reproducible report when reporting the issue.
    */
-  function confirmShipDespiteIncomplete({ model, assessment, debugJson = '' }) {
+  function confirmShipDespiteIncomplete({ model, assessment, debugJson = '', onRetry = null }) {
     if (typeof document === 'undefined') return Promise.resolve(true);
     ensureStyle();
     hideToast();
     document.querySelector('.xa-strict-gate')?.remove();
-    const c = assessment.counts;
-    const rows = [];
-    if (c.quotePermalinkMissing)
-      rows.push(
-        `<li><strong>${c.quotePermalinkMissing}</strong> embedded post(s) with no canonical permalink (only the author profile link would be usable).</li>`
-      );
-    if (c.quoteContentMissing)
-      rows.push(
-        `<li><strong>${c.quoteContentMissing}</strong> embedded post(s) whose content couldn't be captured (private, deleted, or fetch failed).</li>`
-      );
-    if (c.imageFetchFailed)
-      rows.push(
-        `<li><strong>${c.imageFetchFailed}</strong> image(s) detected but not embedded (would render as "Image unavailable").</li>`
-      );
-    if (c.videoNothingCaptured)
-      rows.push(
-        `<li><strong>${c.videoNothingCaptured}</strong> video(s) with neither video bytes nor a poster still (would render as "Video unavailable").</li>`
-      );
-    const details = assessment.blockers
-      .slice(0, 20)
-      .map((b) => `<li>${escapeHtml(b.summary)}</li>`)
-      .join('');
-    const moreCount = Math.max(0, assessment.blockers.length - 20);
+    const summaryRows = (a) => {
+      const c = a.counts;
+      const rows = [];
+      if (c.quotePermalinkMissing)
+        rows.push(
+          `<li><strong>${c.quotePermalinkMissing}</strong> embedded post(s) with no canonical permalink (only the author profile link would be usable).</li>`
+        );
+      if (c.quoteContentMissing)
+        rows.push(
+          `<li><strong>${c.quoteContentMissing}</strong> embedded post(s) whose content couldn't be captured (private, deleted, or fetch failed).</li>`
+        );
+      if (c.imageFetchFailed)
+        rows.push(
+          `<li><strong>${c.imageFetchFailed}</strong> image(s) detected but not embedded (would render as "Image unavailable").</li>`
+        );
+      if (c.videoNothingCaptured)
+        rows.push(
+          `<li><strong>${c.videoNothingCaptured}</strong> video(s) with neither video bytes nor a poster still (would render as "Video unavailable").</li>`
+        );
+      return rows.join('');
+    };
+    const detailRows = (a) => {
+      const details = a.blockers
+        .slice(0, 20)
+        .map((b) => `<li>${escapeHtml(b.summary)}</li>`)
+        .join('');
+      const moreCount = Math.max(0, a.blockers.length - 20);
+      return details + (moreCount ? `<li>&hellip; and ${moreCount} more.</li>` : '');
+    };
     const backdrop = document.createElement('div');
     backdrop.className = 'xa-modal-backdrop xa-strict-gate';
     backdrop.innerHTML = `<section class="xa-modal" role="dialog" aria-modal="true" aria-labelledby="xa-strict-title">
 <h2 id="xa-strict-title">Export is incomplete</h2>
 <p>Strict export mode detected dead-ends the reader would see in the exported file. Fix or accept before shipping.</p>
-<ul class="xa-strict-summary">${rows.join('')}</ul>
-<details class="xa-receipt-details" open><summary>What would ship broken (${assessment.blockers.length})</summary><ul class="xa-strict-detail-list">${details}${
-      moreCount ? `<li>&hellip; and ${moreCount} more.</li>` : ''
-    }</ul></details>
+<ul class="xa-strict-summary">${summaryRows(assessment)}</ul>
+<details class="xa-receipt-details" open><summary>What would ship broken (<span class="xa-strict-count">${assessment.blockers.length}</span>)</summary><ul class="xa-strict-detail-list">${detailRows(assessment)}</ul></details>
 <p class="xa-receipt-action-status" aria-live="polite"></p>
 <div class="xa-modal-actions">
+  ${onRetry ? '<button type="button" class="xa-strict-retry">Retry recovery</button>' : ''}
   <button type="button" class="xa-strict-copy">Copy diagnostic bundle</button>
   <button type="button" class="xa-modal-cancel">Cancel export</button>
   <button type="button" class="xa-modal-submit xa-strict-ship">Ship it anyway</button>
@@ -6019,6 +6111,41 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           setStatus(`Copy failed: ${error.message}`, true);
         }
       });
+      const retryBtn = backdrop.querySelector('.xa-strict-retry');
+      if (retryBtn && onRetry) {
+        retryBtn.addEventListener('click', async () => {
+          const buttons = Array.from(backdrop.querySelectorAll('button'));
+          buttons.forEach((b) => (b.disabled = true));
+          setStatus('Retrying incomplete items...');
+          try {
+            const fresh = await onRetry((done, total) =>
+              setStatus(
+                total
+                  ? `Retrying failed downloads... ${done}/${total}`
+                  : 'Retrying incomplete items...'
+              )
+            );
+            if (fresh) assessment = fresh;
+            if (assessment.verdict === 'clean') {
+              // Everything recovered - proceed with the export as a clean ship.
+              close(true);
+              return;
+            }
+            backdrop.querySelector('.xa-strict-summary').innerHTML = summaryRows(assessment);
+            backdrop.querySelector('.xa-strict-detail-list').innerHTML = detailRows(assessment);
+            const count = backdrop.querySelector('.xa-strict-count');
+            if (count) count.textContent = String(assessment.blockers.length);
+            setStatus(
+              `Still incomplete: ${assessment.blockers.length} item(s) could not be recovered.`,
+              true
+            );
+          } catch (error) {
+            setStatus(`Retry failed: ${error.message}`, true);
+          } finally {
+            buttons.forEach((b) => (b.disabled = false));
+          }
+        });
+      }
       document.addEventListener('keydown', onKeyDown, true);
       backdrop.querySelector('.xa-modal-cancel').focus();
     });
@@ -6919,7 +7046,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return ((Number(id) / 1e15) * Math.PI).toString(6 ** 2).replace(/(0+|\.)/g, '');
   }
 
-  function fetchTweetSyndication(id) {
+  function fetchTweetSyndicationOnce(id) {
     return new Promise((resolve, reject) => {
       if (typeof GM_xmlhttpRequest !== 'function') {
         reject(new Error('GM_xmlhttpRequest unavailable'));
@@ -6943,13 +7070,39 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
               reject(new Error('syndication: bad JSON'));
             }
           } else {
-            reject(new Error('syndication: HTTP ' + res.status));
+            const error = new Error('syndication: HTTP ' + res.status);
+            error.status = res.status;
+            reject(error);
           }
         },
         onerror: () => reject(new Error('syndication: network error')),
         ontimeout: () => reject(new Error('syndication: timeout')),
       });
     });
+  }
+
+  /**
+   * Retrying wrapper - EVERY quote-recovery and thread-media layer depends on
+   * this endpoint, so a transient failure here used to silently degrade a quote
+   * card to whatever the DOM scrape produced (often nothing). 404 is
+   * authoritative (deleted/protected post): retrying cannot succeed, stop early.
+   */
+  async function fetchTweetSyndication(id) {
+    const attempts = Math.max(1, Number(CONFIG.syndicationFetchRetries) || 1);
+    let lastError = null;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        return await fetchTweetSyndicationOnce(id);
+      } catch (error) {
+        lastError = error;
+        if (error.status === 404) break;
+        if (attempt < attempts) {
+          const factor = error.status === 429 ? CONFIG.rateLimitBackoffFactor : 1;
+          await sleep(CONFIG.syndicationFetchRetryBaseMs * attempt * factor);
+        }
+      }
+    }
+    throw lastError || new Error(`syndication fetch failed for ${id}`);
   }
 
   function syndicationAvatar(user) {
@@ -7244,7 +7397,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             const fresh = syndicationToQuoteBlock(data);
             q.author = fresh.author;
             q.blocks = fresh.blocks;
-            q.sourceUrl = fresh.sourceUrl || q.sourceUrl;
+            // Only adopt the rebuilt permalink when it is canonical; a payload
+            // missing id_str yields "https://x.com/<user>/status/" (dead link).
+            if (statusIdFromUrl(fresh.sourceUrl)) q.sourceUrl = fresh.sourceUrl;
             q.truncated = fresh.truncated;
             // Long-form quote: syndication only has the preview, but the network capture
             // may hold the full text X's web app already delivered to this browser.
@@ -7297,6 +7452,155 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   }
 
   /**
+   * Apply one post's syndication payload to its slice of the model: the blocks
+   * between `index` (the post's thread-marker, or -1 for a focused single post)
+   * and `end`, exclusive. Shared by the thread pass and the focused-post pass.
+   * Mutates model.blocks; returns { recovered, truncatedPost, recoveredNote }.
+   */
+  function applySyndicationDataToSegment(model, marker, index, end, data, lookupNote) {
+    const segment = model.blocks.slice(index + 1, end);
+    const additions = [];
+    let recoveredNote = false;
+    let truncatedPost = false;
+
+    // Position-based quote-source recovery: this post's own syndication response
+    // is the definitive source for its (single) quoted-tweet id. If any quote in
+    // the segment still has an empty sourceUrl at this point (both the capture
+    // recovery and the pool-based syndication recovery missed it), fix it now
+    // AND rebuild the card from the quoted_tweet payload we already have -
+    // saves a per-quote syndication round-trip and closes the "dead source link"
+    // path entirely.
+    const qt = data && data.quoted_tweet;
+    if (qt && qt.id_str && qt.user && qt.user.screen_name) {
+      const qHandle = String(qt.user.screen_name).toLowerCase();
+      const missingInSegment = segment.filter(
+        (b) => b.kind === 'quote' && !statusIdFromUrl(b.sourceUrl)
+      );
+      const target =
+        missingInSegment.find((b) => {
+          const h = String((b.author && b.author.handle) || '')
+            .replace(/^@/, '')
+            .toLowerCase();
+          return h && h === qHandle;
+        }) || (missingInSegment.length === 1 ? missingInSegment[0] : null);
+      if (target) {
+        const fresh = syndicationToQuoteBlock(qt);
+        target.sourceUrl =
+          fresh.sourceUrl || `https://x.com/${qt.user.screen_name}/status/${qt.id_str}`;
+        if (fresh.blocks && fresh.blocks.length) {
+          target.author = fresh.author;
+          target.blocks = fresh.blocks;
+          target.truncated = fresh.truncated;
+          target.publishedAt = fresh.publishedAt || target.publishedAt;
+          if (target.truncated) {
+            recoverQuoteNoteText(target, lookupNote(qt.id_str));
+          }
+        }
+      }
+    }
+
+    const have = new Set(segment.map(blockMediaKey));
+    // A video block whose player was still booting at capture time has no
+    // poster or mp4 yet - no media key. Heal that block with the syndication
+    // data instead of adding a twin and shipping a dead "Video unavailable"
+    // card next to the working one. Only safe when the target is unambiguous.
+    const keylessVideos = segment.filter((b) => b.kind === 'video' && !blockMediaKey(b));
+    let merged = 0;
+    syndicationMediaBlocks(data, marker.sourceUrl).forEach((candidate) => {
+      const key = blockMediaKey(candidate);
+      if (!key || have.has(key)) return;
+      if (candidate.kind === 'video' && keylessVideos.length === 1) {
+        const target = keylessVideos.pop();
+        target.posterUrl = target.posterUrl || candidate.posterUrl;
+        target.mp4Url = target.mp4Url || candidate.mp4Url;
+        addVideoCandidatesToBlock(target, candidate.videoCandidates || []);
+        if (!target.width) target.width = candidate.width;
+        if (!target.height) target.height = candidate.height;
+        if (!target.duration) target.duration = candidate.duration;
+        have.add(key);
+        merged += 1;
+        return;
+      }
+      additions.push(candidate);
+    });
+    const recovered = additions.length + merged;
+
+    // External links: X strips a card's URL from the visible text, so a
+    // lazily-lost card means the link exists ONLY in entities.urls.
+    const segmentHrefs = new Set();
+    segment.forEach((b) => {
+      if (b.kind === 'paragraph') hrefsFromHtml(b.html).forEach((h) => segmentHrefs.add(h));
+      else if (b.kind === 'link-card' && b.url) segmentHrefs.add(b.url);
+    });
+    (data.entities && data.entities.urls ? data.entities.urls : []).forEach((u) => {
+      const expanded = safeUrl(u.expanded_url || u.url);
+      if (!expanded || isStatusPermalink(expanded)) return;
+      const card = segment.find(
+        (b) => b.kind === 'link-card' && (b.url === u.url || b.url === expanded)
+      );
+      if (card) {
+        // Upgrade a DOM-captured card that kept the opaque t.co form.
+        card.url = expanded;
+        if (!card.domain) card.domain = urlHostname(expanded);
+        if (!card.title && u.display_url) card.title = u.display_url;
+        return;
+      }
+      if (segmentHrefs.has(expanded) || (u.url && segmentHrefs.has(u.url))) return;
+      additions.push({
+        kind: 'link-card',
+        url: expanded,
+        title: u.display_url || '',
+        domain: urlHostname(expanded),
+        sourceUrl: marker.sourceUrl,
+      });
+    });
+
+    // Long-form (note) post: syndication only ever has the preview text, but the
+    // network capture may hold the full text X's own web app already downloaded.
+    let segEnd = end;
+    if (data.note_tweet) {
+      const note = lookupNote(marker.statusId);
+      const fullText = note && note.text ? note.text.trim() : '';
+      const previewText = segment
+        .filter((b) => b.kind === 'paragraph')
+        .map((b) => textFromHtml(b.html))
+        .join('\n')
+        .trim();
+      if (fullText && fullText.length > previewText.length) {
+        // Swap the preview paragraphs (and any stale truncation notice) for the
+        // full text; media/link-card blocks in the segment are kept as-is.
+        for (let j = segEnd - 1; j > index; j--) {
+          const kind = model.blocks[j].kind;
+          if (kind === 'paragraph' || kind === 'truncation-notice') {
+            model.blocks.splice(j, 1);
+            segEnd--;
+          }
+        }
+        const paragraphs = noteTweetParagraphBlocks(note);
+        model.blocks.splice(index + 1, 0, ...paragraphs);
+        segEnd += paragraphs.length;
+        additions.push({ kind: 'note-recovered', sourceUrl: marker.sourceUrl });
+        recoveredNote = true;
+      } else if (fullText && previewText.length >= fullText.length) {
+        // The DOM already showed the complete note text - nothing to warn about.
+      } else if (!segment.some((b) => b.kind === 'truncation-notice')) {
+        additions.push({ kind: 'truncation-notice', sourceUrl: marker.sourceUrl });
+        truncatedPost = true;
+      }
+    }
+
+    if (additions.length) {
+      // Keep a DOM-detected truncation notice as the segment's last word.
+      let insertAt = segEnd;
+      while (insertAt > index + 1 && model.blocks[insertAt - 1].kind === 'truncation-notice') {
+        insertAt--;
+      }
+      model.blocks.splice(insertAt, 0, ...additions);
+    }
+    return { recovered, truncatedPost, recoveredNote };
+  }
+
+  /**
    * Thread capture races X's lazy loading: a post cloned before its image ever
    * loaded has no media in the DOM at all, so the miss is invisible to the
    * accounting (a real 36-post thread silently lost 7 of 27 photos this way).
@@ -7330,127 +7634,17 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       try {
         const data = await fetchTweet(marker.statusId);
         if (data && (data.__typename === 'Tweet' || data.text != null)) {
-          const segment = model.blocks.slice(index + 1, end);
-          const additions = [];
-
-          // Position-based quote-source recovery: this post's own syndication response
-          // is the definitive source for its (single) quoted-tweet id. If any quote in
-          // the segment still has an empty sourceUrl at this point (both the capture
-          // recovery and the pool-based syndication recovery missed it), fix it now
-          // AND rebuild the card from the quoted_tweet payload we already have -
-          // saves a per-quote syndication round-trip and closes the "dead source link"
-          // path entirely for thread exports.
-          const qt = data && data.quoted_tweet;
-          if (qt && qt.id_str && qt.user && qt.user.screen_name) {
-            const qHandle = String(qt.user.screen_name).toLowerCase();
-            const missingInSegment = segment.filter(
-              (b) => b.kind === 'quote' && !statusIdFromUrl(b.sourceUrl)
-            );
-            const target =
-              missingInSegment.find((b) => {
-                const h = String((b.author && b.author.handle) || '')
-                  .replace(/^@/, '')
-                  .toLowerCase();
-                return h && h === qHandle;
-              }) || (missingInSegment.length === 1 ? missingInSegment[0] : null);
-            if (target) {
-              const fresh = syndicationToQuoteBlock(qt);
-              target.sourceUrl =
-                fresh.sourceUrl || `https://x.com/${qt.user.screen_name}/status/${qt.id_str}`;
-              if (fresh.blocks && fresh.blocks.length) {
-                target.author = fresh.author;
-                target.blocks = fresh.blocks;
-                target.truncated = fresh.truncated;
-                target.publishedAt = fresh.publishedAt || target.publishedAt;
-                if (target.truncated) {
-                  recoverQuoteNoteText(target, lookupNote(qt.id_str));
-                }
-              }
-            }
-          }
-
-          const have = new Set(segment.map(blockMediaKey));
-          syndicationMediaBlocks(data, marker.sourceUrl).forEach((candidate) => {
-            const key = blockMediaKey(candidate);
-            if (key && !have.has(key)) additions.push(candidate);
-          });
-          recovered += additions.length;
-
-          // External links: X strips a card's URL from the visible text, so a
-          // lazily-lost card means the link exists ONLY in entities.urls.
-          const segmentHrefs = new Set();
-          segment.forEach((b) => {
-            if (b.kind === 'paragraph') hrefsFromHtml(b.html).forEach((h) => segmentHrefs.add(h));
-            else if (b.kind === 'link-card' && b.url) segmentHrefs.add(b.url);
-          });
-          (data.entities && data.entities.urls ? data.entities.urls : []).forEach((u) => {
-            const expanded = safeUrl(u.expanded_url || u.url);
-            if (!expanded || isStatusPermalink(expanded)) return;
-            const card = segment.find(
-              (b) => b.kind === 'link-card' && (b.url === u.url || b.url === expanded)
-            );
-            if (card) {
-              // Upgrade a DOM-captured card that kept the opaque t.co form.
-              card.url = expanded;
-              if (!card.domain) card.domain = urlHostname(expanded);
-              if (!card.title && u.display_url) card.title = u.display_url;
-              return;
-            }
-            if (segmentHrefs.has(expanded) || (u.url && segmentHrefs.has(u.url))) return;
-            additions.push({
-              kind: 'link-card',
-              url: expanded,
-              title: u.display_url || '',
-              domain: urlHostname(expanded),
-              sourceUrl: marker.sourceUrl,
-            });
-          });
-
-          // Long-form (note) post: syndication only ever has the preview text, but the
-          // network capture may hold the full text X's own web app already downloaded.
-          let segEnd = end;
-          if (data.note_tweet) {
-            const note = lookupNote(marker.statusId);
-            const fullText = note && note.text ? note.text.trim() : '';
-            const previewText = segment
-              .filter((b) => b.kind === 'paragraph')
-              .map((b) => textFromHtml(b.html))
-              .join('\n')
-              .trim();
-            if (fullText && fullText.length > previewText.length) {
-              // Swap the preview paragraphs (and any stale truncation notice) for the
-              // full text; media/link-card blocks in the segment are kept as-is.
-              for (let j = segEnd - 1; j > index; j--) {
-                const kind = model.blocks[j].kind;
-                if (kind === 'paragraph' || kind === 'truncation-notice') {
-                  model.blocks.splice(j, 1);
-                  segEnd--;
-                }
-              }
-              const paragraphs = noteTweetParagraphBlocks(note);
-              model.blocks.splice(index + 1, 0, ...paragraphs);
-              segEnd += paragraphs.length;
-              additions.push({ kind: 'note-recovered', sourceUrl: marker.sourceUrl });
-              recoveredNotes++;
-            } else if (fullText && previewText.length >= fullText.length) {
-              // The DOM already showed the complete note text - nothing to warn about.
-            } else if (!segment.some((b) => b.kind === 'truncation-notice')) {
-              additions.push({ kind: 'truncation-notice', sourceUrl: marker.sourceUrl });
-              truncatedPosts++;
-            }
-          }
-
-          if (additions.length) {
-            // Keep a DOM-detected truncation notice as the segment's last word.
-            let insertAt = segEnd;
-            while (
-              insertAt > index + 1 &&
-              model.blocks[insertAt - 1].kind === 'truncation-notice'
-            ) {
-              insertAt--;
-            }
-            model.blocks.splice(insertAt, 0, ...additions);
-          }
+          const applied = applySyndicationDataToSegment(
+            model,
+            marker,
+            index,
+            end,
+            data,
+            lookupNote
+          );
+          recovered += applied.recovered;
+          if (applied.truncatedPost) truncatedPosts++;
+          if (applied.recoveredNote) recoveredNotes++;
         }
       } catch (e) {
         warn('thread syndication check failed for post', marker.statusId, '-', e.message);
@@ -7470,6 +7664,48 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         );
       }
     }
+    return model;
+  }
+
+  /**
+   * Single-post counterpart of enrichThreadViaSyndication. A focused post whose
+   * image never lazy-loaded has NO media block in the model at all, so the miss
+   * is invisible even to the strict export gate - this pass asks syndication for
+   * the post's authoritative media/links/note signal and adds anything the DOM
+   * missed, exactly like the per-post checks inside a thread export. Articles
+   * are skipped (their body has no tweet syndication payload); failures keep
+   * the DOM capture as-is.
+   */
+  async function enrichFocusedPostViaSyndication(
+    model,
+    onProgress,
+    fetchTweet = fetchTweetSyndication,
+    lookupNote = getCapturedNoteTweet
+  ) {
+    if (!model || model.thread || model.type !== 'post') return model;
+    if ((model.blocks || []).some((b) => b.kind === 'thread-marker')) return model;
+    const statusId = statusIdFromUrl(model.sourceUrl);
+    if (!statusId) return model;
+    onProgress && onProgress(0, 1);
+    try {
+      const data = await fetchTweet(statusId);
+      if (data && (data.__typename === 'Tweet' || data.text != null)) {
+        const applied = applySyndicationDataToSegment(
+          model,
+          { statusId, sourceUrl: model.sourceUrl },
+          -1,
+          model.blocks.length,
+          data,
+          lookupNote
+        );
+        if (applied.recovered) {
+          log(`post syndication pass: recovered ${applied.recovered} item(s) the DOM missed`);
+        }
+      }
+    } catch (e) {
+      warn('post syndication check failed for', statusId, '-', e.message);
+    }
+    onProgress && onProgress(1, 1);
     return model;
   }
 
@@ -8040,6 +8276,13 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
               sticky: true,
             })
           );
+        } else {
+          // Single-post exports get the same authoritative media/link check the
+          // thread pass gives each post - a lazily-lost image otherwise leaves
+          // no block at all, invisible even to the strict gate.
+          await enrichFocusedPostViaSyndication(model, () =>
+            showToast('Verifying post media...', { sticky: true })
+          );
         }
         log('model after syndication', model);
       }
@@ -8065,10 +8308,38 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       // is skipped and the export ships regardless (the pre-strict-mode behavior).
       const runtimePrefs = getPrefs();
       if (runtimePrefs.strictExport) {
-        const assessment = assessExportCompleteness(model);
+        let assessment = assessExportCompleteness(model);
+        if (assessment.verdict !== 'clean') {
+          // Most blockers are transient - retry each through the layer that owns
+          // it before bothering the user. The modal is the LAST resort.
+          showToast(`Retrying ${assessment.blockers.length} incomplete item(s)...`, {
+            sticky: true,
+          });
+          assessment = await repairExportBlockers(model, assessment, (done, total) =>
+            showToast(
+              total
+                ? `Retrying failed downloads... ${done}/${total}`
+                : 'Retrying incomplete items...',
+              { sticky: true }
+            )
+          );
+          if (assessment.verdict === 'clean') {
+            log('strict-mode auto-repair resolved all blockers');
+          }
+        }
         if (assessment.verdict !== 'clean') {
           hideToast();
-          const proceed = await confirmShipDespiteIncomplete({ model, assessment, debugJson });
+          const proceed = await confirmShipDespiteIncomplete({
+            model,
+            assessment,
+            debugJson,
+            // Manual retry from the modal: run the same repair round again. The
+            // user has usually waited a bit by now, so rate limits have cleared.
+            onRetry: async (report) => {
+              assessment = await repairExportBlockers(model, assessment, report);
+              return assessment;
+            },
+          });
           if (!proceed) {
             log('export cancelled by strict-mode gate', assessment.counts);
             showToast('Export cancelled. Turn off strict mode from the menu to ship anyway.', {
@@ -8774,10 +9045,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       showShareResult,
       showCaptureReceipt,
       archiveStats,
-      // Strict-mode ship-blocker: assessment + diagnostic bundle. The modal itself
-      // (confirmShipDespiteIncomplete) is DOM-bound and not exported.
+      // Strict-mode ship-blocker: assessment, diagnostic bundle, auto-repair
+      // round, and the confirm modal (DOM-bound; exercised via jsdom).
       assessExportCompleteness,
       buildDiagnosticBundle,
+      confirmShipDespiteIncomplete,
       extensionControllerMessage,
       folderPickerAvailable,
       pickDirectoryViaExtensionBridge,
@@ -8828,6 +9100,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       recoverMissingQuoteSourcesFromCapture,
       mediaKeyFromUrl,
       enrichThreadViaSyndication,
+      enrichFocusedPostViaSyndication,
+      repairExportBlockers,
       extractLinkCard,
       extractPollBlock,
       quoteSourceUrlFromElement,

@@ -1210,6 +1210,14 @@ check('imageFetchCandidates retries lower-resolution X image variants', () => {
   assert.ok(candidates.some((url) => url.includes('name=small')));
 });
 
+check('imageFetchCandidates covers video poster thumbnails, original URL first', () => {
+  const poster = 'https://pbs.twimg.com/ext_tw_video_thumb/123/pu/img/abc.jpg';
+  const candidates = engine.imageFetchCandidates(poster);
+  assert.equal(candidates[0], poster, 'exact poster URL must be tried first');
+  assert.ok(candidates.length > 1, 'size variants added as fallbacks');
+  assert.ok(candidates.some((url) => url.includes('name=large')));
+});
+
 check('MP4 validation rejects tiny X video fragments', () => {
   const tinyInit = new Uint8Array(905);
   'ftyp'.split('').forEach((char, index) => {

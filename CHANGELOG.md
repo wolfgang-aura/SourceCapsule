@@ -30,6 +30,25 @@ All notable changes to this project are documented here. The format is based on
   `/status/{id}`) now exposes **Save full thread** in its drop-down menu, regardless of
   whether auto-detection recognized the thread. Choosing it forces a full-column scroll
   so late-loading same-author replies are always captured.
+- **Strict-gate auto-repair round.** When the completeness gate finds blockers, the
+  exporter now retries each through the layer that owns it - re-checking passively
+  captured quote refs, re-running the pool-based quote permalink matcher, re-fetching
+  dead quote cards from syndication, and re-running the media rescue pass - after a
+  short pause, and only shows the blocking modal if the export is still incomplete.
+  Most transient failures (rate limits, dropped connections) now self-heal without the
+  user seeing anything.
+- **"Retry recovery" button in the strict-gate modal.** When the modal does appear, one
+  click re-runs the full repair round in place: if everything recovers, the export
+  proceeds immediately; otherwise the blocker list updates to show exactly what is
+  still broken. No more cancel-and-restart just to retry a flaky connection.
+- **Single-post syndication media check.** Focused single-post exports get the same
+  authoritative syndication media/link diff that thread posts already got. Previously a
+  lazily-lost image on a single post produced no model block at all, making the miss
+  invisible even to the strict gate.
+- **Syndication fetch retries.** `cdn.syndication.twimg.com` fetches (the backbone of all
+  quote recovery and thread media recovery) now retry transient failures with backoff;
+  404 (deleted/protected) stops immediately. Previously a single dropped request silently
+  degraded a quote card to its DOM scrape.
 
 ### Changed
 
@@ -54,6 +73,18 @@ All notable changes to this project are documented here. The format is based on
 - Three-layer quote-source recovery (captured refs, syndication pool, per-thread-post
   syndication) eliminates the "Alex Prompter" regression where thread exports shipped
   quote cards with dead `Source URL unavailable` notices instead of working permalinks.
+- Media fetches stop retrying a URL that returned HTTP 404 (authoritative miss) so the
+  next size-variant candidate runs immediately, and rate-limited (HTTP 429) fetches back
+  off substantially longer before retrying.
+- Video poster stills now get the same lower-resolution fallback candidates as photos
+  (`ext_tw_video_thumb` / `amplify_video_thumb` / `tweet_video_thumb` paths).
+- A quote card rebuilt from a syndication payload missing `id_str` no longer overwrites
+  a verified permalink with a malformed one.
+- The media rescue pass now retries avatars that were never attempted (e.g. on quote
+  cards rebuilt after the main inline pass), not only ones whose first fetch failed.
+- A video whose player was still booting at capture time (no poster, no URL in the DOM
+  yet) is now healed in place with the post's syndication data instead of exporting a
+  dead "Video unavailable" card next to a recovered duplicate.
 
 ## [1.3.0] - 2026-07-07
 

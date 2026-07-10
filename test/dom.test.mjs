@@ -2243,6 +2243,343 @@ check('buildDiagnosticBundle carries what a bug report needs and NO media bytes'
   assert.match(bundle, /\[stripped: \d+ bytes\]/);
 });
 
+// ---------------------------------------------------------------------------
+// First-try hardening: retry policy, single-post syndication pass, auto-repair.
+// ---------------------------------------------------------------------------
+
+await checkAsync('media byte fetch stops retrying on authoritative HTTP 404', async () => {
+  let calls = 0;
+  global.GM_xmlhttpRequest = (options) => {
+    calls++;
+    options.onload({ status: 404, response: null, responseHeaders: '' });
+  };
+  await assert.rejects(
+    () => engine.gmFetchBytes('https://pbs.twimg.com/media/gone?format=jpg'),
+    /HTTP 404/
+  );
+  assert.equal(calls, 1, '404 must not burn retries; the next variant candidate should run');
+  delete global.GM_xmlhttpRequest;
+});
+
+await checkAsync(
+  'enrichFocusedPostViaSyndication recovers media the DOM never rendered on a single post',
+  async () => {
+    const model = {
+      type: 'post',
+      sourceUrl: 'https://x.com/a/status/555',
+      blocks: [{ kind: 'paragraph', html: 'lone post' }],
+    };
+    await engine.enrichFocusedPostViaSyndication(model, null, async (id) => {
+      assert.equal(id, '555');
+      return {
+        __typename: 'Tweet',
+        text: 'lone post',
+        mediaDetails: [
+          { type: 'photo', media_url_https: 'https://pbs.twimg.com/media/LOSTSOLO.jpg' },
+        ],
+      };
+    });
+    const images = model.blocks.filter((b) => b.kind === 'image');
+    assert.equal(images.length, 1, 'DOM-missed image added from syndication');
+    assert.match(images[0].url, /LOSTSOLO/);
+  }
+);
+
+await checkAsync(
+  'enrichFocusedPostViaSyndication does not duplicate media the DOM already has',
+  async () => {
+    const model = {
+      type: 'post',
+      sourceUrl: 'https://x.com/a/status/556',
+      blocks: [
+        { kind: 'paragraph', html: 'post' },
+        { kind: 'image', url: 'https://pbs.twimg.com/media/KEEPSOLO?format=jpg&name=orig' },
+      ],
+    };
+    await engine.enrichFocusedPostViaSyndication(model, null, async () => ({
+      __typename: 'Tweet',
+      text: 'post',
+      mediaDetails: [
+        { type: 'photo', media_url_https: 'https://pbs.twimg.com/media/KEEPSOLO.jpg' },
+      ],
+    }));
+    assert.equal(model.blocks.filter((b) => b.kind === 'image').length, 1);
+  }
+);
+
+await checkAsync(
+  'enrichFocusedPostViaSyndication skips threads and articles (thread pass owns those)',
+  async () => {
+    let fetches = 0;
+    const fetchTweet = async () => {
+      fetches++;
+      return { __typename: 'Tweet', text: 'x' };
+    };
+    await engine.enrichFocusedPostViaSyndication(
+      {
+        type: 'post',
+        sourceUrl: 'https://x.com/a/status/1',
+        blocks: [],
+        thread: { capturedPosts: 2 },
+      },
+      null,
+      fetchTweet
+    );
+    await engine.enrichFocusedPostViaSyndication(
+      { type: 'article', sourceUrl: 'https://x.com/a/status/1', blocks: [] },
+      null,
+      fetchTweet
+    );
+    assert.equal(fetches, 0);
+  }
+);
+
+await checkAsync(
+  'repairExportBlockers rebuilds a dead quote card and returns a clean verdict',
+  async () => {
+    const model = {
+      type: 'post',
+      sourceUrl: 'https://x.com/a/status/1',
+      blocks: [
+        { kind: 'paragraph', html: 'body' },
+        {
+          kind: 'quote',
+          author: { handle: '@flaky' },
+          sourceUrl: 'https://x.com/flaky/status/42',
+          blocks: [], // syndication failed transiently during the main pass
+        },
+      ],
+    };
+    const assessment = engine.assessExportCompleteness(model);
+    assert.equal(assessment.verdict, 'incomplete');
+    let rescued = false;
+    const repaired = await engine.repairExportBlockers(model, assessment, null, {
+      pauseMs: 0,
+      fetchTweet: async (id) => {
+        assert.equal(id, '42');
+        // No id_str on purpose: the rebuild must keep the verified permalink
+        // instead of overwriting it with a malformed one.
+        return {
+          __typename: 'Tweet',
+          text: 'recovered quote text',
+          user: { name: 'Flaky', screen_name: 'flaky' },
+        };
+      },
+      rescue: async () => {
+        rescued = true;
+        return { attempted: 0, recovered: 0 };
+      },
+    });
+    assert.equal(repaired.verdict, 'clean');
+    assert.ok(rescued, 'media rescue pass must run after quote rebuild');
+    const quote = model.blocks.find((b) => b.kind === 'quote');
+    assert.ok(quote.blocks.length > 0, 'quote content rebuilt from syndication');
+    assert.match(quote.blocks[0].html, /recovered quote text/);
+  }
+);
+
+await checkAsync(
+  'repairExportBlockers leaves unfixable blockers for the modal (no false clean)',
+  async () => {
+    const model = {
+      type: 'post',
+      sourceUrl: 'https://x.com/a/status/1',
+      blocks: [
+        {
+          kind: 'quote',
+          author: { handle: '@deleted' },
+          sourceUrl: 'https://x.com/deleted/status/7',
+          blocks: [],
+        },
+      ],
+    };
+    const assessment = engine.assessExportCompleteness(model);
+    const repaired = await engine.repairExportBlockers(model, assessment, null, {
+      pauseMs: 0,
+      fetchTweet: async () => {
+        const error = new Error('syndication: HTTP 404');
+        error.status = 404;
+        throw error;
+      },
+      rescue: async () => ({ attempted: 0, recovered: 0 }),
+    });
+    assert.equal(repaired.verdict, 'incomplete');
+    assert.equal(repaired.counts.quoteContentMissing, 1);
+  }
+);
+
+await checkAsync(
+  'repairExportBlockers retries pool-based permalink recovery for quotes',
+  async () => {
+    const model = {
+      type: 'post',
+      sourceUrl: 'https://x.com/answer/status/200',
+      blocks: [
+        { kind: 'paragraph', html: 'Answer' },
+        {
+          kind: 'quote',
+          author: { name: 'Questioner', handle: '@questioner' },
+          sourceUrl: '',
+          blocks: [{ kind: 'paragraph', html: 'Question text' }],
+        },
+      ],
+    };
+    const assessment = engine.assessExportCompleteness(model);
+    assert.equal(assessment.counts.quotePermalinkMissing, 1);
+    const repaired = await engine.repairExportBlockers(model, assessment, null, {
+      pauseMs: 0,
+      fetchTweet: async () => ({
+        __typename: 'Tweet',
+        text: 'Answer',
+        in_reply_to_status_id_str: '100',
+        in_reply_to_screen_name: 'questioner',
+      }),
+      rescue: async () => ({ attempted: 0, recovered: 0 }),
+    });
+    assert.equal(repaired.verdict, 'clean');
+    const quote = model.blocks.find((b) => b.kind === 'quote');
+    assert.equal(quote.sourceUrl, 'https://x.com/questioner/status/100');
+  }
+);
+
+await checkAsync(
+  'thread syndication heals a keyless DOM video block instead of duplicating it',
+  async () => {
+    const model = {
+      type: 'post',
+      blocks: [
+        { kind: 'thread-marker', statusId: '111', sourceUrl: 'https://x.com/a/status/111' },
+        { kind: 'paragraph', html: 'one' },
+        // Player was still booting at capture time: no poster, no candidates.
+        { kind: 'video', sourceUrl: 'https://x.com/a/status/111', videoCandidates: [] },
+      ],
+      thread: { capturedPosts: 1, sourcePostIds: ['111'], completeness: 'best-effort' },
+    };
+    await engine.enrichThreadViaSyndication(model, null, async () => ({
+      __typename: 'Tweet',
+      text: 'one',
+      mediaDetails: [
+        {
+          type: 'video',
+          media_url_https: 'https://pbs.twimg.com/ext_tw_video_thumb/999/pu/img/p.jpg',
+          video_info: {
+            duration_millis: 5000,
+            variants: [
+              { content_type: 'video/mp4', bitrate: 832000, url: 'https://video.twimg.com/v.mp4' },
+            ],
+          },
+        },
+      ],
+    }));
+    const videos = model.blocks.filter((b) => b.kind === 'video');
+    assert.equal(videos.length, 1, 'healed in place, no dead twin');
+    assert.equal(videos[0].mp4Url, 'https://video.twimg.com/v.mp4');
+    assert.match(videos[0].posterUrl, /ext_tw_video_thumb/);
+    assert.equal(model.thread.mediaRecovered, 1);
+  }
+);
+
+await checkAsync(
+  'strict-gate modal Retry recovery proceeds when the repair clears all blockers',
+  async () => {
+    const model = {
+      type: 'post',
+      sourceUrl: 'https://x.com/a/status/1',
+      blocks: [{ kind: 'image', url: 'https://pbs.twimg.com/media/x.jpg' }],
+    };
+    const assessment = engine.assessExportCompleteness(model);
+    assert.equal(assessment.verdict, 'incomplete');
+    const promise = engine.confirmShipDespiteIncomplete({
+      model,
+      assessment,
+      onRetry: async () => ({ verdict: 'clean', blockers: [], counts: {} }),
+    });
+    const retry = document.querySelector('.xa-strict-gate .xa-strict-retry');
+    assert.ok(retry, 'Retry recovery button rendered when onRetry is provided');
+    retry.click();
+    const proceed = await promise;
+    assert.equal(proceed, true, 'clean retry resolves as proceed');
+    assert.ok(!document.querySelector('.xa-strict-gate'), 'modal removed after clean retry');
+  }
+);
+
+await checkAsync(
+  'strict-gate modal retry updates the blocker list when items remain, cancel still works',
+  async () => {
+    const model = {
+      type: 'post',
+      sourceUrl: 'https://x.com/a/status/1',
+      blocks: [
+        { kind: 'image', url: 'https://pbs.twimg.com/media/x.jpg' },
+        {
+          kind: 'quote',
+          author: { handle: '@deleted' },
+          sourceUrl: 'https://x.com/deleted/status/7',
+          blocks: [],
+        },
+      ],
+    };
+    const assessment = engine.assessExportCompleteness(model);
+    assert.equal(assessment.blockers.length, 2);
+    const stillIncomplete = {
+      verdict: 'incomplete',
+      blockers: [assessment.blockers[1]],
+      counts: { quoteContentMissing: 1 },
+    };
+    const promise = engine.confirmShipDespiteIncomplete({
+      model,
+      assessment,
+      onRetry: async () => stillIncomplete,
+    });
+    document.querySelector('.xa-strict-gate .xa-strict-retry').click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const count = document.querySelector('.xa-strict-gate .xa-strict-count');
+    assert.equal(count.textContent, '1', 'blocker count re-rendered after partial repair');
+    const status = document.querySelector('.xa-strict-gate .xa-receipt-action-status');
+    assert.match(status.textContent, /Still incomplete: 1 item/);
+    document.querySelector('.xa-strict-gate .xa-modal-cancel').click();
+    const proceed = await promise;
+    assert.equal(proceed, false);
+    assert.ok(!document.querySelector('.xa-strict-gate'));
+  }
+);
+
+check('strict-gate modal omits the retry button without an onRetry handler', () => {
+  const model = {
+    type: 'post',
+    sourceUrl: 'https://x.com/a/status/1',
+    blocks: [{ kind: 'image', url: 'https://pbs.twimg.com/media/x.jpg' }],
+  };
+  const assessment = engine.assessExportCompleteness(model);
+  const promise = engine.confirmShipDespiteIncomplete({ model, assessment });
+  assert.ok(!document.querySelector('.xa-strict-gate .xa-strict-retry'));
+  document.querySelector('.xa-strict-gate .xa-modal-cancel').click();
+  return promise;
+});
+
+check('media rescue retries never-attempted avatars from repaired quote cards', () => {
+  const model = {
+    type: 'post',
+    author: {
+      handle: '@main',
+      avatarUrl: 'https://pbs.twimg.com/a_normal.jpg',
+      avatarFailed: true,
+    },
+    blocks: [
+      {
+        kind: 'quote',
+        // Rebuilt AFTER inlineMedia ran: avatar never attempted, no avatarFailed flag.
+        author: { handle: '@fresh', avatarUrl: 'https://pbs.twimg.com/b_normal.jpg' },
+        sourceUrl: 'https://x.com/fresh/status/9',
+        blocks: [{ kind: 'paragraph', html: 'q' }],
+      },
+    ],
+  };
+  const tasks = engine.collectMediaRescueTasks(model);
+  const avatarTasks = tasks.filter((t) => t.kind === 'avatar');
+  assert.equal(avatarTasks.length, 2, 'both the failed and the never-attempted avatar retried');
+});
+
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);
   process.exit(1);
