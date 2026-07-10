@@ -31,8 +31,10 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
    GraphQL responses to render the page; a MAIN-world bridge tees those bodies to
    `handleNetworkCapturePayload`, which harvests full long-form ("note") text into
    `capturedNoteTweets` and `<parentId, quotedId, quotedHandle>` triples into
-   `capturedQuotedRefs`. Free source of truth — no extra network call, and it survives
-   whatever the DOM later virtualizes away.
+   `capturedQuotedRefs`. Quote-only responses are included (the bridge body filter must always
+   contain `quoted_status`), bodies are capped at 6 MB with explicit truncation diagnostics, and
+   full-body hashing prevents distinct same-envelope responses being deduplicated. Free source of
+   truth — no extra network call, and it survives whatever the DOM later virtualizes away.
 3. **Syndication layer**: each embedded/quoted tweet is re-fetched by id from
    `cdn.syndication.twimg.com/tweet-result` (with retry + backoff; 404 stops early) and
    its quote card is rebuilt from that authoritative data (`enrichQuotesViaSyndication` →
@@ -117,6 +119,13 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
   syndication is blocked/changes, set `CONFIG.useSyndication=false` to fall back to DOM scraping
   (which has the known duplicate/misattribution issues). The `token` is derived from the id
   (`syndicationToken`, same scheme as `react-tweet`).
+- **Syndication must augment, not erase, DOM-only semantics.** Public tweet-result payloads do not
+  reliably carry polls or rich link-card metadata. Every quote replacement goes through
+  `mergeQuoteAfterSyndication`, which preserves those blocks recursively. A parent payload with a
+  `quoted_tweet` also creates the quote when the DOM card never mounted.
+- **Never guess multi-video ownership by array order.** Network candidates are bitrate-sorted, not
+  post-sorted. Poster/media keys are authoritative; a keyless fallback is allowed only for one
+  unresolved video and one logical media ID.
 - Markdown is Prettier-ignored on purpose (hand-formatted). The engine is exposed to Node
   via a `typeof module` guard at the bottom of the userscript — keep it.
 - Repo: `wolfgang-aura/SourceCapsule` (public/OSS). `@downloadURL`/`@updateURL` point at

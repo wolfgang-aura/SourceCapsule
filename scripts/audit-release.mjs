@@ -21,6 +21,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+const RELEASE_VERSION = JSON.parse(
+  fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')
+).version;
+
 // ---------------------------------------------------------------------------
 // File discovery
 // ---------------------------------------------------------------------------
@@ -769,14 +773,14 @@ function renderReport(results) {
   L.push('## Suggested Release Tag');
   L.push('');
   if (overall === 'BLOCKED') {
-    L.push('- **Do not tag v1.0.0.** Resolve blockers, then re-audit. Stay on a v0.4.x build.');
+    L.push(`- **Do not tag v${RELEASE_VERSION}.** Resolve blockers, then re-audit.`);
   } else if (overall === 'PASS WITH FIXES') {
     L.push(
-      '- Media accounting is honest (no blockers). Address the non-blocking fixes, then v1.0.0 is defensible. A v0.4.x release candidate is also reasonable.'
+      `- Media accounting is honest (no blockers). Address the non-blocking fixes, then v${RELEASE_VERSION} is defensible.`
     );
   } else {
     L.push(
-      '- Clean audit. v1.0.0 is defensible: offline-media completeness and fallback accounting are honest across all sets.'
+      `- Clean audit. v${RELEASE_VERSION} is defensible: offline-media completeness and fallback accounting are honest across all sets.`
     );
   }
   L.push('');
