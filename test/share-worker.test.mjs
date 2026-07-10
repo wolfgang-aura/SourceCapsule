@@ -23,6 +23,7 @@ class MemoryR2 {
     if (!item) return null;
     return {
       body: item.bytes,
+      size: item.bytes.byteLength,
       customMetadata: item.customMetadata,
       text: async () => new TextDecoder().decode(item.bytes),
       writeHttpMetadata(headers) {
@@ -119,7 +120,50 @@ assert.equal(await markdown.text(), '# Shared');
 
 const image = await worker.fetch(new Request(`${created.viewUrl}/media/image-001.jpg`), env, ctx);
 assert.equal(image.status, 200);
+assert.equal(image.headers.get('Content-Type'), 'image/jpeg');
+assert.equal(image.headers.get('Content-Length'), '3');
 assert.equal((await image.arrayBuffer()).byteLength, 3);
+
+// HEAD /c/{id}/media/x.jpg must report Content-Length. Without it, Slack, Discord,
+// and Twitter link-preview crawlers skip the asset - which is why shared images
+// silently vanished from social previews before this fix.
+const imageHead = await worker.fetch(
+  new Request(`${created.viewUrl}/media/image-001.jpg`, { method: 'HEAD' }),
+  env,
+  ctx
+);
+assert.equal(imageHead.status, 200);
+assert.equal(imageHead.headers.get('Content-Type'), 'image/jpeg');
+assert.equal(imageHead.headers.get('Content-Length'), '3');
+assert.equal((await imageHead.arrayBuffer()).byteLength, 0, 'HEAD carries no body');
+
+const pageHead = await worker.fetch(new Request(created.viewUrl, { method: 'HEAD' }), env, ctx);
+assert.equal(pageHead.status, 200);
+assert.equal(
+  pageHead.headers.get('Content-Length'),
+  String('<!doctype html><title>Shared</title>'.length)
+);
+
+await worker.fetch(
+  new Request(`${created.uploadUrl}/media/image-002.jpg`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${created.uploadToken}`,
+      'Content-Type': 'application/octet-stream',
+    },
+    body: new Uint8Array([4, 5, 6]),
+    duplex: 'half',
+  }),
+  env,
+  ctx
+);
+const repairedImage = await worker.fetch(
+  new Request(`${created.viewUrl}/media/image-002.jpg`),
+  env,
+  ctx
+);
+assert.equal(repairedImage.status, 200);
+assert.equal(repairedImage.headers.get('Content-Type'), 'image/jpeg');
 
 {
   const limitedEnv = {

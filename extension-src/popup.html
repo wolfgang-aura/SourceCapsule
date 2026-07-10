@@ -26,6 +26,13 @@
           <label><input type="radio" name="contents" value="lean" /> Lean Markdown + media</label>
         </fieldset>
         <label class="toggle"><input id="floating-button" type="checkbox" /> Floating button</label>
+        <label class="toggle"
+          ><input id="strict-export" type="checkbox" /> Strict export (block incomplete)</label
+        >
+        <p class="hint">
+          When on, exports that would ship broken quotes or failed media are blocked with a confirm
+          dialog instead of downloading silently.
+        </p>
         <button id="change-folder" type="button">Change export folder</button>
         <p id="folder-help" class="hint" hidden></p>
       </form>

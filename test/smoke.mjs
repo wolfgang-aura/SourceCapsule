@@ -21,15 +21,19 @@ const engine = require(join(here, '..', 'sourcecapsule.user.js'));
 
 assert.ok(
   engine.EXPORT_TYPES.some(
-    (item) => item.key === 'library-share' && item.label === 'Save locally + share with AI'
+    (item) => item.key === 'library-share' && item.label === 'Save locally + create AI link'
   ),
-  'combined local-save and share action is available'
+  'combined local-save and AI readable link action is available'
 );
 assert.ok(
-  engine.POST_EXPORT_TYPES.some(
+  engine.THREAD_EXPORT_TYPES.some(
     (item) => item.key === 'library-thread' && item.label === 'Save full thread'
   ),
-  'per-post menu keeps full-thread capture explicit'
+  'thread menu keeps full-thread capture explicit'
+);
+assert.ok(
+  !engine.POST_EXPORT_TYPES.some((item) => item.key === 'library-thread'),
+  'ordinary post menu does not offer full-thread capture'
 );
 assert.deepEqual(engine.postExportRequest('library-thread'), {
   exportType: 'library',
@@ -417,9 +421,43 @@ check('embedded posts without a recoverable permalink are explicitly incomplete'
   };
   const md = engine.renderLlmMarkdown(model);
   const html = engine.assembleHtml(model);
-  assert.match(md, /URL: unavailable \(X did not expose a canonical permalink/);
-  assert.match(md, /embedded post was captured, but X did not expose its canonical source URL/i);
-  assert.match(html, /xa-quote-source-missing/);
+  // A quote without a permalink still gets a working link (author profile), not a
+  // dead "Source URL unavailable" notice. The markdown records both the missing
+  // permalink AND the fallback profile so the LLM/reader knows what happened.
+  assert.match(
+    md,
+    /URL: unavailable \(exact permalink not exposed\); Author profile: https:\/\/x\.com\/context/
+  );
+  assert.match(md, /author profile \(https:\/\/x\.com\/context\) is linked instead/i);
+  assert.doesNotMatch(html, /xa-quote-source-missing/);
+  assert.doesNotMatch(html, /Source URL unavailable/);
+  assert.match(
+    html,
+    /<a class="xa-quote-link" href="https:\/\/x\.com\/context"[^>]*>View @context on X/
+  );
+  assert.match(html, /data-xa-source-fallback="author-profile"/);
+});
+
+check('quote without any recoverable handle still renders cleanly (no dead notice)', () => {
+  const model = {
+    type: 'post',
+    title: 'Anonymous quote',
+    author: { name: 'A', handle: '@a' },
+    sourceUrl: 'https://x.com/a/status/1',
+    exportedAt: '2026-07-06T00:00:00Z',
+    blocks: [
+      { kind: 'paragraph', html: 'Body' },
+      {
+        kind: 'quote',
+        author: { name: 'Unknown', handle: '' },
+        sourceUrl: '',
+        blocks: [{ kind: 'paragraph', html: 'Anonymous body' }],
+      },
+    ],
+  };
+  const html = engine.assembleHtml(model);
+  assert.doesNotMatch(html, /Source URL unavailable/);
+  assert.doesNotMatch(html, /xa-quote-source-missing/);
 });
 
 check('llm.md is honest about what it does and does not contain', () => {
@@ -508,6 +546,39 @@ check('bundlePaths honors the date vs flat layout preference', () => {
   assert.equal(byDate.postFolder, 'ada-12345');
   const flat = engine.bundlePaths(sampleModel, { layout: 'flat' }, '2026-06-28');
   assert.deepEqual(flat.segments, ['2026-06-28_ada-12345']);
+});
+
+check('AI readable link is packed into library HTML, Markdown, and AI_LINK.txt', () => {
+  const linked = structuredClone(sampleModel);
+  const paths = engine.bundlePaths(linked, { layout: 'date' }, '2026-07-09');
+  const share = {
+    viewUrl: 'https://sourcecapsule-share.example/c/abc',
+    markdownUrl: 'https://sourcecapsule-share.example/c/abc.md',
+    createdAt: '2026-07-09T01:00:00.000Z',
+    expiresAt: '2026-07-16T01:00:00.000Z',
+  };
+  const { entries, markdown } = engine.buildLibraryEntries(
+    linked,
+    '',
+    { contents: 'full' },
+    paths,
+    share
+  );
+  const htmlEntry = entries.find((entry) => entry.name.endsWith('.html'));
+  const mdEntry = entries.find((entry) => entry.name.endsWith('.llm.md'));
+  const linkEntry = entries.find((entry) => entry.name === 'AI_LINK.txt');
+  assert.ok(htmlEntry, 'HTML entry should be present');
+  assert.ok(mdEntry, 'Markdown entry should be present');
+  assert.ok(linkEntry, 'AI_LINK.txt should be packed into the library bundle');
+  assert.match(htmlEntry.text, /class="xa-ai-link"/);
+  assert.match(htmlEntry.text, /AI readable link/);
+  assert.match(htmlEntry.text, /https:\/\/sourcecapsule-share\.example\/c\/abc/);
+  assert.match(mdEntry.text, /AI readable link: https:\/\/sourcecapsule-share\.example\/c\/abc/);
+  assert.match(
+    markdown,
+    /AI readable Markdown link: https:\/\/sourcecapsule-share\.example\/c\/abc\.md/
+  );
+  assert.match(linkEntry.text, /Markdown link: https:\/\/sourcecapsule-share\.example\/c\/abc\.md/);
 });
 
 check('capture metadata normalizes tags and appears in the local library index', () => {

@@ -124,7 +124,7 @@ const expectedFiles = [
 ];
 assert.deepEqual(fs.readdirSync(out).sort(), expectedFiles);
 assert.equal(manifest.version, pkg.version);
-assert.equal(pkg.version, '1.3.0');
+assert.equal(pkg.version, '1.4.0');
 assert.ok(
   manifest.content_scripts.some(
     (entry) => entry.world === 'MAIN' && entry.js.includes('page-bridge.js')
@@ -138,7 +138,7 @@ assert.doesNotMatch(JSON.stringify(manifest.host_permissions), /localhost|127\.0
 assert.doesNotMatch(packagedText, /share\.sourcecapsule\.app/);
 assert.match(packagedText, /sourcecapsule-share\.wolfgang-aura\.workers\.dev/);
 const userscript = fs.readFileSync(path.join(root, 'sourcecapsule.user.js'), 'utf8');
-assert.match(userscript, /@version\s+1\.3\.0/);
-assert.match(userscript, /const VERSION = '1\.3\.0'/);
+assert.match(userscript, /@version\s+1\.4\.0/);
+assert.match(userscript, /const VERSION = '1\.4\.0'/);
 
 console.log('\nAll MV3 extension checks passed.');

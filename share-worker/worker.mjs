@@ -51,6 +51,22 @@ function validFilePath(path) {
   );
 }
 
+function mimeFromPath(path) {
+  const clean = String(path || '')
+    .split('?')[0]
+    .toLowerCase();
+  if (clean.endsWith('.html')) return 'text/html;charset=utf-8';
+  if (clean.endsWith('.md')) return 'text/markdown;charset=utf-8';
+  if (clean.endsWith('.json')) return 'application/json;charset=utf-8';
+  if (clean.endsWith('.jpg') || clean.endsWith('.jpeg')) return 'image/jpeg';
+  if (clean.endsWith('.png')) return 'image/png';
+  if (clean.endsWith('.webp')) return 'image/webp';
+  if (clean.endsWith('.gif')) return 'image/gif';
+  if (clean.endsWith('.avif')) return 'image/avif';
+  if (clean.endsWith('.mp4')) return 'video/mp4';
+  return '';
+}
+
 async function getMeta(env, id) {
   const object = await env.CAPSULES.get(metaKey(id));
   if (!object) return null;
@@ -216,10 +232,17 @@ async function serveCapsule(request, env, ctx, id, path) {
   if (!object) return new Response('File not found.', { status: 404 });
   const headers = new Headers();
   object.writeHttpMetadata && object.writeHttpMetadata(headers);
-  if (!headers.has('Content-Type')) {
-    if (path.endsWith('.html')) headers.set('Content-Type', 'text/html;charset=utf-8');
-    else if (path.endsWith('.md')) headers.set('Content-Type', 'text/markdown;charset=utf-8');
-    else if (path.endsWith('.json')) headers.set('Content-Type', 'application/json;charset=utf-8');
+  const inferredType = mimeFromPath(path);
+  const storedType = headers.get('Content-Type') || '';
+  if (!storedType || storedType === 'application/octet-stream') {
+    if (inferredType) headers.set('Content-Type', inferredType);
+  }
+  // R2's writeHttpMetadata omits Content-Length; without it, HEAD probes from
+  // Slack, Discord, and Twitter link-preview crawlers can skip the asset (they
+  // won't fetch an unknown-size body over their preview budget). Serve the size
+  // explicitly on every response so previews render and clients can show progress.
+  if (typeof object.size === 'number' && Number.isFinite(object.size)) {
+    headers.set('Content-Length', String(object.size));
   }
   headers.set('Cache-Control', 'public, max-age=300');
   headers.set('X-Robots-Tag', 'noindex, nofollow, noarchive');

@@ -56,6 +56,7 @@ async function initPopup() {
   setChecked('layout', state.prefs.layout);
   setChecked('contents', state.prefs.contents);
   document.querySelector('#floating-button').checked = state.prefs.floatingButton;
+  document.querySelector('#strict-export').checked = state.prefs.strictExport !== false;
   const changeFolder = document.querySelector('#change-folder');
   if (state.folderPickerSupported === false) {
     changeFolder.disabled = true;
@@ -72,6 +73,7 @@ async function initPopup() {
     else if (target.name === 'contents') value = { key: 'contents', value: target.value };
     else if (target.id === 'floating-button')
       value = { key: 'floatingButton', value: target.checked };
+    else if (target.id === 'strict-export') value = { key: 'strictExport', value: target.checked };
     else return;
     const result = await sendToController(tab.id, 'set-preference', value);
     if (!result || !result.ok) status.textContent = result.error || 'Could not save that setting.';

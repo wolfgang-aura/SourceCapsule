@@ -216,6 +216,134 @@ check('share success remains visible when automatic clipboard copy is blocked', 
   assert.equal(document.querySelector('.xa-share-result'), null);
 });
 
+await checkAsync(
+  'recent AI readable links modal keeps expired links greyed out and removable',
+  async () => {
+    const active = {
+      id: 'active',
+      title: 'Active capture',
+      viewUrl: 'http://127.0.0.1:8787/c/active',
+      markdownUrl: 'http://127.0.0.1:8787/c/active.md',
+      sourceUrl: STATUS_URL,
+      expiresAt: new Date(Date.now() + 86400000).toISOString(),
+    };
+    const expired = {
+      id: 'expired',
+      title: 'Expired capture',
+      viewUrl: 'http://127.0.0.1:8787/c/expired',
+      sourceUrl: STATUS_URL,
+      expiresAt: new Date(Date.now() - 86400000).toISOString(),
+    };
+    engine.setShareLinks([active, expired]);
+    window.confirm = () => true;
+    engine.showRecentShareLinks();
+    const modal = document.querySelector('.xa-recent-links-modal');
+    assert.ok(modal, 'recent links modal should be visible');
+    const rows = Array.from(modal.querySelectorAll('.xa-recent-link'));
+    assert.equal(rows.length, 2);
+    assert.ok(rows[1].classList.contains('expired'), 'expired link should be greyed out');
+    assert.match(rows[1].textContent, /Expired:/);
+    rows[1].querySelector('.danger').click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(
+      engine.getShareLinks().map((item) => item.id),
+      ['active']
+    );
+    modal.querySelector('.xa-modal-cancel').click();
+  }
+);
+
+check('AI readable link receipt records expiry, URLs, and missing media warnings', () => {
+  const receipt = engine.aiLinkReceiptText(
+    {
+      id: 'abc',
+      viewUrl: 'https://sourcecapsule-share.example/c/abc',
+      markdownUrl: 'https://sourcecapsule-share.example/c/abc.md',
+      createdAt: '2026-07-09T00:00:00.000Z',
+      expiresAt: '2026-07-16T00:00:00.000Z',
+    },
+    {
+      title: 'Receipt test',
+      sourceUrl: STATUS_URL,
+      blocks: [{ kind: 'image', url: 'https://pbs.twimg.com/media/missing.jpg', failed: true }],
+    }
+  );
+  assert.match(receipt, /AI readable link: https:\/\/sourcecapsule-share\.example\/c\/abc/);
+  assert.match(receipt, /Markdown link: https:\/\/sourcecapsule-share\.example\/c\/abc\.md/);
+  assert.match(receipt, /Missing media: 1/);
+  assert.match(receipt, /Re-export from X/);
+});
+
+await checkAsync('media byte fetch retries transient userscript request failures', async () => {
+  let calls = 0;
+  global.GM_xmlhttpRequest = (options) => {
+    calls++;
+    if (calls === 1) {
+      options.onerror({ message: 'temporary network failure' });
+      return;
+    }
+    options.onload({
+      status: 200,
+      response: new Uint8Array([1, 2, 3, 4]).buffer,
+      responseHeaders: 'content-type: image/jpeg\r\n',
+    });
+  };
+  const fetched = await engine.gmFetchBytes('https://pbs.twimg.com/media/retry?format=jpg');
+  assert.equal(calls, 2);
+  assert.equal(fetched.mime, 'image/jpeg');
+  assert.deepEqual(Array.from(fetched.bytes), [1, 2, 3, 4]);
+  delete global.GM_xmlhttpRequest;
+});
+
+check('recoverable media failures stay visible in the honesty report', () => {
+  const reportedModel = {
+    title: 'Reported media',
+    sourceUrl: STATUS_URL,
+    author: { name: 'Media Test', handle: '@media' },
+    blocks: [
+      {
+        kind: 'paragraph',
+        html: 'A post with an image.',
+      },
+      {
+        kind: 'image',
+        _xaMediaId: 'image-001',
+        url: 'https://pbs.twimg.com/media/missing?format=jpg&name=orig',
+        sourceUrl: STATUS_URL,
+        failed: true,
+      },
+    ],
+  };
+  const stats = engine.archiveStats(reportedModel);
+  const failures = engine.recoverableMediaFailures(stats);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].type, 'image');
+  assert.equal(stats.missingMedia, 1);
+  assert.match(stats.warnings.join('\n'), /unavailable at export time/);
+});
+
+check('known non-downloadable media is honest but not treated as patchable', () => {
+  const hlsModel = {
+    title: 'HLS only',
+    sourceUrl: STATUS_URL,
+    author: { name: 'Media Test', handle: '@media' },
+    blocks: [
+      { kind: 'paragraph', html: 'A post with HLS-only video.' },
+      {
+        kind: 'video',
+        _xaMediaId: 'video-001',
+        hlsUrl: 'https://video.twimg.com/ext_tw_video/hls.m3u8',
+        sourceUrl: STATUS_URL,
+        unsupported: true,
+        videoFailureReason: 'hls_only',
+      },
+    ],
+  };
+  const stats = engine.archiveStats(hlsModel);
+  assert.equal(stats.incompleteMedia, 1);
+  assert.equal(engine.recoverableMediaFailures(stats).length, 0);
+});
+
 check('inlineHtmlFromTweetText captures nested-span text', () => {
   const el = dom.window.document.querySelectorAll('div[data-testid="tweetText"]')[1];
   const html = engine.inlineHtmlFromTweetText(el);
@@ -301,20 +429,128 @@ check(
     const continuation = posts.find((tweet) =>
       tweet.textContent.includes('Thread continuation should export.')
     );
-    assert.deepEqual(engine.postControlCaptureMode(focused, column), {
-      isThread: true,
-      includeThread: true,
-      label: 'Save thread',
-      title: 'Quick-save this full thread to your SourceCapsule library',
-    });
-    assert.deepEqual(engine.postControlCaptureMode(continuation, column), {
-      isThread: false,
-      includeThread: false,
-      label: 'Save post',
-      title: 'Quick-save only this post to your SourceCapsule library',
-    });
+    const focusedMode = engine.postControlCaptureMode(focused, column);
+    assert.equal(focusedMode.isThread, true);
+    assert.equal(focusedMode.includeThread, true);
+    assert.equal(focusedMode.label, 'Save thread');
+    assert.ok(focusedMode.menuItems.some((item) => item.key === 'library-thread'));
+    const continuationMode = engine.postControlCaptureMode(continuation, column);
+    assert.equal(continuationMode.isThread, false);
+    assert.equal(continuationMode.includeThread, false);
+    assert.equal(continuationMode.label, 'Save post');
+    assert.ok(!continuationMode.menuItems.some((item) => item.key === 'library-thread'));
   }
 );
+
+check(
+  'focused post with only one visible tweet still offers Save full thread as an escape hatch',
+  () => {
+    // Regression: on a real thread page, X's virtualization can render only the focused
+    // post at button-render time (follow-ups scroll into view later). Auto-detection
+    // then says isThread=false, but the user KNOWS it's a thread. The menu must still
+    // expose "Save full thread" so the user can force the correct capture; runExport
+    // with includeThread:true scrolls the whole column before building the model.
+    const soloDom = new JSDOM(
+      `<!doctype html><html><body><div data-testid="primaryColumn">
+        <article data-testid="tweet" role="article">
+          <div data-testid="User-Name"><a href="/solo"><span>Solo</span></a><a href="/solo"><span>@solo</span></a></div>
+          <div data-testid="tweetText"><span>First post; the thread continuation hasn't loaded yet.</span></div>
+          <a href="/solo/status/2000000000000000000"><time datetime="2026-07-09T01:00:00Z">1h</time></a>
+          <button data-testid="caret" type="button">...</button>
+        </article>
+      </div></body></html>`,
+      { url: 'https://x.com/solo/status/2000000000000000000' }
+    );
+    const priorWindow = global.window;
+    global.window = soloDom.window;
+    global.document = soloDom.window.document;
+    global.Node = soloDom.window.Node;
+    global.location = soloDom.window.location;
+    global.localStorage = soloDom.window.localStorage;
+    global.getComputedStyle = soloDom.window.getComputedStyle;
+    try {
+      const column = document.querySelector('[data-testid="primaryColumn"]');
+      const focused = column.querySelector('article[data-testid="tweet"]');
+      const mode = engine.postControlCaptureMode(focused, column);
+      // Auto-detection correctly reports a single post at THIS instant...
+      assert.equal(mode.isThread, false);
+      assert.equal(mode.label, 'Save post');
+      // ...but the menu still exposes the escape hatch.
+      assert.ok(
+        mode.menuItems.some((item) => item.key === 'library-thread'),
+        'focused post must always offer Save full thread'
+      );
+    } finally {
+      // Restore the shared thread fixture for later checks.
+      global.window = priorWindow;
+      global.document = priorWindow.document;
+      global.Node = priorWindow.Node;
+      global.location = priorWindow.location;
+      global.localStorage = priorWindow.localStorage;
+      global.getComputedStyle = priorWindow.getComputedStyle;
+    }
+  }
+);
+
+check('home timeline gets visible per-post save controls without opening a post', () => {
+  const homeDom = new JSDOM(
+    `<!doctype html><html><body><div data-testid="primaryColumn">
+      <article data-testid="tweet" role="article">
+        <div data-testid="User-Name"><a href="/roundtable"><span>Roundtable</span></a><a href="/roundtable"><span>@roundtable</span></a></div>
+        <div data-testid="tweetText"><span>Timeline post one.</span></div>
+        <a href="/roundtable/status/101"><time datetime="2026-07-09T01:00:00Z">1h</time></a>
+        <button data-testid="caret" type="button">...</button>
+      </article>
+      <article data-testid="tweet" role="article">
+        <div data-testid="User-Name"><a href="/second"><span>Second</span></a><a href="/second"><span>@second</span></a></div>
+        <div data-testid="tweetText"><span>Timeline post two.</span></div>
+        <a href="/second/status/102"><time datetime="2026-07-09T02:00:00Z">2h</time></a>
+        <button data-testid="caret" type="button">...</button>
+      </article>
+      <article data-testid="tweet" role="article">
+        <div data-testid="User-Name"><a href="/writer"><span>Writer</span></a><a href="/writer"><span>@writer</span></a></div>
+        <a href="/writer/status/103"><time datetime="2026-07-09T03:00:00Z">3h</time></a>
+        <a href="/i/article/103"><span>Long article preview</span></a>
+        <div data-testid="tweetPhoto"><img src="https://pbs.twimg.com/media/ArticleOnly?format=jpg&name=small" alt="Article cover"></div>
+        <button data-testid="caret" type="button">...</button>
+      </article>
+    </div></body></html>`,
+    { url: 'https://x.com/home' }
+  );
+  global.window = homeDom.window;
+  global.document = homeDom.window.document;
+  global.Node = homeDom.window.Node;
+  global.location = homeDom.window.location;
+  global.localStorage = homeDom.window.localStorage;
+  global.getComputedStyle = homeDom.window.getComputedStyle;
+  global.window.confirm = () => false;
+
+  assert.equal(engine.detectPageType(), null);
+  engine.ensureButton();
+  assert.equal(document.querySelector('#sourcecapsule-btn'), null);
+  const controls = Array.from(document.querySelectorAll('.sourcecapsule-post-ctl'));
+  assert.equal(controls.length, 3);
+  assert.ok(controls.every((control) => control.classList.contains('xa-ctl-inline')));
+  assert.deepEqual(
+    controls.map((control) => control.querySelector('.xa-ctl-trigger').textContent),
+    ['Save post', 'Save post', 'Open post first']
+  );
+  const menus = Array.from(document.querySelectorAll('.xa-ctl-menu'));
+  assert.equal(menus.length, 3);
+  const menuLabels = Array.from(menus[0].querySelectorAll('.xa-ctl-item')).map((item) =>
+    item.textContent.trim()
+  );
+  assert.ok(!menuLabels.includes('Save full thread'));
+  assert.ok(menuLabels.includes('Save with note / tags'));
+  controls[0].querySelector('.xa-ctl-options').click();
+  assert.equal(menus[0].hidden, false);
+  assert.match(menus[0].style.left, /px$/);
+  assert.match(menus[0].style.top, /px$/);
+  const riskyTweet = document.querySelectorAll('article[data-testid="tweet"]')[2];
+  assert.match(engine.timelineArticlePreviewReason(riskyTweet), /Article preview/);
+  controls[2].querySelector('.xa-ctl-trigger').click();
+  assert.match(document.getElementById('sourcecapsule-toast').textContent, /Open the post first/);
+});
 
 check('buildModelForPost uses the focused post permalink as sourceUrl', () => {
   assert.equal(model.sourceUrl, STATUS_URL);
@@ -1607,6 +1843,404 @@ check('receipt expands honest incomplete-media details', () => {
   assert.equal(staleToast.classList.contains('show'), false);
   receipt.querySelector('.xa-modal-cancel').click();
   staleToast.remove();
+});
+
+// ---------------------------------------------------------------------------
+// Quoted-post source-URL recovery (the "dead source link" regression: an
+// export shipped 3 quote cards with a "Source URL unavailable" notice because
+// both the DOM anchor AND the pool-based syndication candidate matching failed
+// to resolve their permalinks).
+// ---------------------------------------------------------------------------
+
+check('quotedRefsFromCapturedBody harvests parent -> quoted refs from GraphQL bodies', () => {
+  const body = JSON.stringify({
+    data: {
+      threaded_conversation_with_injections_v2: {
+        instructions: [
+          {
+            entries: [
+              {
+                content: {
+                  itemContent: {
+                    tweet_results: {
+                      result: {
+                        rest_id: '2075268145670209993',
+                        legacy: { quoted_status_id_str: '1234567890000000001' },
+                        quoted_status_result: {
+                          result: {
+                            rest_id: '1234567890000000001',
+                            legacy: { id_str: '1234567890000000001' },
+                            core: {
+                              user_results: {
+                                result: { legacy: { screen_name: 'BrianRoemmele' } },
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+  const refs = engine.quotedRefsFromCapturedBody(body);
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0].parentId, '2075268145670209993');
+  assert.equal(refs[0].quotedId, '1234567890000000001');
+  assert.equal(refs[0].quotedHandle, 'BrianRoemmele');
+  // Non-JSON and refless bodies are ignored quietly.
+  assert.equal(engine.quotedRefsFromCapturedBody('#EXTM3U\nvideo').length, 0);
+  assert.equal(engine.quotedRefsFromCapturedBody('{"data":{"no":true}}').length, 0);
+});
+
+check('quotedRefsFromCapturedBody also accepts the legacy quoted_status.user shape', () => {
+  const body = JSON.stringify({
+    tweets: [
+      {
+        rest_id: '999',
+        legacy: { id_str: '999', quoted_status_id_str: '111' },
+        quoted_status: { user: { screen_name: 'stonk_daddy' } },
+      },
+    ],
+  });
+  const refs = engine.quotedRefsFromCapturedBody(body);
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0].parentId, '999');
+  assert.equal(refs[0].quotedId, '111');
+  assert.equal(refs[0].quotedHandle, 'stonk_daddy');
+});
+
+check(
+  'recoverMissingQuoteSourcesFromCapture patches thread-embedded quotes from captured refs',
+  () => {
+    const captured = new Map([
+      ['2075268145670209993', { quotedId: '1234567890000000001', quotedHandle: 'BrianRoemmele' }],
+      ['3000000000000000002', { quotedId: '5555555555555555555', quotedHandle: 'stonk_daddy' }],
+    ]);
+    const model = {
+      sourceUrl: 'https://x.com/alex_prompter/status/2075268145670209993',
+      blocks: [
+        {
+          kind: 'thread-marker',
+          statusId: '2075268145670209993',
+          sourceUrl: 'https://x.com/alex_prompter/status/2075268145670209993',
+        },
+        { kind: 'paragraph', html: 'Body 1' },
+        {
+          kind: 'quote',
+          author: { handle: '@BrianRoemmele' },
+          sourceUrl: '',
+          blocks: [{ kind: 'paragraph', html: 'quoted content' }],
+        },
+        {
+          kind: 'thread-marker',
+          statusId: '3000000000000000002',
+          sourceUrl: 'https://x.com/alex_prompter/status/3000000000000000002',
+        },
+        { kind: 'paragraph', html: 'Body 2' },
+        {
+          kind: 'quote',
+          author: { handle: '@stonk_daddy' },
+          sourceUrl: '',
+          blocks: [{ kind: 'paragraph', html: 'another quoted' }],
+        },
+      ],
+    };
+    const patched = engine.recoverMissingQuoteSourcesFromCapture(
+      model,
+      (parentId) => captured.get(parentId) || null
+    );
+    assert.equal(patched, 2);
+    const quotes = model.blocks.filter((b) => b.kind === 'quote');
+    assert.equal(quotes[0].sourceUrl, 'https://x.com/BrianRoemmele/status/1234567890000000001');
+    assert.equal(quotes[1].sourceUrl, 'https://x.com/stonk_daddy/status/5555555555555555555');
+  }
+);
+
+check('recoverMissingQuoteSourcesFromCapture handles a single-post model without markers', () => {
+  const model = {
+    sourceUrl: 'https://x.com/a/status/42',
+    blocks: [
+      { kind: 'paragraph', html: 'Main post' },
+      {
+        kind: 'quote',
+        author: { handle: '@ctx' },
+        sourceUrl: '',
+        blocks: [{ kind: 'paragraph', html: 'body' }],
+      },
+    ],
+  };
+  const patched = engine.recoverMissingQuoteSourcesFromCapture(model, (parentId) =>
+    parentId === '42' ? { quotedId: '99', quotedHandle: 'ctx' } : null
+  );
+  assert.equal(patched, 1);
+  assert.equal(model.blocks[1].sourceUrl, 'https://x.com/ctx/status/99');
+});
+
+check('recoverMissingQuoteSourcesFromCapture leaves already-resolved quotes alone', () => {
+  const model = {
+    sourceUrl: 'https://x.com/a/status/1',
+    blocks: [
+      {
+        kind: 'quote',
+        author: { handle: '@x' },
+        sourceUrl: 'https://x.com/x/status/9',
+        blocks: [{ kind: 'paragraph', html: 'body' }],
+      },
+    ],
+  };
+  const patched = engine.recoverMissingQuoteSourcesFromCapture(model, () => ({
+    quotedId: '77',
+    quotedHandle: 'x',
+  }));
+  assert.equal(patched, 0);
+  assert.equal(model.blocks[0].sourceUrl, 'https://x.com/x/status/9');
+});
+
+await checkAsync(
+  'enrichThreadViaSyndication patches quote sourceUrl AND rebuilds card from its own quoted_tweet',
+  async () => {
+    const model = {
+      blocks: [
+        {
+          kind: 'thread-marker',
+          statusId: '2075268145670209993',
+          sourceUrl: 'https://x.com/alex_prompter/status/2075268145670209993',
+        },
+        { kind: 'paragraph', html: 'Post 3 body' },
+        {
+          kind: 'quote',
+          author: { handle: '@BrianRoemmele' },
+          sourceUrl: '',
+          blocks: [{ kind: 'paragraph', html: 'stale DOM-scraped body' }],
+        },
+      ],
+      thread: {
+        capturedPosts: 1,
+        sourcePostIds: ['2075268145670209993'],
+        completeness: 'best-effort',
+      },
+    };
+    await engine.enrichThreadViaSyndication(model, null, async () => ({
+      __typename: 'Tweet',
+      text: 'Post 3 body',
+      quoted_tweet: {
+        id_str: '1234567890000000001',
+        user: { screen_name: 'BrianRoemmele', name: 'Brian Roemmele' },
+        text: 'Grok 4.5 exceeds Claude and ChatGPT in most cases…',
+        created_at: '2026-07-08T18:22:34.000Z',
+      },
+    }));
+    const quote = model.blocks.find((b) => b.kind === 'quote');
+    assert.equal(quote.sourceUrl, 'https://x.com/BrianRoemmele/status/1234567890000000001');
+    // The DOM-scraped body was replaced by authoritative syndication content.
+    const bodyHtml = (quote.blocks.find((b) => b.kind === 'paragraph') || {}).html || '';
+    assert.match(bodyHtml, /Grok 4\.5/);
+    assert.doesNotMatch(bodyHtml, /stale DOM-scraped body/);
+  }
+);
+
+check('quote renderer falls back to author profile when sourceUrl is missing', () => {
+  const model = {
+    type: 'post',
+    title: 'Fallback',
+    author: { name: 'A', handle: '@a' },
+    sourceUrl: 'https://x.com/a/status/1',
+    exportedAt: '2026-07-06T00:00:00Z',
+    blocks: [
+      { kind: 'paragraph', html: 'Body' },
+      {
+        kind: 'quote',
+        author: { name: 'Brian Roemmele', handle: '@BrianRoemmele' },
+        sourceUrl: '',
+        blocks: [{ kind: 'paragraph', html: 'quoted body' }],
+      },
+    ],
+  };
+  const html = engine.assembleHtml(model);
+  assert.doesNotMatch(html, /Source URL unavailable/);
+  assert.match(
+    html,
+    /<a class="xa-quote-link" href="https:\/\/x\.com\/BrianRoemmele"[^>]*>View @BrianRoemmele on X/
+  );
+  assert.match(html, /data-xa-source-fallback="author-profile"/);
+});
+
+check('quote renderer with a real sourceUrl uses it, not the profile fallback', () => {
+  const model = {
+    type: 'post',
+    title: 'Real link',
+    author: { name: 'A', handle: '@a' },
+    sourceUrl: 'https://x.com/a/status/1',
+    exportedAt: '2026-07-06T00:00:00Z',
+    blocks: [
+      {
+        kind: 'quote',
+        author: { name: 'Ctx', handle: '@ctx' },
+        sourceUrl: 'https://x.com/ctx/status/9',
+        blocks: [{ kind: 'paragraph', html: 'body' }],
+      },
+    ],
+  };
+  const html = engine.assembleHtml(model);
+  assert.match(
+    html,
+    /<a class="xa-quote-link" href="https:\/\/x\.com\/ctx\/status\/9"[^>]*>View on X/
+  );
+  assert.doesNotMatch(html, /data-xa-source-fallback="author-profile"/);
+});
+
+// ---------------------------------------------------------------------------
+// Strict export gate: refuse to silently ship broken exports.
+// ---------------------------------------------------------------------------
+
+check('assessExportCompleteness returns clean when everything landed', () => {
+  const model = {
+    type: 'post',
+    sourceUrl: 'https://x.com/a/status/1',
+    blocks: [
+      { kind: 'paragraph', html: 'body' },
+      {
+        kind: 'image',
+        url: 'https://pbs.twimg.com/media/x.jpg',
+        dataUri: 'data:image/png;base64,AA',
+      },
+      {
+        kind: 'video',
+        mode: 'inline',
+        dataUri: 'data:video/mp4;base64,AA',
+        posterDataUri: 'data:image/png;base64,AA',
+      },
+      {
+        kind: 'quote',
+        author: { handle: '@ctx' },
+        sourceUrl: 'https://x.com/ctx/status/9',
+        blocks: [{ kind: 'paragraph', html: 'q' }],
+      },
+    ],
+  };
+  const a = engine.assessExportCompleteness(model);
+  assert.equal(a.verdict, 'clean');
+  assert.equal(a.blockers.length, 0);
+});
+
+check('assessExportCompleteness flags every visible dead-end category', () => {
+  const model = {
+    type: 'post',
+    sourceUrl: 'https://x.com/a/status/1',
+    blocks: [
+      {
+        kind: 'quote',
+        author: { handle: '@BrianRoemmele' },
+        sourceUrl: '',
+        blocks: [{ kind: 'paragraph', html: 'q body' }],
+      },
+      {
+        kind: 'quote',
+        author: { handle: '@deleted' },
+        sourceUrl: 'https://x.com/deleted/status/7',
+        blocks: [],
+      },
+      { kind: 'image', url: 'https://pbs.twimg.com/media/x.jpg' },
+      { kind: 'video', mode: 'poster', _xaMediaId: 'vid1' },
+    ],
+  };
+  const a = engine.assessExportCompleteness(model);
+  assert.equal(a.verdict, 'incomplete');
+  assert.equal(a.counts.quotePermalinkMissing, 1);
+  assert.equal(a.counts.quoteContentMissing, 1);
+  assert.equal(a.counts.imageFetchFailed, 1);
+  assert.equal(a.counts.videoNothingCaptured, 1);
+  assert.equal(a.blockers.length, 4);
+  assert.ok(a.blockers.some((b) => b.handle === '@BrianRoemmele'));
+});
+
+check('assessExportCompleteness respects documented best-effort states', () => {
+  // HLS-only video with a poster still is expected best-effort per AGENTS.md;
+  // a note-recovered quote landed the full text; neither counts as a blocker.
+  const model = {
+    type: 'post',
+    sourceUrl: 'https://x.com/a/status/1',
+    blocks: [
+      {
+        kind: 'video',
+        mode: 'poster',
+        unsupported: true,
+        unsupportedType: 'hls',
+        posterDataUri: 'data:image/png;base64,AA',
+        sourceUrl: 'https://x.com/a/status/1',
+      },
+      {
+        kind: 'quote',
+        author: { handle: '@ctx' },
+        sourceUrl: 'https://x.com/ctx/status/9',
+        noteRecovered: true,
+        blocks: [{ kind: 'paragraph', html: 'full recovered text' }],
+      },
+    ],
+  };
+  const a = engine.assessExportCompleteness(model);
+  assert.equal(a.verdict, 'clean');
+});
+
+check('assessExportCompleteness deduplicates identical blockers across a thread', () => {
+  const model = {
+    type: 'post',
+    blocks: [
+      {
+        kind: 'quote',
+        author: { handle: '@x' },
+        sourceUrl: '',
+        blocks: [{ kind: 'paragraph', html: 'a' }],
+      },
+      {
+        kind: 'quote',
+        author: { handle: '@x' },
+        sourceUrl: '',
+        blocks: [{ kind: 'paragraph', html: 'a' }],
+      },
+    ],
+  };
+  const a = engine.assessExportCompleteness(model);
+  assert.equal(a.blockers.length, 1);
+});
+
+check('buildDiagnosticBundle carries what a bug report needs and NO media bytes', () => {
+  const model = {
+    type: 'post',
+    sourceUrl: 'https://x.com/a/status/1',
+    author: { handle: '@a', avatarDataUri: 'data:image/png;base64,BIGBYTES' },
+    blocks: [
+      { kind: 'paragraph', html: 'body' },
+      {
+        kind: 'image',
+        url: 'https://pbs.twimg.com/media/x.jpg',
+        dataUri: 'data:image/png;base64,MORESTUFF',
+      },
+      {
+        kind: 'quote',
+        author: { handle: '@BrianRoemmele' },
+        sourceUrl: '',
+        blocks: [{ kind: 'paragraph', html: 'q body' }],
+      },
+    ],
+  };
+  const assessment = engine.assessExportCompleteness(model);
+  const bundle = engine.buildDiagnosticBundle(model, assessment);
+  const parsed = JSON.parse(bundle);
+  assert.equal(parsed.verdict, 'incomplete');
+  assert.equal(parsed.counts.quotePermalinkMissing, 1);
+  assert.equal(parsed.modelSourceUrl, 'https://x.com/a/status/1');
+  assert.match(parsed.generator, /SourceCapsule v/);
+  // Must NOT leak media bytes; they should have been stripped to a marker.
+  assert.doesNotMatch(bundle, /MORESTUFF/);
+  assert.doesNotMatch(bundle, /BIGBYTES/);
+  assert.match(bundle, /\[stripped: \d+ bytes\]/);
 });
 
 if (failures) {
