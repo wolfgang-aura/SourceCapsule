@@ -58,6 +58,11 @@ The source file is also the shipped artifact: plain JavaScript, no production bu
   it say Save post" scenario is fixable in one click.
 - **Share Worker previews.** Shared capsules now emit `Content-Length` on GET and HEAD, so
   Slack, Discord, and Twitter link previews render the shared images and pages correctly.
+- **First-try recovery hardening.** Quote-only GraphQL responses are retained, quote cards that
+  never mounted are rebuilt from the parent payload, Article images survive virtualization,
+  DOM-only polls/card previews survive authoritative quote upgrades, and ambiguous video URLs are
+  never attached to a post by guesswork. Media downloads are signature-checked so an HTTP error
+  page cannot masquerade as a captured image.
 
 The product remains local-first. Nothing is uploaded until you explicitly choose
 **Create AI readable link** or **Save locally + create AI link** and confirm the expiry. In the combined flow, the local copy is
