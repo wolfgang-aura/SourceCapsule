@@ -809,6 +809,22 @@ check('buildModelForArticle attributes the article to the post author, not a quo
   assert.ok(!articleModel.author.name.includes('Trumoo'), 'pulled a quote author as the name');
 });
 
+check('article-body image harvest survives virtualization without leaking quote media', () => {
+  engine.resetMediaState();
+  engine.harvestMediaNow();
+  articleDom.window.document.querySelector('img[src*="StandaloneArticleImage"]').remove();
+  const rebuilt = engine.buildModelForArticle();
+  const bodyImages = rebuilt.blocks.filter((block) => block.kind === 'image');
+  assert.ok(
+    bodyImages.some((image) => image.url.includes('StandaloneArticleImage')),
+    'harvested Article image was lost after X removed its DOM node'
+  );
+  assert.ok(
+    !bodyImages.some((image) => image.url.includes('OuterQuoteImage')),
+    'quoted-post media leaked into the Article body harvest'
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Media harvest survives virtualization (the v0.2.5 fix). X recycles off-screen
 // media out of the DOM, so we snapshot it during the scroll. Simulate that here:
