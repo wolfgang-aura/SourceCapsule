@@ -2700,7 +2700,7 @@
     const addCandidate = (kind, node) => {
       if (!node || seenCandidateNodes.has(node)) return;
       seenCandidateNodes.add(node);
-      candidates.push({ kind, node });
+      candidates.push({ kind, node, y: absY(node) });
     };
     if (richRoot) {
       richRoot.querySelectorAll('[data-block="true"]').forEach((node) => {
@@ -2720,11 +2720,25 @@
     findTweetImageEls(root).forEach((node) => addCandidate('image', node));
     pickAll(root, CONFIG.selectors.videoPlayer).forEach((node) => addCandidate('video', node));
     quoteEls.forEach((node) => addCandidate('quote', node));
+    // Article body images do not belong to a tweet id. X can virtualize those
+    // images away after forceLoadMedia observed them, so merge the ownerless
+    // progressive harvest back into the document at its approximate page
+    // position. A currently-mounted copy is harmless: seenImg deduplicates it.
+    for (const item of harvestedMedia.values()) {
+      if (!item.ownerStatusId) {
+        candidates.push({ kind: 'harvested-image', node: null, item, y: item.y });
+      }
+    }
 
-    candidates.sort((a, b) => compareDocumentOrder(a.node, b.node));
+    candidates.sort((a, b) => {
+      const yDelta = (Number(a.y) || 0) - (Number(b.y) || 0);
+      if (yDelta) return yDelta;
+      if (a.node && b.node) return compareDocumentOrder(a.node, b.node);
+      return a.node ? -1 : b.node ? 1 : 0;
+    });
     for (let i = 0; i < candidates.length; i++) {
-      const { kind, node } = candidates[i];
-      if (kind !== 'quote' && insideQuote(node)) continue;
+      const { kind, node, item } = candidates[i];
+      if (kind !== 'quote' && node && insideQuote(node)) continue;
 
       if (kind === 'text') {
         const listType = articleListType(node);
@@ -2756,6 +2770,18 @@
             url,
             alt: node.alt || '',
             ...imageDimensions(node),
+            sourceUrl: location.href.split('?')[0],
+          });
+        }
+      } else if (kind === 'harvested-image') {
+        if (item.url && !seenImg.has(item.url)) {
+          seenImg.add(item.url);
+          blocks.push({
+            kind: 'image',
+            url: item.url,
+            alt: item.alt || '',
+            width: item.width,
+            height: item.height,
             sourceUrl: location.href.split('?')[0],
           });
         }
@@ -8468,7 +8494,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           await forceLoadMedia(
             container,
             (pct) => showToast(`Loading thread and media... ${pct}%`, { sticky: true }),
-            { fromTop: type === 'post' && includeThread }
+            { fromTop: type === 'article' || (type === 'post' && includeThread) }
           );
         }
       }
