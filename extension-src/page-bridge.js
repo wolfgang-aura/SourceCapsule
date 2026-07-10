@@ -11,7 +11,7 @@
 
   let sent = 0;
   const bodyPattern =
-    /video_info|variants|video\.twimg\.com|amplify_video|ext_tw_video|tweet_video|note_tweet/i;
+    /video_info|variants|video\.twimg\.com|amplify_video|ext_tw_video|tweet_video|note_tweet|quoted_status/i;
   const urlPattern =
     /\/graphql\/|\/i\/api\/|TweetDetail|TweetResult|Article|UserTweets|HomeTimeline/i;
   const shouldRead = (url, contentType) =>

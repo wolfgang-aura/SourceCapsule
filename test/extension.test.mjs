@@ -90,7 +90,34 @@ const bridgeDom = new JSDOM('<!doctype html><title>Bridge test</title>', {
 });
 const bridgeHandle = { kind: 'directory', name: 'Bridge Folder' };
 bridgeDom.window.showDirectoryPicker = async () => bridgeHandle;
+const quoteOnlyBody = JSON.stringify({
+  rest_id: '100',
+  legacy: { quoted_status_id_str: '200' },
+  quoted_status_result: {
+    result: {
+      rest_id: '200',
+      core: {
+        user_results: { result: { legacy: { screen_name: 'quoted_user' } } },
+      },
+    },
+  },
+});
+bridgeDom.window.fetch = async (url) => ({
+  url,
+  headers: { get: () => 'application/json' },
+  clone: () => ({ text: async () => quoteOnlyBody }),
+});
 bridgeDom.window.eval(fs.readFileSync(path.join(root, 'extension-src', 'page-bridge.js'), 'utf8'));
+const quoteCaptureResult = new Promise((resolve) => {
+  bridgeDom.window.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'response') resolve(event.data);
+  });
+});
+await bridgeDom.window.fetch('https://x.com/i/api/graphql/test/TweetDetail');
+const quoteCapture = await quoteCaptureResult;
+assert.equal(quoteCapture.body, quoteOnlyBody);
+assert.match(quoteCapture.body, /quoted_status_id_str/);
+assert.equal(engine.networkCapturePatterns().body.test(quoteOnlyBody), true);
 const bridgeResult = new Promise((resolve) => {
   bridgeDom.window.addEventListener('message', (event) => {
     if (event.data && event.data.source === 'SourceCapsule:folder-picker') resolve(event.data);

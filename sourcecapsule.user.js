@@ -8888,7 +8888,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 
   function networkCapturePatterns() {
     return {
-      body: /video_info|variants|video\.twimg\.com|amplify_video|ext_tw_video|tweet_video|note_tweet/i,
+      // Keep this aligned with both MAIN-world bridge implementations. Quote
+      // refs are useful even when the post contains no video or long-form text;
+      // filtering those ordinary GraphQL responses out here defeats the
+      // capturedQuotedRefs recovery layer entirely.
+      body: /video_info|variants|video\.twimg\.com|amplify_video|ext_tw_video|tweet_video|note_tweet|quoted_status/i,
       url: /\/graphql\/|\/i\/api\/|TweetDetail|TweetResult|Article|UserTweets|HomeTimeline/i,
       contentType: /json|javascript|text/i,
     };
@@ -9019,7 +9023,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const MAX_MESSAGES = 200;
       let sent = 0;
       const bodyPattern = new RegExp(
-        'video_info|variants|video\\.twimg\\.com|amplify_video|ext_tw_video|tweet_video|note_tweet',
+        'video_info|variants|video\\.twimg\\.com|amplify_video|ext_tw_video|tweet_video|note_tweet|quoted_status',
         'i'
       );
       const urlPattern = new RegExp(
@@ -9302,6 +9306,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       videoCandidateMatchesBlock,
       handleNetworkCapturePayload,
       validateNetworkCapturePayload,
+      networkCapturePatterns,
       ensureButton,
       // Long-form (note) full-text recovery from passively captured GraphQL payloads.
       noteTweetsFromCapturedBody,
