@@ -23,17 +23,29 @@ npm run format:check # prettier --check .  (npm run format to fix)
 CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/PR to
 `main`. There is no automated browser test — real X testing is manual (see CONTRIBUTING.md).
 
-## Architecture (4 lines)
+## Architecture (5 lines)
 
 1. **Fragile layer**: reads X's DOM → a plain-object _model_. ALL X selectors live in the
    `CONFIG` block at the top of `sourcecapsule.user.js`.
-2. **Syndication layer**: each embedded/quoted tweet is re-fetched by id from
+2. **Passive capture layer**: X's own web app fetches TweetDetail / TweetResultByRestId
+   GraphQL responses to render the page; a MAIN-world bridge tees those bodies to
+   `handleNetworkCapturePayload`, which harvests full long-form ("note") text into
+   `capturedNoteTweets` and `<parentId, quotedId, quotedHandle>` triples into
+   `capturedQuotedRefs`. Free source of truth — no extra network call, and it survives
+   whatever the DOM later virtualizes away.
+3. **Syndication layer**: each embedded/quoted tweet is re-fetched by id from
    `cdn.syndication.twimg.com/tweet-result` and its quote card is rebuilt from that
-   authoritative data (`enrichQuotesViaSyndication` → `syndicationToQuoteBlock`). This
-   bypasses the DOM's virtualization/attribution mess for quote content.
-3. **Stable layer**: `GM_xmlhttpRequest` fetch (bypasses CORS) → base64 → `assembleHtml()` /
-   `renderLlmMarkdown()` → download. Touches only the model, never the DOM.
-4. The model is the contract, so X's frequent DOM churn rarely hits the engine.
+   authoritative data (`enrichQuotesViaSyndication` → `syndicationToQuoteBlock`). Runs
+   AFTER capture-based recovery so most quote permalinks are already resolved and no
+   round-trip is needed.
+4. **Ship-blocker layer** (strict export): `assessExportCompleteness(model)` walks the
+   fully-recovered model and returns any dead-end the reader would see (missing quote
+   permalinks, uncaptured quote content, failed images, videos with no bytes or poster).
+   When strict mode is on (default), the download is blocked with a confirm modal and a
+   `buildDiagnosticBundle()` "Copy diagnostic" button.
+5. **Stable layer**: `GM_xmlhttpRequest` fetch (bypasses CORS) → base64 → `assembleHtml()`
+   / `renderLlmMarkdown()` → download. Touches only the model, never the DOM. The model
+   is the contract, so X's frequent DOM churn rarely hits the engine.
 
 ## Export modes
 
@@ -50,11 +62,17 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
 - The `.llm.md` is honest about itself: a `## What This File Is` header states it is text +
   metadata; in bundle mode it references the real `media/...` files (`collectBundleMediaFiles` →
   `pathById` → `renderLlmMarkdown(..., { mediaFiles })`); it never names a file that is not on disk.
-- Two prefs (`layout` date|flat, `contents` full|lean) live in `localStorage`; toggled via
-  userscript-manager **menu commands** (`registerSettingsMenu`), not an in-app panel.
+- Three prefs (`layout` date|flat, `contents` full|lean, `strictExport` bool) live in
+  `localStorage`. Toggled via userscript-manager **menu commands**
+  (`registerSettingsMenu`) OR the MV3 popup — no in-app panel. `strictExport` defaults on;
+  when on, the ship-blocker layer runs before assembly.
 - Status-page quick save captures the visible same-author thread by default. It progressively
   scrolls from the top and keeps cloned tweet nodes so X virtualization does not erase earlier
-  posts. Capture remains best-effort and is labelled as such.
+  posts. Capture remains best-effort and is labelled as such. Every focused-post button also
+  exposes **Save full thread** in its drop-down (`postControlCaptureMode` returns
+  `THREAD_EXPORT_TYPES` whenever `isFocusedPost=true`, regardless of `isThread`), as an
+  escape hatch when X's virtualization or a false-positive thread-boundary heading defeats
+  auto-detection at button-render time.
 - **Share with AI** uploads only after confirmation to the configured share Worker, with a default
   7-day expiry (1/30 days optional), a 25 MB cap, and no raw video. The Cloudflare Worker + R2
   implementation lives in `share-worker/`.

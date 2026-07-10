@@ -6,6 +6,55 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-10
+
+### Added
+
+- **Strict export mode (on by default).** Every export now runs through a completeness gate
+  after all recovery layers finish. If any embedded post would ship without a canonical
+  permalink, any quoted post's content couldn't be captured, or any image or video would
+  render as an "unavailable" placeholder, the download is blocked with a modal that lists
+  exactly what's broken, offers a **Copy diagnostic bundle** button (self-contained JSON
+  with URL, verdict, counts, and a media-stripped model skeleton), and requires **Ship it
+  anyway** or **Cancel export** to proceed. The pref is user-toggleable via the
+  Tampermonkey/Violentmonkey menu and the MV3 extension popup.
+- **Passive GraphQL quoted-post ref capture.** The network-capture layer now also harvests
+  `<parentId, quotedId, quotedHandle>` triples from every TweetDetail /
+  TweetResultByRestId response X's own web app downloads. When the DOM later strips a
+  quote's `/status/` anchor (routine after virtualization), the exporter reconstructs the
+  permalink locally, without a syndication round-trip.
+- **Position-based quote-source recovery** that walks thread markers and pairs each
+  segment's unresolved quote with the corresponding captured ref, closing the
+  handle-collision edge case that broke the pool-based syndication matcher.
+- **Thread-menu escape hatch.** Every focused-post button (any URL ending in
+  `/status/{id}`) now exposes **Save full thread** in its drop-down menu, regardless of
+  whether auto-detection recognized the thread. Choosing it forces a full-column scroll
+  so late-loading same-author replies are always captured.
+
+### Changed
+
+- Quoted posts without a resolvable canonical permalink link to the author's X profile
+  (`https://x.com/{handle}`) instead of showing a "Source URL unavailable" notice; the
+  underlying `data-xa-source-fallback="author-profile"` attribute lets tooling and future
+  strict-mode rules distinguish the fallback from the exact-match case.
+- `enrichThreadViaSyndication` now uses each thread post's own `quoted_tweet` payload to
+  patch missing quote source URLs AND rebuild the card from authoritative data - saving
+  one syndication round-trip per quote.
+- Per-post control cache key reflects the rendered menu array (thread vs post) so
+  extension reloads pick up new menu items without a full tab reload.
+- The MV3 popup exposes the **Strict export (block incomplete)** toggle alongside layout
+  and floating-button preferences.
+- All release surfaces now report version `1.4.0` consistently.
+
+### Fixed
+
+- Share Worker now sets `Content-Length` on GET and HEAD responses (R2's
+  `writeHttpMetadata` omits it), so Slack, Discord, and Twitter link-preview crawlers
+  can size and render shared images and content.
+- Three-layer quote-source recovery (captured refs, syndication pool, per-thread-post
+  syndication) eliminates the "Alex Prompter" regression where thread exports shipped
+  quote cards with dead `Source URL unavailable` notices instead of working permalinks.
+
 ## [1.3.0] - 2026-07-07
 
 ### Added
