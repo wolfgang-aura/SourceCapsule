@@ -35,38 +35,48 @@ copy-paste mangling, no dead links when the thread disappears.
 
 The source file is also the shipped artifact: plain JavaScript, no production build step.
 
-## What is new in v1.3
+## What is new in v1.4
 
-- **Trustworthy capture receipts.** Every save ends with durable post, poll, image, video, poster,
-  and incomplete-media counts, plus expandable details when anything needs attention.
-- **Poll preservation.** Pre-vote and post-vote polls now retain their choices and, when available,
-  percentages, vote totals, and status in HTML, Markdown, and manifest data.
-- **Thread-aware controls.** A verified same-author root says **Save thread** and captures the full
-  sequence; continuation and reply controls say **Save post** and capture only that post.
-- **Usable Manifest V3 extension.** The toolbar popup exposes Full/Lean library contents, layout,
-  folder, and floating-button preferences without requiring userscript-manager menus.
-- **More reliable extension capture.** A static page bridge recovers long-form Note and video data,
-  while a bounded media fallback prevents a failed extension request bridge from losing every
-  image in an otherwise valid archive.
-- **Store-ready production package.** Automated checks enforce aligned versions, the exact package
-  file set, production-only hosts, and extension bridge behavior.
+- **Strict export mode (on by default).** After every recovery layer runs, SourceCapsule walks
+  the finished model and blocks the download if the reader would see a dead-end: a quoted post
+  with no canonical permalink, a quoted post whose content couldn't be captured, an image that
+  never inlined, or a video with neither bytes nor a poster. The block modal lists exactly what
+  is broken, offers a **Copy diagnostic bundle** button (self-contained JSON with URL, verdict,
+  counts, and a media-stripped model skeleton), and requires **Ship it anyway** or **Cancel
+  export** to proceed. Toggle it from the userscript-manager menu or the extension popup.
+- **Three-layer quote-source recovery.** The exporter now catches a quoted tweet's canonical
+  permalink even when X's DOM drops the anchor: (a) parent→quoted ref triples harvested
+  passively from the GraphQL responses X's own web app already downloaded, (b) syndication
+  pool matching for the leftovers, (c) per-thread-post syndication that reuses the fetched
+  `quoted_tweet` payload to patch source URLs and rebuild the card in one round-trip.
+- **Author-profile link fallback.** In the rare case where every recovery layer misses, a
+  quoted card links to the author's X profile instead of showing "Source URL unavailable" —
+  never a dead-end for the reader.
+- **Thread-menu escape hatch.** Every focused-post button now exposes **Save full thread** in
+  its drop-down, regardless of auto-detection. Choosing it forces a full-column scroll so
+  late-loading same-author replies are always captured — the "I know it's a thread, why does
+  it say Save post" scenario is fixable in one click.
+- **Share Worker previews.** Shared capsules now emit `Content-Length` on GET and HEAD, so
+  Slack, Discord, and Twitter link previews render the shared images and pages correctly.
 
-The product remains local-first. Nothing is uploaded until you explicitly choose **Share with AI**
-or **Save locally + share with AI** and confirm the expiry. In the combined flow, the local copy is
+The product remains local-first. Nothing is uploaded until you explicitly choose
+**Create AI readable link** or **Save locally + create AI link** and confirm the expiry. In the combined flow, the local copy is
 completed first, so an upload failure cannot take it away. Shared capsules exclude raw video, are
 capped at 25 MB, and retain source links when media cannot be included.
 
 ## Use it
 
-On an X post or Article:
+On the X timeline, a status page, or an Article:
 
-- Click **Save thread** or **Save article** for the default quick-save flow.
+- Click **Save post**, **Save thread**, or **Save article** for the default quick-save flow.
+- If a timeline card says **Open post first**, open the post and save from the status/Article page;
+  the feed preview does not contain enough content for a complete archive.
 - Click **...** beside it for:
   - Save this post only
   - Save with note and tags
   - Copy clean Markdown
-  - Share with AI
-  - Save locally + share with AI
+  - Create AI readable link
+  - Save locally + create AI link
   - Download HTML + Markdown
 
 The first library save asks you to choose a root folder. Desktop Chromium writes folders directly.
@@ -79,6 +89,7 @@ Browsers without the File System Access API receive a zip with the same structur
     <handle>-<status-id>/
       <handle>-<status-id>.html
       <handle>-<status-id>.llm.md
+      AI_LINK.txt              # only after an AI readable link is created
       media/
       README.txt
 ```
@@ -87,7 +98,7 @@ Thread capture is deliberately honest: it includes same-author posts visible dur
 scroll, marks post boundaries, and records `best-effort` completeness in the manifest. X can
 virtualize or withhold posts, so this is not yet a guarantee of every reply in very long threads.
 
-## Share with AI
+## AI readable links
 
 The userscript ships pointing at the hosted share service
 (`https://sourcecapsule-share.wolfgang-aura.workers.dev`): a Cloudflare Worker + R2 backend with
@@ -95,10 +106,15 @@ per-IP rate limiting on link creation, a 25 MB package cap, and 1/7/30-day expir
 cleanup. To try it:
 
 1. Open a post on x.com and click **...** beside the SourceCapsule button.
-2. Click **Share with AI**.
+2. Click **Create AI readable link**.
 3. Keep **7 days**, or choose 1/30 days.
 4. Confirm. The resulting URL is copied to your clipboard.
 5. Paste the URL into a new tab. Add `.md` to the capsule URL for the clean Markdown endpoint.
+
+Successful links are remembered in this browser under **SourceCapsule: Recent AI readable links**.
+Expired links remain visible but greyed out. When a link is created from a local-save receipt or the
+combined save-and-link flow, SourceCapsule also writes `AI_LINK.txt` beside the saved Markdown so the
+same link can be recovered from the library folder.
 
 ### Develop against a local share service
 
@@ -134,7 +150,7 @@ Then in Chrome:
 4. Choose
    `C:\Users\cheon\Desktop\Projects\eXportArticle\dist\sourcecapsule-extension`.
 5. Disable the SourceCapsule userscript in Tampermonkey for x.com to avoid duplicate buttons.
-6. Refresh a status page and test quick save, this-post-only, copy Markdown, and Share with AI.
+6. Refresh a status page and test quick save, this-post-only, copy Markdown, and AI readable links.
 
 This package is experimental. It reuses the tested userscript engine through a thin compatibility
 layer; it is not ready for Chrome Web Store submission until live-X testing passes.
@@ -196,7 +212,7 @@ and extension packaging. It does not replace manual testing against X's live DOM
 Do not share sensitive posts through a public deployment until authentication and abuse controls
 exist. “Unguessable” is useful access control for v1 testing, not a replacement for user accounts.
 
-## Deliberately out of scope for v1.3
+## Deliberately out of scope for v1.4
 
 - AI summaries, chat, OCR, transcripts, or media descriptions
 - Bookmark scraping and bulk export
