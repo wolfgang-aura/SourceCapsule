@@ -95,6 +95,10 @@
       // "Show more" link X renders on long-form (note) posts in timeline views;
       // its presence means the visible text is only a preview.
       showMore: ['[data-testid="tweet-text-show-more-link"]'],
+      // X's inline dead-end box for a quoted post that is itself gone on X
+      // (deleted, banned/suspended, or restricted account): "This Post is
+      // unavailable." etc. Nothing is capturable, but the archive must say so.
+      quoteTombstone: ['[data-testid="tombstone"]'],
       // Poll containers and observed fields. Results may be hidden until the poll closes;
       // extraction records only text/ARIA values X actually rendered.
       poll: [
@@ -2442,6 +2446,20 @@
       });
     });
 
+    // A tombstone where the quote card would be means the quoted post is gone
+    // on X itself (deleted, banned, or restricted account). There is nothing to
+    // capture - but the archive must SAY that instead of silently omitting the
+    // reference the post text points at. Never a strict-gate blocker.
+    pickAllMatchesIncludingRoot(tweetEl, CONFIG.selectors.quoteTombstone)
+      .filter((el) => !quoteEls.some((quoteEl) => quoteEl.contains(el)))
+      .forEach((el) => {
+        blocks.push({
+          kind: 'quote-tombstone',
+          notice: elementTextPreview(el, 200),
+          sourceUrl,
+        });
+      });
+
     return { author: extractAuthor(tweetEl), blocks, textTruncated };
   }
 
@@ -3417,6 +3435,10 @@
         }</p>`;
       case 'note-recovered':
         return `<p class="xa-note-recovered" data-xa-note-recovered="1">&#10003; Long-form post &mdash; the full text above was recovered from data X delivered to this browser while the page was open.</p>`;
+      case 'quote-tombstone':
+        return `<article class="xa-missing xa-quote-missing" data-xa-missing-type="quoted-post-tombstone"><strong>Quoted post unavailable on X</strong><span>X showed: &ldquo;${escapeHtml(
+          b.notice || 'This Post is unavailable.'
+        )}&rdquo;</span><span>The quoted post was already gone on X at capture time (deleted, suspended, or restricted account) &mdash; there was nothing to capture.</span></article>`;
       case 'code':
         return `<pre class="xa-code"><code>${escapeHtml(b.text)}</code></pre>`;
       case 'blockquote':
@@ -3544,6 +3566,7 @@
       pollBlocks: [],
       recoveredNotes: 0,
       quoteCards: 0,
+      quoteTombstones: 0,
       renderedTweetCards: 0,
       images: 0,
       videos: 0,
@@ -3601,6 +3624,15 @@
           if (b.sourceUrl) stats.sourceLinks.add(b.sourceUrl);
         } else if (b.kind === 'note-recovered') {
           stats.recoveredNotes += 1;
+        } else if (b.kind === 'quote-tombstone') {
+          // Informational, never missing/incomplete: the quoted post was gone on
+          // X itself, so "complete" stays true - but the reader is told why.
+          stats.quoteTombstones += 1;
+          stats.warnings.push(
+            `A quoted post was already unavailable on X at capture time (${
+              b.notice || 'This Post is unavailable.'
+            }). Nothing was capturable.`
+          );
         } else if (b.kind === 'image') {
           stats.images += 1;
           markMediaUrl(b.url);
@@ -4031,6 +4063,7 @@
     return `<details class="xa-capture"><summary>Capture summary</summary><dl>${[
       row('Main text', stats.mainTextCaptured ? 'Captured' : 'Not detected'),
       row('Embedded posts', stats.quoteCards),
+      ...(stats.quoteTombstones ? [row('Quoted posts gone on X', stats.quoteTombstones)] : []),
       row('Polls', stats.polls),
       row('Images', stats.images),
       row('Videos found', stats.videos),
@@ -4472,6 +4505,12 @@
           pollLines.push('- Results were unavailable at capture time; no values were inferred.');
         if (b.sourceUrl) pollLines.push(`- Source: ${b.sourceUrl}`);
         lines.push(pollLines.join('\n'));
+      } else if (b.kind === 'quote-tombstone') {
+        lines.push(
+          `Note: This post embeds a quoted post that was ALREADY unavailable on X at capture time (deleted, suspended, or restricted account). X showed: "${markdownLineText(
+            b.notice || 'This Post is unavailable.'
+          )}" No quoted content exists to include; this is not a capture failure.`
+        );
       } else if (b.kind === 'truncation-notice') {
         lines.push(
           'Warning: This is a long-form post and only its preview text was available at export time. The full text is NOT included; open the post source URL above to read it in full.'
@@ -6178,9 +6217,17 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       savedLocation
         ? `<p>Saved to</p><div class="xa-receipt-location">${escapeHtml(savedLocation)}</div>`
         : ''
-    }<dl class="xa-receipt-grid"><dt>Posts captured</dt><dd>${escapeHtml(posts)}</dd><dt>Polls captured</dt><dd>${stats.polls}</dd><dt>Images</dt><dd>${imagesCaptured} captured · ${imagesMissing} missing</dd><dt>Videos preserved offline</dt><dd>${savedOfflineVideos}</dd><dt>Video posters captured</dt><dd>${stats.videoPostersCaptured}</dd><dt>Incomplete media</dt><dd>${stats.incompleteMedia}</dd><dt>Recovered long-form Notes</dt><dd>${stats.recoveredNotes}</dd></dl><p class="xa-receipt-status ${complete ? '' : 'warning'}">${
+    }<dl class="xa-receipt-grid"><dt>Posts captured</dt><dd>${escapeHtml(posts)}</dd><dt>Polls captured</dt><dd>${stats.polls}</dd><dt>Images</dt><dd>${imagesCaptured} captured · ${imagesMissing} missing</dd><dt>Videos preserved offline</dt><dd>${savedOfflineVideos}</dd><dt>Video posters captured</dt><dd>${stats.videoPostersCaptured}</dd><dt>Incomplete media</dt><dd>${stats.incompleteMedia}</dd><dt>Recovered long-form Notes</dt><dd>${stats.recoveredNotes}</dd>${
+      stats.quoteTombstones
+        ? `<dt>Quoted posts gone on X</dt><dd>${stats.quoteTombstones}</dd>`
+        : ''
+    }</dl><p class="xa-receipt-status ${complete ? '' : 'warning'}">${
       complete
-        ? 'Complete — no missing media detected'
+        ? `Complete — no missing media detected${
+            stats.quoteTombstones
+              ? `; ${stats.quoteTombstones} quoted post(s) already gone on X`
+              : ''
+          }`
         : `${stats.missingMedia} missing and ${stats.incompleteMedia} incomplete item(s)`
     }</p><details class="xa-receipt-details" ${complete ? '' : 'open'}><summary>Capture details</summary><ul>${
       stats.warnings.length
