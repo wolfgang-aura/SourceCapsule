@@ -227,6 +227,10 @@ const debugJson = JSON.parse(
 const markdown = engine.renderLlmMarkdown(sampleModel, '', {
   companionHtmlFilename: 'sample-export.html',
 });
+const markdownZipPair = engine.renderLlmMarkdown(sampleModel, '', {
+  companionHtmlFilename: 'sample-export.html',
+  companionArchiveFilename: 'sample-export.zip',
+});
 const markdownMdOnly = engine.renderLlmMarkdown(sampleModel);
 const bundle = engine.collectBundleMediaFiles(sampleModel);
 const markdownBundle = engine.renderLlmMarkdown(sampleModel, '', { mediaFiles: bundle.pathById });
@@ -475,6 +479,10 @@ check('llm.md is honest about what it does and does not contain', () => {
     )
   );
   assert.ok(!markdown.includes('archive.html'), 'must not reference a nonexistent archive.html');
+  assert.ok(
+    markdownZipPair.includes('packaged together with this markdown inside sample-export.zip')
+  );
+  assert.ok(!markdownZipPair.includes('downloaded alongside this markdown'));
   assert.ok(
     markdown.includes(
       'Bytes location: embedded in companion file sample-export.html (not in this markdown)'

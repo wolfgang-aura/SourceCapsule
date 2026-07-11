@@ -4825,12 +4825,14 @@
   // captured in memory but never written to any file the reader keeps, so the markdown must say so
   // honestly instead of pointing at a companion that does not exist.
   let llmCompanionHtml = '';
+  let llmCompanionArchive = '';
   // Set per render for the "Save to library" bundle: Map<mediaId, "media/...">. When present, the
   // markdown references the real sidecar files. Precedence: mediaFiles > companionHtmlFilename > md.
   let llmMediaFiles = null;
 
   function renderLlmMarkdown(model, debugJson = '', options = {}) {
     llmCompanionHtml = options.companionHtmlFilename || '';
+    llmCompanionArchive = options.companionArchiveFilename || '';
     llmMediaFiles = options.mediaFiles instanceof Map ? options.mediaFiles : null;
     prepareArchiveModel(model);
     assignLlmQuoteNumbers(model);
@@ -4887,7 +4889,9 @@
       : llmMediaFiles
         ? 'The images and video poster frames are included as separate files in the media/ folder next to this markdown. Attach them to your LLM together with this file. Full videos are NOT included (an LLM cannot watch them); each video provides its poster frame and source link instead.'
         : llmCompanionHtml
-          ? `The media bytes are embedded (base64) inside the companion file ${llmCompanionHtml}, downloaded alongside this markdown. If you also have that file, the media is available there; if you only have this markdown, it is not.`
+          ? llmCompanionArchive
+            ? `The media bytes are embedded (base64) inside the companion file ${llmCompanionHtml}, packaged together with this markdown inside ${llmCompanionArchive}. Extract both files before moving or sharing them so the pair stays together.`
+            : `The media bytes are embedded (base64) inside the companion file ${llmCompanionHtml}, downloaded alongside this markdown. If you also have that file, the media is available there; if you only have this markdown, it is not.`
           : 'This was a Markdown-only export, so the media bytes were not saved to any file. Only the metadata and the original source URLs below remain; use those URLs to retrieve the media from the source.';
     lines.push(
       'Capture note: This file preserves content visible to the logged-in user at export time. It may not include unavailable, private, deleted, failed, or unloaded content.',
@@ -8161,7 +8165,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     { key: 'share', label: 'Create AI readable link' },
     { key: 'library-share', label: 'Save locally + create AI link' },
     { divider: true },
-    { key: 'both', label: 'Download HTML + Markdown' },
+    { key: 'both', label: 'Download ZIP (HTML + Markdown)' },
   ];
   const POST_EXPORT_TYPES = [
     { key: 'library-note', label: 'Save with note / tags' },
@@ -8170,7 +8174,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     { key: 'share', label: 'Create AI readable link' },
     { key: 'library-share', label: 'Save locally + create AI link' },
     { divider: true },
-    { key: 'both', label: 'Download HTML + Markdown' },
+    { key: 'both', label: 'Download ZIP (HTML + Markdown)' },
   ];
   const THREAD_EXPORT_TYPES = [
     { key: 'library-thread', label: 'Save full thread' },
@@ -8941,25 +8945,53 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const htmlFilename = `${basename}.html`;
       const saved = [];
       let receiptMarkdown = '';
-      if (outputType === 'html' || outputType === 'both') {
+      if (outputType === 'both') {
         const html = assembleHtml(model, debugJson);
-        downloadHtml(htmlFilename, html);
-        saved.push(htmlFilename);
-        log('html', htmlFilename, humanBytes(html.length));
-      }
-      if (outputType === 'md' || outputType === 'both') {
-        // Only name the companion when the HTML is actually being saved in this same export;
-        // a Markdown-only export has no companion on disk, so the markdown must not claim one.
-        const companionHtmlFilename = outputType === 'both' ? htmlFilename : '';
-        const markdown = renderLlmMarkdown(model, debugJson, { companionHtmlFilename });
-        receiptMarkdown = markdown;
+        const zipFilename = `${basename}.zip`;
         const markdownFilename = `${basename}.llm.md`;
+        const markdown = renderLlmMarkdown(model, debugJson, {
+          companionHtmlFilename: htmlFilename,
+          companionArchiveFilename: zipFilename,
+        });
+        receiptMarkdown = markdown;
         downloadBlob(
-          markdownFilename,
-          new Blob([markdown], { type: 'text/markdown;charset=utf-8' })
+          zipFilename,
+          new Blob(
+            [
+              buildZip([
+                { name: htmlFilename, bytes: new TextEncoder().encode(html) },
+                { name: markdownFilename, bytes: new TextEncoder().encode(markdown) },
+              ]),
+            ],
+            { type: 'application/zip' }
+          )
         );
-        saved.push(markdownFilename);
-        log('markdown', markdownFilename, humanBytes(markdown.length));
+        saved.push(zipFilename);
+        log(
+          'zip',
+          zipFilename,
+          `(${htmlFilename} + ${markdownFilename})`,
+          humanBytes(html.length + markdown.length)
+        );
+      } else {
+        if (outputType === 'html') {
+          const html = assembleHtml(model, debugJson);
+          downloadHtml(htmlFilename, html);
+          saved.push(htmlFilename);
+          log('html', htmlFilename, humanBytes(html.length));
+        }
+        if (outputType === 'md') {
+          // A Markdown-only export has no companion on disk, so it must not claim one.
+          const markdown = renderLlmMarkdown(model, debugJson);
+          receiptMarkdown = markdown;
+          const markdownFilename = `${basename}.llm.md`;
+          downloadBlob(
+            markdownFilename,
+            new Blob([markdown], { type: 'text/markdown;charset=utf-8' })
+          );
+          saved.push(markdownFilename);
+          log('markdown', markdownFilename, humanBytes(markdown.length));
+        }
       }
       if (!receiptMarkdown) receiptMarkdown = renderLlmMarkdown(model, debugJson);
       showCaptureReceipt({
