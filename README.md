@@ -82,7 +82,7 @@ On the X timeline, a status page, or an Article:
   - Copy clean Markdown
   - Create AI readable link
   - Save locally + create AI link
-  - Download HTML + Markdown
+  - Download ZIP (HTML + Markdown)
 
 The first library save asks you to choose a root folder. Desktop Chromium writes folders directly.
 Browsers without the File System Access API receive a zip with the same structure.
