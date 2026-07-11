@@ -3382,9 +3382,11 @@
    * For the "Save to library" bundle: turn captured media into standalone files. Images become
    * `media/<id>.<ext>`; videos contribute only their poster still as `media/<id>.poster.<ext>`
    * (raw video bytes are intentionally never bundled). Missing/failed media is skipped (it stays
-   * listed as missing in the markdown). Requires the model to be prepared (media ids assigned).
+   * listed as missing in the markdown). Preparation happens here so every caller - including a
+   * share-only export - gets the same media ids and files as a local library export.
    */
   function collectBundleMediaFiles(model) {
+    prepareArchiveModel(model);
     const files = [];
     const pathById = new Map();
     const add = (id, dataUri, suffix) => {
