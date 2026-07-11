@@ -64,6 +64,8 @@ function handleMessage(message, _sender, sendResponse) {
     method: request.method || 'GET',
     headers: request.headers || {},
     body,
+    referrer: request.referrer,
+    referrerPolicy: request.referrerPolicy,
     signal: controller.signal,
   })
     .then(async (response) => {
