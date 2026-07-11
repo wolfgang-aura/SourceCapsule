@@ -10,6 +10,7 @@ npm-debug.log*
 Thumbs.db
 .idea/
 .vscode/
+.claude/
 
 # Local exports produced while testing the userscript
 *.export.html
@@ -18,11 +19,18 @@ dist/
 share-worker/.wrangler/
 probe-results/
 .env.local
+sourcecapsule-extension*.zip
 
 # Local cross-session working notes (kept on-machine, not published)
 SESSION_HANDOFF.md
 KEEP_GOING_REPORT.md
+CLAUDE.md
 
 # Local marketing / promo drafts (kept on-machine, not published)
 launch-content.md
 demo-video-guide.md
+docs/live-browser-test-report-*.md
+docs/mobile-capture-v1.md
+docs/v*-launch-*.md
+docs/v*-one-shot-implementation.md
+docs/v*-manual-test-checklist.md

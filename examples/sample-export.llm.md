@@ -2,7 +2,7 @@
 
 Source: https://x.com/ada/article/12345
 Exported at: 2026-06-25 10:00:00 UTC
-Exporter: SourceCapsule v1.4.0
+Exporter: SourceCapsule v1.4.1
 Language: en
 Published at: 2026-06-24 09:30:00 UTC
 Author: Ada Lovelace @ada
