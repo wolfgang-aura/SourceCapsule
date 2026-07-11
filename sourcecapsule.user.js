@@ -4362,7 +4362,8 @@
         }
       });
     };
-    walk(model.blocks, 'main article');
+    const rootLabel = model.type === 'article' ? 'main article' : 'main post';
+    walk(model.blocks, rootLabel);
     return attachments;
   }
 
