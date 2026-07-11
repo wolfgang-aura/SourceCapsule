@@ -38,6 +38,10 @@ All notable changes to this project are documented here. The format is based on
   replacing them with the public endpoint's narrower text/media representation.
 - Image fetches validate content type and file signatures. HTTP-200 HTML/JSON error pages now fall
   through to size variants or become honest missing-media blockers instead of false successes.
+- Paired HTML + Markdown downloads now arrive in one clearly labelled ZIP instead of two loose
+  sibling downloads, and the Markdown records where its HTML companion is packaged.
+- Media references in ordinary post Markdown now correctly say `Attached to: main post` instead of
+  incorrectly calling every root document an Article.
 
 ## [1.4.0] - 2026-07-10
 
