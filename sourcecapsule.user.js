@@ -759,6 +759,8 @@
           Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,video/*,*/*;q=0.8',
           'Cache-Control': 'no-cache',
         },
+        referrer: 'https://x.com/',
+        referrerPolicy: 'strict-origin-when-cross-origin',
         responseType: 'arraybuffer',
         timeout: CONFIG.fetchTimeoutMs,
         onload: (res) => {

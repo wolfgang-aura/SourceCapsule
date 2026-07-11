@@ -35,6 +35,8 @@
         headers: details.headers || {},
         body: details.data == null ? undefined : details.data,
         credentials: 'omit',
+        referrer: details.referrer,
+        referrerPolicy: details.referrerPolicy,
         signal: controller.signal,
       });
       const buffer = await response.arrayBuffer();
@@ -73,6 +75,8 @@
         bodyText,
         bodyBase64,
         timeout: details.timeout || 30000,
+        referrer: details.referrer,
+        referrerPolicy: details.referrerPolicy,
       },
     };
     const fail = (rawMessage) => {
