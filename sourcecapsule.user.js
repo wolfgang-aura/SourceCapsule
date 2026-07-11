@@ -5381,7 +5381,26 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
 
   async function createShareLink(model, debugJson, expiryDays, onProgress) {
     const apiBase = getPrefs().shareApiBase.replace(/\/$/, '');
-    const { files, pathById } = collectBundleMediaFiles(model);
+    // Share can be invoked from the receipt after a long/lazy Article capture. Do one
+    // last owner-aware recovery pass here instead of assuming the earlier inline pass
+    // saw every image. This is especially important for "Create AI readable link":
+    // the user may never have created a local bundle, but the in-memory bytes still
+    // need to be present before we can upload them to R2.
+    let bundle = collectBundleMediaFiles(model);
+    const expectedImages = countBlocks(
+      model.blocks,
+      (block) => block.kind === 'image' && block.url
+    );
+    const missingImages =
+      expectedImages - bundle.files.filter((file) => file.mime.startsWith('image/')).length;
+    if (missingImages > 0) {
+      onProgress && onProgress(`Recovering ${missingImages} image(s) before upload...`, 0, 0);
+      await rescueMissingMedia(model, (done, total) => {
+        onProgress && onProgress('Recovering media downloads...', done, total);
+      });
+      bundle = collectBundleMediaFiles(model);
+    }
+    const { files, pathById } = bundle;
     const mediaBytes = files.reduce((sum, file) => sum + file.bytes.byteLength, 0);
     if (mediaBytes > CONFIG.share.maxBytes) {
       throw new Error(
@@ -5455,6 +5474,8 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       url: `${created.finalizeUrl}`,
       headers: { Authorization: `Bearer ${created.uploadToken}` },
     });
+    created.mediaFilesUploaded = files.length;
+    created.mediaBytesUploaded = mediaBytes;
     return created;
   }
 
