@@ -35,6 +35,12 @@ copy-paste mangling, no dead links when the thread disappears.
 
 The source file is also the shipped artifact: plain JavaScript, no production build step.
 
+## What is new in v1.4.1
+
+- **Complete media in AI-readable links.** Choosing **Create AI readable link** now packages the
+  same captured images and video poster stills as **Save locally + create AI link**. Sharing no
+  longer depends on running a local save first. The existing 25 MB hosted-share cap still applies.
+
 ## What is new in v1.4
 
 - **Strict export mode (on by default).** After every recovery layer runs, SourceCapsule walks

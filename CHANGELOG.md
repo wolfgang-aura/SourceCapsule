@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-07-11
+
+### Fixed
+
+- **AI-readable links now include the same captured images and video posters as local library
+  exports.** Share-only exports now assign archive media IDs before packaging, instead of
+  accidentally relying on a local save to prepare the model first. Media recovery also gets a
+  final retry immediately before upload, with X-compatible request fallbacks for the MV3 build.
+
 ## [1.4.0] - 2026-07-11
 
 ### Added
