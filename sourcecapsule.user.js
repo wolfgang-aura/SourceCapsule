@@ -1106,6 +1106,29 @@
     };
   }
 
+  async function fetchAsDataUriFromPage(url) {
+    if (typeof fetch !== 'function') throw new Error('page fetch unavailable');
+    if (!isAllowedMediaHost(url))
+      throw new Error(`Refusing page fetch for non-twimg media: ${url}`);
+    const response = await fetch(url, {
+      credentials: 'include',
+      referrer: typeof location !== 'undefined' ? location.href : 'https://x.com/',
+      referrerPolicy: 'strict-origin-when-cross-origin',
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const headers = response.headers && response.headers.get('content-type');
+    const mime = (headers || guessMime(url)).trim();
+    const sha256 = await sha256Hex(bytes);
+    return {
+      dataUri: `data:${mime};base64,${bytesToBase64(bytes)}`,
+      bytes,
+      size: bytes.length,
+      mime,
+      sha256: sha256 ? `sha256:${sha256}` : '',
+    };
+  }
+
   function bytesAscii(bytes, offset, length) {
     if (!bytes || bytes.length < offset + length) return '';
     let out = '';
@@ -1218,6 +1241,20 @@
       } catch (e) {
         lastError = e;
       }
+    }
+    // MV3 service-worker responses can be HTTP-200 but still be unusable after
+    // validation (for example a CDN challenge/error body). Give the page context
+    // one chance with its normal X credentials before declaring the image missing.
+    try {
+      const fetched = await fetchAsDataUriFromPage(url);
+      const validatedMime = validateImageDownload(fetched);
+      if (validatedMime && validatedMime !== fetched.mime) {
+        fetched.mime = validatedMime;
+        fetched.dataUri = `data:${validatedMime};base64,${bytesToBase64(fetched.bytes)}`;
+      }
+      return fetched;
+    } catch (e) {
+      lastError = e;
     }
     throw lastError || new Error(`image fetch failed for ${url}`);
   }
