@@ -391,11 +391,23 @@ check('Markdown labels normal posts, threads, and Articles correctly', () => {
     author: { name: 'A', handle: '@a' },
     sourceUrl: 'https://x.com/a/status/1',
     exportedAt: '2026-07-06T00:00:00Z',
-    blocks: [{ kind: 'paragraph', html: 'Body' }],
+    blocks: [
+      { kind: 'paragraph', html: 'Body' },
+      {
+        kind: 'image',
+        url: 'https://pbs.twimg.com/media/label-test.png',
+        dataUri: PNG,
+        sourceUrl: 'https://x.com/a/status/1',
+      },
+    ],
   };
-  assert.match(engine.renderLlmMarkdown({ ...base, type: 'post' }), /## Main Post/);
-  assert.doesNotMatch(engine.renderLlmMarkdown({ ...base, type: 'post' }), /## Main Article/);
-  assert.match(engine.renderLlmMarkdown({ ...base, type: 'article' }), /## Main Article/);
+  const postMarkdown = engine.renderLlmMarkdown({ ...base, type: 'post' });
+  const articleMarkdown = engine.renderLlmMarkdown({ ...base, type: 'article' });
+  assert.match(postMarkdown, /## Main Post/);
+  assert.doesNotMatch(postMarkdown, /## Main Article/);
+  assert.match(postMarkdown, /- Attached to: main post/);
+  assert.match(articleMarkdown, /## Main Article/);
+  assert.match(articleMarkdown, /- Attached to: main article/);
   assert.match(
     engine.renderLlmMarkdown({
       ...base,
