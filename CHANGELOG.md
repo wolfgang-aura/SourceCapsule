@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-07-11
+
 ### Added
 
 - The MV3 popup now has a clearer library/capture hierarchy, page-specific readiness status,
@@ -14,39 +16,6 @@ All notable changes to this project are documented here. The format is based on
   keyboard navigation, focus restoration, and live-region progress toasts.
 - Syndication quote transforms now create external link-card blocks from URL entities and preserve
   richer DOM-only card metadata and polls recursively, including polls nested inside quoted posts.
-
-### Changed
-
-- Passive GraphQL capture now accepts bodies up to 6 MB, records any remaining truncation in the
-  diagnostic bundle, and hashes the complete bounded body for duplicate suppression instead of
-  comparing only the first/last 80 characters.
-- Quote-card detection tolerates X omitting `tabindex="0"` from its clickable wrapper while keeping
-  author/text guards that exclude ordinary external-link cards.
-- Unmatched video candidates are no longer paired to video blocks by bitrate-sorted array index.
-  Keyless fallback is allowed only when one unresolved block and one logical media ID remain.
-
-### Fixed
-
-- Quote-only GraphQL responses now pass through both userscript and MV3 MAIN-world bridge filters;
-  previously passive quote-ref recovery silently ignored ordinary text-only quotes unless the same
-  response also contained video or long-form Note data.
-- Long X Articles now scroll from the top and merge progressively harvested ownerless body images
-  back into reading order, so images virtualized away before final extraction are not silently lost.
-- A quote card that never mounted in the DOM is rebuilt from the parent post's authoritative
-  `quoted_tweet` payload; the absence can no longer evade the strict completeness gate.
-- Syndication quote upgrades retain DOM-captured polls and rich link-card thumbnails instead of
-  replacing them with the public endpoint's narrower text/media representation.
-- Image fetches validate content type and file signatures. HTTP-200 HTML/JSON error pages now fall
-  through to size variants or become honest missing-media blockers instead of false successes.
-- Paired HTML + Markdown downloads now arrive in one clearly labelled ZIP instead of two loose
-  sibling downloads, and the Markdown records where its HTML companion is packaged.
-- Media references in ordinary post Markdown now correctly say `Attached to: main post` instead of
-  incorrectly calling every root document an Article.
-
-## [1.4.0] - 2026-07-10
-
-### Added
-
 - **Strict export mode (on by default).** Every export now runs through a completeness gate
   after all recovery layers finish. If any embedded post would ship without a canonical
   permalink, any quoted post's content couldn't be captured, or any image or video would
@@ -113,6 +82,13 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- Passive GraphQL capture now accepts bodies up to 6 MB, records any remaining truncation in the
+  diagnostic bundle, and hashes the complete bounded body for duplicate suppression instead of
+  comparing only the first/last 80 characters.
+- Quote-card detection tolerates X omitting `tabindex="0"` from its clickable wrapper while keeping
+  author/text guards that exclude ordinary external-link cards.
+- Unmatched video candidates are no longer paired to video blocks by bitrate-sorted array index.
+  Keyless fallback is allowed only when one unresolved block and one logical media ID remain.
 - Quoted posts without a resolvable canonical permalink link to the author's X profile
   (`https://x.com/{handle}`) instead of showing a "Source URL unavailable" notice; the
   underlying `data-xa-source-fallback="author-profile"` attribute lets tooling and future
@@ -128,6 +104,21 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- Quote-only GraphQL responses now pass through both userscript and MV3 MAIN-world bridge filters;
+  previously passive quote-ref recovery silently ignored ordinary text-only quotes unless the same
+  response also contained video or long-form Note data.
+- Long X Articles now scroll from the top and merge progressively harvested ownerless body images
+  back into reading order, so images virtualized away before final extraction are not silently lost.
+- A quote card that never mounted in the DOM is rebuilt from the parent post's authoritative
+  `quoted_tweet` payload; the absence can no longer evade the strict completeness gate.
+- Syndication quote upgrades retain DOM-captured polls and rich link-card thumbnails instead of
+  replacing them with the public endpoint's narrower text/media representation.
+- Image fetches validate content type and file signatures. HTTP-200 HTML/JSON error pages now fall
+  through to size variants or become honest missing-media blockers instead of false successes.
+- Paired HTML + Markdown downloads now arrive in one clearly labelled ZIP instead of two loose
+  sibling downloads, and the Markdown records where its HTML companion is packaged.
+- Media references in ordinary post Markdown now correctly say `Attached to: main post` instead of
+  incorrectly calling every root document an Article.
 - Share Worker now sets `Content-Length` on GET and HEAD responses (R2's
   `writeHttpMetadata` omits it), so Slack, Discord, and Twitter link-preview crawlers
   can size and render shared images and content.
