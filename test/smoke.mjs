@@ -560,6 +560,32 @@ check(
   }
 );
 
+check('share-only media collection prepares the model without a prior local save', () => {
+  const shareOnlyModel = {
+    type: 'article',
+    title: 'Share-only article',
+    author: { name: 'Ada Lovelace', handle: '@ada' },
+    sourceUrl: 'https://x.com/ada/article/99999',
+    blocks: [
+      {
+        kind: 'image',
+        url: 'https://pbs.twimg.com/media/share-only.jpg',
+        dataUri: PNG,
+        mime: 'image/png',
+      },
+    ],
+  };
+
+  assert.equal(shareOnlyModel.blocks[0]._xaMediaId, undefined);
+  const shareBundle = engine.collectBundleMediaFiles(shareOnlyModel);
+  assert.equal(shareOnlyModel.blocks[0]._xaMediaId, 'image-001');
+  assert.deepEqual(
+    shareBundle.files.map((file) => file.name),
+    ['media/image-001.png']
+  );
+  assert.equal(shareBundle.pathById.get('image-001'), 'media/image-001.png');
+});
+
 check('bundlePaths honors the date vs flat layout preference', () => {
   const byDate = engine.bundlePaths(sampleModel, { layout: 'date' }, '2026-06-28');
   assert.deepEqual(byDate.segments, ['2026-06-28', 'ada-12345']);
