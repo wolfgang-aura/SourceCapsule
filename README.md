@@ -63,6 +63,9 @@ The source file is also the shipped artifact: plain JavaScript, no production bu
   DOM-only polls/card previews survive authoritative quote upgrades, and ambiguous video URLs are
   never attached to a post by guesswork. Media downloads are signature-checked so an HTTP error
   page cannot masquerade as a captured image.
+- **Clearer controls and packaging.** The redesigned MV3 popup explains page readiness and
+  folder-vs-ZIP delivery, with accessible switches, keyboard navigation, dark mode, and
+  reduced-motion support. One-off HTML + Markdown downloads now arrive together in one ZIP.
 
 The product remains local-first. Nothing is uploaded until you explicitly choose
 **Create AI readable link** or **Save locally + create AI link** and confirm the expiry. In the combined flow, the local copy is
@@ -77,7 +80,7 @@ On the X timeline, a status page, or an Article:
 - If a timeline card says **Open post first**, open the post and save from the status/Article page;
   the feed preview does not contain enough content for a complete archive.
 - Click **...** beside it for:
-  - Save this post only
+  - Save full thread (on a focused post page)
   - Save with note and tags
   - Copy clean Markdown
   - Create AI readable link
@@ -140,7 +143,7 @@ The backend is a small Cloudflare Worker with an R2 bucket. Deployment details a
 [`share-worker/README.md`](share-worker/README.md). Accounts, billing, and permanent-link quotas
 are intentionally not part of this first share release.
 
-## Test the experimental Chrome extension
+## Test the Chrome extension (unpacked beta)
 
 ```powershell
 cd C:\Users\cheon\Desktop\Projects\eXportArticle
@@ -157,8 +160,9 @@ Then in Chrome:
 5. Disable the SourceCapsule userscript in Tampermonkey for x.com to avoid duplicate buttons.
 6. Refresh a status page and test quick save, this-post-only, copy Markdown, and AI readable links.
 
-This package is experimental. It reuses the tested userscript engine through a thin compatibility
-layer; it is not ready for Chrome Web Store submission until live-X testing passes.
+This package reuses the tested userscript engine through a thin compatibility layer and has passed
+the automated package suite plus live-X validation. It remains an unpacked beta until a separate
+Chrome Web Store publication is prepared.
 
 ## What is captured
 
@@ -185,6 +189,8 @@ Open the userscript-manager menu while on x.com:
 
 - **Layout:** folders by date (default) or flat.
 - **Contents:** full archive (default) or lean Markdown + media.
+- **Strict Export:** on by default; blocks silent incomplete downloads after recovery retries.
+- **Reply Context:** on by default; prepends the parent post when exporting a reply.
 - **Share service URL:** localhost for development, your Worker domain for production.
 - **Change export folder:** select another library root.
 - **Floating button:** optional; off by default.
