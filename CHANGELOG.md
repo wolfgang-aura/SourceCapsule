@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Documentation
+
+- SECURITY.md now lists every `@connect` host the shipped userscript declares (the
+  individual `twimg.com` subdomains, the loopback dev entries, and the
+  `sourcecapsule-share.wolfgang-aura.workers.dev` share Worker), and documents the AI
+  share upload path in its own "Optional AI share links" section instead of implying that
+  no user data ever leaves the browser.
+
 ## [1.4.1] - 2026-07-11
 
 ### Fixed
