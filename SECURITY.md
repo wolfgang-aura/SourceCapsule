@@ -20,8 +20,10 @@ The userscript metadata block requests:
 | `GM_xmlhttpRequest` | Fetch media **bytes** from `*.twimg.com` to base64-inline them. A normal page fetch can't read these cross-origin bytes; this is the whole reason it's a userscript. |
 | `unsafeWindow` | Read X's own API/GraphQL responses **in your browser** to discover the full MP4 URL behind a video. No page data is injected back; only response bodies are inspected locally. Also used to reach the File System Access API (`showDirectoryPicker`) for **Save to library**. |
 | `GM_registerMenuCommand`, `GM_unregisterMenuCommand` | Add the **Save to library** settings (layout / contents / change folder) to the userscript-manager menu. No page or network access. |
-| `@connect twimg.com`, `cdn.syndication.twimg.com` | Allow the media fetch to reach X's media/syndication hosts. |
+| `@connect pbs.twimg.com`, `video.twimg.com`, `abs.twimg.com`, `cdn.syndication.twimg.com` | Allow the media fetch to reach X's media/syndication hosts. |
 | `@connect x.com`, `twitter.com` | Resolve canonical post URLs/metadata. |
+| `@connect sourcecapsule-share.wolfgang-aura.workers.dev` | Only used when you explicitly choose **Create AI readable link** / **Save locally + create AI link** and confirm the upload dialog. See "Optional AI share links" below. |
+| `@connect 127.0.0.1`, `localhost` | Local development only — lets a maintainer point the share client at a local `wrangler dev` share Worker via the userscript-manager menu. No live X page ever posts to loopback. |
 | `@run-at document-start` | Install the video-discovery hook before X's own scripts run, so early API responses aren't missed. |
 
 ## What it does — and never does
@@ -47,10 +49,30 @@ The userscript metadata block requests:
 
 **Never:**
 
-- ❌ Sends your data to any third party. There is **no server, no analytics, no telemetry**.
-  The only outbound requests are to `twimg.com`/syndication to download media for embedding.
+- ❌ Sends your data anywhere without an explicit action. There is **no analytics and no
+  telemetry**. Outbound requests during a normal capture only go to `twimg.com` /
+  syndication hosts to download media for embedding.
 - ❌ Takes any action on your account (post, like, follow, DM).
 - ❌ Reads anything you can't already see on the page (no passwords, no DMs).
+
+## Optional AI share links (`sourcecapsule-share.wolfgang-aura.workers.dev`)
+
+**Save to library**, **Copy clean Markdown**, and **Download HTML + Markdown** are 100%
+local — nothing leaves your browser.
+
+The two share actions — **Create AI readable link** and **Save locally + create AI link** —
+upload the same package you would have saved locally (rendered HTML, Markdown, capture
+manifest, images, and video poster stills; no raw video; capped at 25 MB) to the
+project's Cloudflare Worker + R2 share service. Each upload:
+
+- happens only after you explicitly click the share action **and** confirm the expiry
+  dialog (default 7 days; 1 or 30 optional);
+- returns a high-entropy unlisted URL — anyone with the link can read it until expiry;
+- generates a deletion credential kept only in your browser;
+- has its retention, deletion, and Cloudflare data-processing terms documented in
+  [PRIVACY.md](PRIVACY.md).
+
+The Worker's source is under [`share-worker/`](share-worker/) in this repository.
 
 ## Output safety
 
