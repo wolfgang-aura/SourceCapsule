@@ -451,7 +451,9 @@ check(
     assert.equal(focusedMode.isThread, true);
     assert.equal(focusedMode.includeThread, true);
     assert.equal(focusedMode.label, 'Save thread');
-    assert.ok(focusedMode.menuItems.some((item) => item.key === 'library-thread'));
+    // Manual checklist T02 requires the drop-down's first item to be "Save full
+    // thread" on every focused post - assert order, not just presence.
+    assert.equal(focusedMode.menuItems[0].key, 'library-thread');
     const continuationMode = engine.postControlCaptureMode(continuation, column);
     assert.equal(continuationMode.isThread, false);
     assert.equal(continuationMode.includeThread, false);
@@ -493,10 +495,12 @@ check(
       // Auto-detection correctly reports a single post at THIS instant...
       assert.equal(mode.isThread, false);
       assert.equal(mode.label, 'Save post');
-      // ...but the menu still exposes the escape hatch.
-      assert.ok(
-        mode.menuItems.some((item) => item.key === 'library-thread'),
-        'focused post must always offer Save full thread'
+      // ...but the menu still exposes the escape hatch, and it must be the
+      // first item so T02's "drop-down's first item is Save full thread" holds.
+      assert.equal(
+        mode.menuItems[0].key,
+        'library-thread',
+        'focused post must always offer Save full thread as the first menu item'
       );
     } finally {
       // Restore the shared thread fixture for later checks.
