@@ -13,8 +13,9 @@ until the next burn compresses the file. Not gitignored — it's a project doc.
 - [ ] Poll for a real long-form "note" post whose full text is delivered by
       capture; use it to add a golden-case assertion around
       `capturedNoteTweets` swap-in.
-- [ ] Wider test coverage on the passive network capture layer: same-envelope
+- [x] Wider test coverage on the passive network capture layer: same-envelope
       hash-dedup, 6 MB truncation diagnostic, quote-only body inclusion.
+      Already covered in `test/extension.test.mjs` (verified 2026-07-16).
 - [ ] Startup config self-test / diagnostic: add a menu command that dumps a
       one-shot health line (prefs, capture-cache size, syndication cache size,
       root-folder handle state) so a silently-broken install is visible in a
