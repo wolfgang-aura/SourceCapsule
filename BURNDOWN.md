@@ -22,6 +22,9 @@ until the next burn compresses the file. Not gitignored — it's a project doc.
       single click.
 - [x] Assert `Save full thread` is the FIRST drop-down item on any focused
       post (T02 order regression). Done 2026-07-16 in `test/dom.test.mjs`.
+- [x] Lock in the pre-share media-rescue detection signal
+      (`collectBundleMediaFiles` must skip image blocks with no bytes).
+      Done 2026-07-17 in `test/smoke.mjs`.
 
 ## Blocked-on-human — do not attempt
 
