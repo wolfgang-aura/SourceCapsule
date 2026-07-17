@@ -1433,6 +1433,49 @@ check('keyless video fallback refuses ambiguous cross-post candidates', () => {
   );
 });
 
+check('collectBundleMediaFiles skips image blocks whose bytes were never fetched', () => {
+  // v1.4.1 pre-share rescue trigger: createShareLink counts image blocks vs image
+  // files in the bundle, and rescues when it sees fewer files than blocks. If
+  // collectBundleMediaFiles ever started emitting placeholder entries for blocks
+  // without dataUri, the rescue would never fire and AI-share uploads would ship
+  // with missing images again (the exact regression v1.4.1 shipped to fix).
+  const pngDataUri =
+    'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+  const model = {
+    type: 'post',
+    blocks: [
+      {
+        kind: 'image',
+        url: 'https://pbs.twimg.com/media/fetched.jpg',
+        dataUri: pngDataUri,
+      },
+      {
+        kind: 'image',
+        url: 'https://pbs.twimg.com/media/missing.jpg',
+        // no dataUri — the fetch dropped or never ran
+      },
+      {
+        kind: 'quote',
+        blocks: [
+          {
+            kind: 'image',
+            url: 'https://pbs.twimg.com/media/quote.jpg',
+            // no dataUri — walks into quotes too
+          },
+        ],
+      },
+    ],
+  };
+  const { files, pathById } = engine.collectBundleMediaFiles(model);
+  const imageFiles = files.filter((f) => f.mime.startsWith('image/'));
+  assert.equal(imageFiles.length, 1, 'only the block with dataUri contributes a file');
+  // prepareArchiveModel assigns sequential ids image-001, image-002, image-003;
+  // only the first block had bytes, so only that id ends up in the bundle map.
+  assert.ok(pathById.has('image-001'));
+  assert.ok(!pathById.has('image-002'));
+  assert.ok(!pathById.has('image-003'));
+});
+
 // Write a previewable sample so humans (and the README) can see the output style.
 const outDir = join(here, '..', 'examples');
 mkdirSync(outDir, { recursive: true });
