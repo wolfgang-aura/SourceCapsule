@@ -8245,6 +8245,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     ...POST_EXPORT_TYPES,
   ];
 
+  function exportTypeNeedsCaptureOptions(exportType) {
+    return exportType === 'library-note' || exportType === 'library-share';
+  }
+
   function postExportRequest(exportType) {
     return {
       exportType: exportType === 'library-thread' ? 'library' : exportType,
@@ -8740,7 +8744,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       let metadata = {};
       const needsShare = exportType === 'share' || exportType === 'library-share';
       const needsLibrary = exportType === 'library-share' || exportType.startsWith('library');
-      if (exportType === 'library-note' || needsShare) {
+      if (exportTypeNeedsCaptureOptions(exportType)) {
         metadata = await promptCaptureOptions({
           share: needsShare,
           saveLocal: exportType === 'library-share',
@@ -9619,6 +9623,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       EXPORT_TYPES,
       POST_EXPORT_TYPES,
       THREAD_EXPORT_TYPES,
+      exportTypeNeedsCaptureOptions,
       postExportRequest,
       postControlCaptureMode,
       timelineArticlePreviewReason,
