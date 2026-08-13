@@ -564,6 +564,9 @@ check('home timeline gets visible per-post save controls without opening a post'
   );
   assert.ok(!menuLabels.includes('Save full thread'));
   assert.ok(menuLabels.includes('Save with note / tags'));
+  assert.equal(engine.exportTypeNeedsCaptureOptions('share'), false);
+  assert.equal(engine.exportTypeNeedsCaptureOptions('library-note'), true);
+  assert.equal(engine.exportTypeNeedsCaptureOptions('library-share'), true);
   const optionsButton = controls[0].querySelector('.xa-ctl-options');
   assert.equal(optionsButton.getAttribute('aria-haspopup'), 'menu');
   assert.equal(menus[0].getAttribute('role'), 'menu');
