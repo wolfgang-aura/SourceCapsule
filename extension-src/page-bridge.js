@@ -13,14 +13,14 @@
   const bodyPattern =
     /video_info|variants|video\.twimg\.com|amplify_video|ext_tw_video|tweet_video|note_tweet|quoted_status/i;
   const urlPattern =
-    /\/graphql\/|\/i\/api\/|TweetDetail|TweetResult|Article|UserTweets|HomeTimeline/i;
+    /\/graphql\/|\/i\/api\/|TweetDetail|TweetResult|Article|UserTweets|HomeTimeline|SearchTimeline/i;
   const shouldRead = (url, contentType) =>
     /json|javascript|text/i.test(contentType || '') || urlPattern.test(url || '');
   const emit = (url, body, transport) => {
     try {
       if (sent >= MAX_MESSAGES || !body) return;
       const text = String(body);
-      if (!bodyPattern.test(text)) return;
+      if (!bodyPattern.test(text) && !/SearchTimeline/i.test(url || '')) return;
       sent += 1;
       window.postMessage(
         {

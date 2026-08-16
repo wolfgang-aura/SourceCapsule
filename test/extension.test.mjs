@@ -135,6 +135,34 @@ const quoteCapture = await quoteCaptureResult;
 assert.equal(quoteCapture.body, quoteOnlyBody);
 assert.match(quoteCapture.body, /quoted_status_id_str/);
 assert.equal(engine.networkCapturePatterns().body.test(quoteOnlyBody), true);
+assert.equal(
+  engine.networkCapturePatterns().url.test('https://x.com/i/api/graphql/test/SearchTimeline'),
+  true
+);
+const searchBridgeDom = new JSDOM('<!doctype html><title>Search bridge test</title>', {
+  url: 'https://x.com/search?q=conversation_id%3A100&f=live',
+  runScripts: 'outside-only',
+});
+const plainSearchBody = JSON.stringify({
+  rest_id: '101',
+  legacy: { conversation_id_str: '100', full_text: 'No media, note, or quote fields' },
+});
+searchBridgeDom.window.fetch = async (url) => ({
+  url,
+  headers: { get: () => 'application/json' },
+  clone: () => ({ text: async () => plainSearchBody }),
+});
+searchBridgeDom.window.eval(
+  fs.readFileSync(path.join(root, 'extension-src', 'page-bridge.js'), 'utf8')
+);
+const searchCaptureResult = new Promise((resolve) => {
+  searchBridgeDom.window.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'response') resolve(event.data);
+  });
+});
+await searchBridgeDom.window.fetch('https://x.com/i/api/graphql/test/SearchTimeline');
+const searchCapture = await searchCaptureResult;
+assert.equal(searchCapture.body, plainSearchBody);
 const bridgeResult = new Promise((resolve) => {
   bridgeDom.window.addEventListener('message', (event) => {
     if (event.data && event.data.source === 'SourceCapsule:folder-picker') resolve(event.data);
