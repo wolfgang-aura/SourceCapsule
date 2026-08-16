@@ -4,6 +4,7 @@ node_modules/
 # Logs / debug
 npm-debug.log*
 *.log
+_scratch/
 
 # OS / editor cruft
 .DS_Store
