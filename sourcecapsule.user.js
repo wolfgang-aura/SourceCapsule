@@ -8383,45 +8383,63 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       } catch {
         // Older userscript hosts may not expose scrollRestoration.
       }
-      scroller.scrollTo(0, 0);
-      await sleep(1200);
-      // X can apply its own SPA scroll restoration after first paint. Reset twice so a
-      // repeated probe always starts at the newest result rather than the prior run's tail.
-      scroller.scrollTo(0, 0);
-      await sleep(500);
-      while (Date.now() - startedAt < maxMs) {
-        const added = captureVisibleReplyProbeTweets(records, pending.rootStatusId);
-        if (added) lastNewAt = Date.now();
-        maxVisibleTweets = Math.max(maxVisibleTweets, topLevelTweetEls(document).length);
-        const pageText = String((document.body && document.body.innerText) || '');
-        challenge = [
-          'Rate limit exceeded',
-          'Something went wrong. Try reloading.',
-          'Log in to X',
-        ].find((message) => pageText.includes(message));
-        if (challenge) {
-          stopReason = 'x-challenge';
-          break;
-        }
-
-        const elapsed = Math.round((Date.now() - startedAt) / 1000);
-        showToast(`Reply probe: ${records.size} unique posts · ${elapsed}s · scroll ${scrolls}`, {
+      // X can apply its own SPA scroll restoration several times after first paint. Pin
+      // the search at the top until it remains there for six consecutive observations;
+      // otherwise fail explicitly instead of silently probing only the old tail segment.
+      let stableTopChecks = 0;
+      const topResetDeadline = Date.now() + 8000;
+      while (Date.now() < topResetDeadline && stableTopChecks < 6) {
+        scroller.scrollTo(0, 0);
+        await sleep(250);
+        stableTopChecks = scroller.scrollTop <= 10 ? stableTopChecks + 1 : 0;
+      }
+      if (scroller.scrollTop > 10 || stableTopChecks < 6) {
+        stopReason = 'scroll-reset-failed';
+      }
+      if (stopReason === 'scroll-reset-failed') {
+        showToast('Reply probe stopped: X kept restoring the prior search position.', {
+          error: true,
           sticky: true,
         });
+      } else {
+        while (Date.now() - startedAt < maxMs) {
+          const added = captureVisibleReplyProbeTweets(records, pending.rootStatusId);
+          if (added) lastNewAt = Date.now();
+          maxVisibleTweets = Math.max(maxVisibleTweets, topLevelTweetEls(document).length);
+          const pageText = String((document.body && document.body.innerText) || '');
+          challenge = [
+            'Rate limit exceeded',
+            'Something went wrong. Try reloading.',
+            'Log in to X',
+          ].find((message) => pageText.includes(message));
+          if (challenge) {
+            stopReason = 'x-challenge';
+            break;
+          }
 
-        const height = scroller.scrollHeight;
-        const viewport = window.innerHeight || 800;
-        const nearBottom = scroller.scrollTop + viewport >= height - Math.max(300, viewport * 0.4);
-        if (nearBottom && height === lastHeight && Date.now() - lastNewAt >= idleMs) {
-          stopReason = records.size ? 'pagination-idle' : 'no-results';
-          break;
+          const elapsed = Math.round((Date.now() - startedAt) / 1000);
+          showToast(`Reply probe: ${records.size} unique posts · ${elapsed}s · scroll ${scrolls}`, {
+            sticky: true,
+          });
+
+          const height = scroller.scrollHeight;
+          const viewport = window.innerHeight || 800;
+          const nearBottom =
+            scroller.scrollTop + viewport >= height - Math.max(300, viewport * 0.4);
+          if (nearBottom && height === lastHeight && Date.now() - lastNewAt >= idleMs) {
+            stopReason = records.size ? 'pagination-idle' : 'no-results';
+            break;
+          }
+          lastHeight = height;
+          scroller.scrollTo(
+            0,
+            Math.min(scroller.scrollTop + Math.max(500, viewport * 0.85), height)
+          );
+          scrolls += 1;
+          await sleep(nearBottom ? Math.max(900, tickMs) : tickMs);
         }
-        lastHeight = height;
-        scroller.scrollTo(0, Math.min(scroller.scrollTop + Math.max(500, viewport * 0.85), height));
-        scrolls += 1;
-        await sleep(nearBottom ? Math.max(900, tickMs) : tickMs);
+        captureVisibleReplyProbeTweets(records, pending.rootStatusId);
       }
-      captureVisibleReplyProbeTweets(records, pending.rootStatusId);
     }
 
     const result = {
