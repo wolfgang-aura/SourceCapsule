@@ -454,6 +454,7 @@ check(
     // Manual checklist T02 requires the drop-down's first item to be "Save full
     // thread" on every focused post - assert order, not just presence.
     assert.equal(focusedMode.menuItems[0].key, 'library-thread');
+    assert.equal(focusedMode.menuItems[1].key, 'reply-probe');
     const continuationMode = engine.postControlCaptureMode(continuation, column);
     assert.equal(continuationMode.isThread, false);
     assert.equal(continuationMode.includeThread, false);
@@ -461,6 +462,59 @@ check(
     assert.ok(!continuationMode.menuItems.some((item) => item.key === 'library-thread'));
   }
 );
+
+check('reply probe collects unique timestamped search results and excludes ads/root post', () => {
+  const probeDom = new JSDOM(
+    `<!doctype html><html><body>
+      <article data-testid="tweet">
+        <div data-testid="tweetText">Root post</div>
+        <a href="/root/status/2000000000000000000"><time datetime="2026-08-09T00:00:00Z">Aug 9</time></a>
+        <button aria-label="1,013 Replies. Reply"></button>
+      </article>
+      <article data-testid="tweet">
+        <div data-testid="tweetText">First reply</div>
+        <a href="/first/status/2000000000000000001"><time datetime="2026-08-10T00:00:00Z">Aug 10</time></a>
+      </article>
+      <article data-testid="tweet">
+        <div data-testid="tweetText">Duplicate virtualized reply</div>
+        <a href="/first/status/2000000000000000001"><time datetime="2026-08-10T00:00:00Z">Aug 10</time></a>
+      </article>
+      <article data-testid="tweet">
+        <div data-testid="tweetText">Promoted post without a timestamp</div>
+        <a href="/advertiser/status/2999999999999999999/analytics">Ad analytics</a>
+      </article>
+    </body></html>`,
+    { url: 'https://x.com/search?q=conversation_id%3A2000000000000000000&f=live' }
+  );
+  const priorWindow = global.window;
+  global.window = probeDom.window;
+  global.document = probeDom.window.document;
+  global.Node = probeDom.window.Node;
+  global.location = probeDom.window.location;
+  global.localStorage = probeDom.window.localStorage;
+  try {
+    const records = new Map();
+    const added = engine.captureVisibleReplyProbeTweets(records, '2000000000000000000');
+    assert.equal(added, 1);
+    assert.deepEqual(Array.from(records.keys()), ['2000000000000000001']);
+    assert.equal(records.get('2000000000000000001').handle, 'first');
+    assert.equal(records.get('2000000000000000001').text, 'First reply');
+    assert.equal(
+      engine.displayedReplyCount(document.querySelector('article[data-testid="tweet"]')),
+      1013
+    );
+    assert.equal(
+      engine.replyProbeSearchUrl('2000000000000000000'),
+      'https://x.com/search?q=conversation_id%3A2000000000000000000&src=typed_query&f=live'
+    );
+  } finally {
+    global.window = priorWindow;
+    global.document = priorWindow.document;
+    global.Node = priorWindow.Node;
+    global.location = priorWindow.location;
+    global.localStorage = priorWindow.localStorage;
+  }
+});
 
 check(
   'focused post with only one visible tweet still offers Save full thread as an escape hatch',

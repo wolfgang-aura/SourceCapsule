@@ -8241,6 +8241,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   ];
   const THREAD_EXPORT_TYPES = [
     { key: 'library-thread', label: 'Save full thread' },
+    { key: 'reply-probe', label: 'Probe all replies (experimental)' },
     { divider: true },
     ...POST_EXPORT_TYPES,
   ];
@@ -8254,6 +8255,214 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       exportType: exportType === 'library-thread' ? 'library' : exportType,
       includeThread: exportType === 'library-thread',
     };
+  }
+
+  const REPLY_PROBE_PENDING_KEY = 'sourcecapsule:reply-probe:pending';
+  const REPLY_PROBE_LAST_KEY = 'sourcecapsule:reply-probe:last';
+
+  function replyProbeSearchUrl(statusId) {
+    const id = String(statusId || '');
+    if (!/^\d+$/.test(id)) return '';
+    const query = encodeURIComponent(`conversation_id:${id}`);
+    return `${location.origin}/search?q=${query}&src=typed_query&f=live`;
+  }
+
+  function displayedReplyCount(tweetEl) {
+    const button = Array.from((tweetEl && tweetEl.querySelectorAll('button')) || []).find((item) =>
+      /\brepl(?:y|ies)\b/i.test(item.getAttribute('aria-label') || '')
+    );
+    const label = button && button.getAttribute('aria-label');
+    const match = String(label || '').match(/([\d,]+)\s+repl(?:y|ies)/i);
+    return match ? Number(match[1].replace(/,/g, '')) || 0 : 0;
+  }
+
+  function replyProbeTweetRecord(tweetEl) {
+    if (!tweetEl) return null;
+    // Promoted posts in timelines commonly have status/analytics links but no timestamp.
+    // Requiring X's canonical time link prevents ads from inflating the probe count.
+    const time = tweetEl.querySelector('a[href*="/status/"] time');
+    const anchor = time && time.closest('a');
+    const id = anchor && statusIdFromUrl(anchor.getAttribute('href') || anchor.href);
+    if (!id) return null;
+    let pathname = '';
+    try {
+      pathname = new URL(anchor.href, location.origin).pathname;
+    } catch {
+      pathname = anchor.getAttribute('href') || '';
+    }
+    const handleMatch = pathname.match(/^\/([^/]+)\/status\/\d+/);
+    const textEl = pick(tweetEl, CONFIG.selectors.tweetText, { quiet: true });
+    return {
+      id,
+      handle: handleMatch ? handleMatch[1] : '',
+      url: normalizeStatusUrl(anchor.href),
+      text: String((textEl && textEl.textContent) || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 2000),
+      seenAt: new Date().toISOString(),
+    };
+  }
+
+  function captureVisibleReplyProbeTweets(records, rootStatusId) {
+    let added = 0;
+    topLevelTweetEls(document).forEach((tweetEl) => {
+      const record = replyProbeTweetRecord(tweetEl);
+      if (!record || record.id === String(rootStatusId || '') || records.has(record.id)) return;
+      records.set(record.id, record);
+      added += 1;
+    });
+    return added;
+  }
+
+  function readReplyProbePending() {
+    try {
+      const value = JSON.parse(sessionStorage.getItem(REPLY_PROBE_PENDING_KEY) || 'null');
+      if (!value || !/^\d+$/.test(String(value.rootStatusId || ''))) return null;
+      return value;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeReplyProbeResult(result) {
+    try {
+      localStorage.setItem(REPLY_PROBE_LAST_KEY, JSON.stringify(result));
+    } catch (error) {
+      result.storageError = String((error && error.message) || error || 'storage failed');
+    }
+  }
+
+  function startReplyProbe(tweetEl) {
+    const rootStatusId = tweetStatusId(tweetEl) || currentStatusId();
+    const url = replyProbeSearchUrl(rootStatusId);
+    if (!url) {
+      showToast('Reply probe could not determine the root post id.', { error: true, sticky: true });
+      return;
+    }
+    const pending = {
+      rootStatusId,
+      expectedDisplayedReplies: displayedReplyCount(tweetEl),
+      returnUrl: location.href,
+      requestedAt: new Date().toISOString(),
+    };
+    try {
+      sessionStorage.setItem(REPLY_PROBE_PENDING_KEY, JSON.stringify(pending));
+    } catch (error) {
+      showToast(`Reply probe could not start: ${error.message}`, { error: true, sticky: true });
+      return;
+    }
+    showToast('Opening X Latest search for the reply probe...', { sticky: true });
+    location.href = url;
+  }
+
+  async function runReplyProbe(pending, options = {}) {
+    const maxMs = Number(options.maxMs) || 120000;
+    const idleMs = Number(options.idleMs) || 12000;
+    const tickMs = Number(options.tickMs) || 450;
+    const records = new Map();
+    const scroller = document.scrollingElement || document.documentElement;
+    const startedAt = Date.now();
+    let lastNewAt = startedAt;
+    let lastHeight = 0;
+    let scrolls = 0;
+    let stopReason = 'timeout';
+    let maxVisibleTweets = 0;
+    let challenge = '';
+
+    if (!scroller) {
+      stopReason = 'no-scroller';
+    } else {
+      scroller.scrollTo(0, 0);
+      await sleep(600);
+      while (Date.now() - startedAt < maxMs) {
+        const added = captureVisibleReplyProbeTweets(records, pending.rootStatusId);
+        if (added) lastNewAt = Date.now();
+        maxVisibleTweets = Math.max(maxVisibleTweets, topLevelTweetEls(document).length);
+        const pageText = String((document.body && document.body.innerText) || '');
+        challenge = [
+          'Rate limit exceeded',
+          'Something went wrong. Try reloading.',
+          'Log in to X',
+        ].find((message) => pageText.includes(message));
+        if (challenge) {
+          stopReason = 'x-challenge';
+          break;
+        }
+
+        const elapsed = Math.round((Date.now() - startedAt) / 1000);
+        showToast(`Reply probe: ${records.size} unique posts · ${elapsed}s · scroll ${scrolls}`, {
+          sticky: true,
+        });
+
+        const height = scroller.scrollHeight;
+        const viewport = window.innerHeight || 800;
+        const nearBottom = scroller.scrollTop + viewport >= height - Math.max(300, viewport * 0.4);
+        if (nearBottom && height === lastHeight && Date.now() - lastNewAt >= idleMs) {
+          stopReason = records.size ? 'pagination-idle' : 'no-results';
+          break;
+        }
+        lastHeight = height;
+        scroller.scrollTo(0, Math.min(scroller.scrollTop + Math.max(500, viewport * 0.85), height));
+        scrolls += 1;
+        await sleep(nearBottom ? Math.max(900, tickMs) : tickMs);
+      }
+      captureVisibleReplyProbeTweets(records, pending.rootStatusId);
+    }
+
+    const result = {
+      contractVersion: 1,
+      rootStatusId: String(pending.rootStatusId),
+      expectedDisplayedReplies: Number(pending.expectedDisplayedReplies) || 0,
+      uniquePostsCaptured: records.size,
+      startedAt: new Date(startedAt).toISOString(),
+      finishedAt: new Date().toISOString(),
+      elapsedMs: Date.now() - startedAt,
+      stopReason,
+      challenge: challenge || '',
+      scrolls,
+      maxVisibleTweets,
+      sourceUrl: location.href,
+      returnUrl: pending.returnUrl || '',
+      records: Array.from(records.values()),
+    };
+    writeReplyProbeResult(result);
+    try {
+      sessionStorage.removeItem(REPLY_PROBE_PENDING_KEY);
+    } catch {
+      // A completed result is already persisted; a stale pending key is harmless.
+    }
+    const expected = result.expectedDisplayedReplies
+      ? ` / ${result.expectedDisplayedReplies} displayed by X`
+      : '';
+    showToast(
+      `Reply probe finished: ${records.size}${expected}. Stop: ${stopReason}. Result saved locally.`,
+      { error: stopReason !== 'pagination-idle', sticky: true }
+    );
+    log('reply probe result', result);
+    return result;
+  }
+
+  function maybeResumeReplyProbe() {
+    const pending = readReplyProbePending();
+    if (!pending) return;
+    const query = new URLSearchParams(location.search).get('q') || '';
+    if (query !== `conversation_id:${pending.rootStatusId}`) return;
+    setTimeout(() => {
+      runReplyProbe(pending).catch((error) => {
+        writeReplyProbeResult({
+          contractVersion: 1,
+          rootStatusId: pending.rootStatusId,
+          expectedDisplayedReplies: pending.expectedDisplayedReplies || 0,
+          uniquePostsCaptured: 0,
+          finishedAt: new Date().toISOString(),
+          stopReason: 'error',
+          error: String((error && error.message) || error || 'unknown error'),
+          records: [],
+        });
+        showToast(`Reply probe failed: ${error.message}`, { error: true, sticky: true });
+      });
+    }, 1200);
   }
 
   function hasOwnTweetText(tweetEl) {
@@ -9157,6 +9366,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           });
         },
         onPick: (exportType, trigger) => {
+          if (exportType === 'reply-probe') return startReplyProbe(tweetEl);
           const request = postExportRequest(exportType);
           return runExport(request.exportType, {
             targetTweetEl: tweetEl,
@@ -9574,6 +9784,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     registerSettingsMenu();
     registerExtensionController();
     ensureButton();
+    maybeResumeReplyProbe();
     log(`${APP} v${VERSION} ready`);
   }
 
@@ -9625,6 +9836,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       THREAD_EXPORT_TYPES,
       exportTypeNeedsCaptureOptions,
       postExportRequest,
+      replyProbeSearchUrl,
+      displayedReplyCount,
+      replyProbeTweetRecord,
+      captureVisibleReplyProbeTweets,
+      runReplyProbe,
       postControlCaptureMode,
       timelineArticlePreviewReason,
       showShareResult,
