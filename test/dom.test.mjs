@@ -507,6 +507,10 @@ check('reply probe collects unique timestamped search results and excludes ads/r
       engine.replyProbeSearchUrl('2000000000000000000'),
       'https://x.com/search?q=conversation_id%3A2000000000000000000&src=typed_query&f=live'
     );
+    assert.equal(
+      new URL(engine.replyProbeSearchUrl('2000000000000000000', 'run-123')).searchParams.get('q'),
+      'conversation_id:2000000000000000000 -"sourcecapsule-probe-run123"'
+    );
   } finally {
     global.window = priorWindow;
     global.document = priorWindow.document;

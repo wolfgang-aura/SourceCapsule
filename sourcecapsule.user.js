@@ -8260,10 +8260,18 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   const REPLY_PROBE_PENDING_KEY = 'sourcecapsule:reply-probe:pending';
   const REPLY_PROBE_LAST_KEY = 'sourcecapsule:reply-probe:last';
 
-  function replyProbeSearchUrl(statusId) {
+  function replyProbeSearchUrl(statusId, cacheNonce = '') {
     const id = String(statusId || '');
     if (!/^\d+$/.test(id)) return '';
-    const query = encodeURIComponent(`conversation_id:${id}`);
+    // X caches virtualized search segments by query text. A unique negative phrase forces a
+    // fresh Latest timeline while remaining semantically inert for real conversation posts.
+    const marker = String(cacheNonce || '')
+      .replace(/[^a-z0-9]/gi, '')
+      .slice(0, 24);
+    const queryText = marker
+      ? `conversation_id:${id} -"sourcecapsule-probe-${marker}"`
+      : `conversation_id:${id}`;
+    const query = encodeURIComponent(queryText);
     return `${location.origin}/search?q=${query}&src=typed_query&f=live`;
   }
 
@@ -8335,7 +8343,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 
   function startReplyProbe(tweetEl) {
     const rootStatusId = tweetStatusId(tweetEl) || currentStatusId();
-    const url = replyProbeSearchUrl(rootStatusId);
+    const url = replyProbeSearchUrl(rootStatusId, Date.now().toString(36));
     if (!url) {
       showToast('Reply probe could not determine the root post id.', { error: true, sticky: true });
       return;
@@ -8353,9 +8361,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       return;
     }
     showToast('Opening X Latest search for the reply probe...', { sticky: true });
-    // A nonce defeats X's SPA scroll restoration for a previous run of the same search.
-    // Without it, a repeated probe can resume near the old bottom and silently miss newer posts.
-    location.href = `${url}&sourcecapsule_probe=${Date.now()}`;
+    location.href = url;
   }
 
   async function runReplyProbe(pending, options = {}) {
@@ -8479,7 +8485,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const pending = readReplyProbePending();
     if (!pending) return;
     const query = new URLSearchParams(location.search).get('q') || '';
-    if (query !== `conversation_id:${pending.rootStatusId}`) return;
+    if (!query.startsWith(`conversation_id:${pending.rootStatusId}`)) return;
     setTimeout(() => {
       runReplyProbe(pending).catch((error) => {
         writeReplyProbeResult({
