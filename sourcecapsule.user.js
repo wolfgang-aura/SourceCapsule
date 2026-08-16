@@ -8260,18 +8260,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   const REPLY_PROBE_PENDING_KEY = 'sourcecapsule:reply-probe:pending';
   const REPLY_PROBE_LAST_KEY = 'sourcecapsule:reply-probe:last';
 
-  function replyProbeSearchUrl(statusId, cacheNonce = '') {
+  function replyProbeSearchUrl(statusId) {
     const id = String(statusId || '');
     if (!/^\d+$/.test(id)) return '';
-    // X caches virtualized search segments by query text. A unique negative phrase forces a
-    // fresh Latest timeline while remaining semantically inert for real conversation posts.
-    const marker = String(cacheNonce || '')
-      .replace(/[^a-z0-9]/gi, '')
-      .slice(0, 24);
-    const queryText = marker
-      ? `conversation_id:${id} -"sourcecapsule-probe-${marker}"`
-      : `conversation_id:${id}`;
-    const query = encodeURIComponent(queryText);
+    const query = encodeURIComponent(`conversation_id:${id}`);
     return `${location.origin}/search?q=${query}&src=typed_query&f=live`;
   }
 
@@ -8343,7 +8335,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 
   function startReplyProbe(tweetEl) {
     const rootStatusId = tweetStatusId(tweetEl) || currentStatusId();
-    const url = replyProbeSearchUrl(rootStatusId, Date.now().toString(36));
+    const url = replyProbeSearchUrl(rootStatusId);
     if (!url) {
       showToast('Reply probe could not determine the root post id.', { error: true, sticky: true });
       return;
@@ -8485,7 +8477,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const pending = readReplyProbePending();
     if (!pending) return;
     const query = new URLSearchParams(location.search).get('q') || '';
-    if (!query.startsWith(`conversation_id:${pending.rootStatusId}`)) return;
+    if (query !== `conversation_id:${pending.rootStatusId}`) return;
     setTimeout(() => {
       runReplyProbe(pending).catch((error) => {
         writeReplyProbeResult({
