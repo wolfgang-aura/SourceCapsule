@@ -8338,9 +8338,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   ];
   const THREAD_EXPORT_TYPES = [
     { key: 'library-thread', label: 'Save full thread' },
-    { key: 'reply-probe', label: 'Probe replies · Latest' },
-    { key: 'reply-probe-top', label: 'Probe replies · Top' },
-    { key: 'reply-probe-relevant', label: 'Probe replies · Relevant' },
+    { key: 'reply-probe', label: 'Reply audit (experimental) · Latest' },
+    { key: 'reply-probe-top', label: 'Reply audit (experimental) · Top' },
+    { key: 'reply-probe-relevant', label: 'Reply audit (experimental) · Relevant' },
     { divider: true },
     ...POST_EXPORT_TYPES,
   ];
@@ -8359,7 +8359,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   const REPLY_PROBE_PENDING_KEY = 'sourcecapsule:reply-probe:pending';
   const REPLY_PROBE_LAST_KEY = 'sourcecapsule:reply-probe:last';
   const REPLY_PROBE_HISTORY_KEY = 'sourcecapsule:reply-probe:history';
-  const REPLY_PROBE_HISTORY_MAX = 5;
+  const REPLY_PROBE_HISTORY_ROOT_MAX = 10;
 
   function replyProbeSearchUrl(statusId, surface = 'latest') {
     const id = String(statusId || '');
@@ -8417,6 +8417,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       }
       const record = replyProbeTweetRecord(tweetEl);
       if (!record || record.id === String(rootStatusId || '') || records.has(record.id)) continue;
+      record.provenance = 'dom-observed';
+      record.discoveredSurface = options.surface || replyProbeSurfaceFromUrl(location.href);
+      record.discoveredSurfaces = [record.discoveredSurface];
       records.set(record.id, record);
       added += 1;
     }
@@ -8460,15 +8463,31 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   }
 
   function compactReplyProbeHistoryEntry(result) {
-    const compactRecord = (record) => ({
-      id: String(record.id || ''),
-      handle: String(record.handle || ''),
-      url: String(record.url || ''),
-    });
+    const surface = result.surface || replyProbeSurfaceFromUrl(result.sourceUrl);
+    const compactRecord = (record, provenance) => {
+      const discoveredSurfaces = Array.from(
+        new Set(
+          [
+            ...(Array.isArray(record.discoveredSurfaces) ? record.discoveredSurfaces : []),
+            record.discoveredSurface,
+            surface,
+          ].filter(Boolean)
+        )
+      ).sort();
+      return {
+        id: String(record.id || ''),
+        handle: String(record.handle || ''),
+        url: String(record.url || ''),
+        provenance: String(record.provenance || provenance),
+        discoveredSurface: discoveredSurfaces[0] || surface,
+        discoveredSurfaces,
+      };
+    };
     return {
-      contractVersion: result.contractVersion,
+      contractVersion: 2,
       rootStatusId: result.rootStatusId,
-      surface: result.surface || replyProbeSurfaceFromUrl(result.sourceUrl),
+      surface,
+      runCount: 1,
       expectedDisplayedReplies: result.expectedDisplayedReplies,
       uniquePostsCaptured: result.uniquePostsCaptured,
       knownReplyIds: result.gapReport ? result.gapReport.knownReplyIds : 0,
@@ -8479,19 +8498,105 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       elapsedMs: result.elapsedMs,
       stopReason: result.stopReason,
       sourceUrl: result.sourceUrl,
-      records: (result.records || []).map(compactRecord),
-      networkRecords: (result.networkRecords || []).map(compactRecord),
+      records: (result.records || []).map((record) => compactRecord(record, 'dom-observed')),
+      networkRecords: (result.networkRecords || []).map((record) =>
+        compactRecord(record, 'network-confirmed')
+      ),
     };
+  }
+
+  function mergeReplyProbeRecordLists(existing = [], incoming = []) {
+    const byId = new Map();
+    [...existing, ...incoming].forEach((record) => {
+      const id = String((record && record.id) || '');
+      if (!/^\d+$/.test(id)) return;
+      const prior = byId.get(id) || {};
+      const discoveredSurfaces = Array.from(
+        new Set(
+          [
+            ...(Array.isArray(prior.discoveredSurfaces) ? prior.discoveredSurfaces : []),
+            prior.discoveredSurface,
+            ...(Array.isArray(record.discoveredSurfaces) ? record.discoveredSurfaces : []),
+            record.discoveredSurface,
+          ].filter(Boolean)
+        )
+      ).sort();
+      byId.set(id, {
+        ...prior,
+        ...record,
+        id,
+        handle: record.handle || prior.handle || '',
+        url: record.url || prior.url || '',
+        provenance: record.provenance || prior.provenance || '',
+        discoveredSurface: discoveredSurfaces[0] || '',
+        discoveredSurfaces,
+      });
+    });
+    return Array.from(byId.values()).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  }
+
+  function mergeReplyProbeHistory(history, incoming) {
+    const byKey = new Map();
+    [...(history || []), incoming].filter(Boolean).forEach((entry) => {
+      const rootStatusId = String(entry.rootStatusId || '');
+      const surface = entry.surface || replyProbeSurfaceFromUrl(entry.sourceUrl);
+      if (!/^\d+$/.test(rootStatusId)) return;
+      const key = `${rootStatusId}:${surface}`;
+      const prior = byKey.get(key);
+      if (!prior) {
+        byKey.set(key, {
+          ...entry,
+          contractVersion: 2,
+          rootStatusId,
+          surface,
+          runCount: Math.max(1, Number(entry.runCount) || 1),
+          records: mergeReplyProbeRecordLists([], entry.records),
+          networkRecords: mergeReplyProbeRecordLists([], entry.networkRecords),
+        });
+        return;
+      }
+      const records = mergeReplyProbeRecordLists(prior.records, entry.records);
+      const networkRecords = mergeReplyProbeRecordLists(prior.networkRecords, entry.networkRecords);
+      byKey.set(key, {
+        ...prior,
+        ...entry,
+        contractVersion: 2,
+        rootStatusId,
+        surface,
+        runCount: (Number(prior.runCount) || 1) + (Number(entry.runCount) || 1),
+        startedAt:
+          [prior.startedAt, entry.startedAt].filter(Boolean).sort()[0] || entry.startedAt || '',
+        finishedAt:
+          [prior.finishedAt, entry.finishedAt].filter(Boolean).sort().pop() ||
+          entry.finishedAt ||
+          '',
+        records,
+        networkRecords,
+        uniquePostsCaptured: records.length,
+        knownReplyIds: new Set([
+          ...records.map((record) => record.id),
+          ...networkRecords.map((record) => record.id),
+        ]).size,
+      });
+    });
+    const merged = Array.from(byKey.values()).sort((a, b) =>
+      String(b.finishedAt || '').localeCompare(String(a.finishedAt || ''))
+    );
+    const retainedRoots = [];
+    merged.forEach((entry) => {
+      if (!retainedRoots.includes(entry.rootStatusId)) retainedRoots.push(entry.rootStatusId);
+    });
+    const allowedRoots = new Set(retainedRoots.slice(0, REPLY_PROBE_HISTORY_ROOT_MAX));
+    return merged.filter((entry) => allowedRoots.has(entry.rootStatusId));
   }
 
   function writeReplyProbeResult(result) {
     try {
       localStorage.setItem(REPLY_PROBE_LAST_KEY, JSON.stringify(result));
       const history = readReplyProbeHistory();
-      history.unshift(compactReplyProbeHistoryEntry(result));
       localStorage.setItem(
         REPLY_PROBE_HISTORY_KEY,
-        JSON.stringify(history.slice(0, REPLY_PROBE_HISTORY_MAX))
+        JSON.stringify(mergeReplyProbeHistory(history, compactReplyProbeHistoryEntry(result)))
       );
     } catch (error) {
       result.storageError = String((error && error.message) || error || 'storage failed');
@@ -8508,16 +8613,41 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   }) {
     const root = String(rootStatusId || '');
     const completeById = new Map();
+    const mergeRecord = (prior = {}, record = {}, fallbackSurface = surface) => {
+      const discoveredSurfaces = Array.from(
+        new Set(
+          [
+            ...(Array.isArray(prior.discoveredSurfaces) ? prior.discoveredSurfaces : []),
+            prior.discoveredSurface,
+            ...(Array.isArray(record.discoveredSurfaces) ? record.discoveredSurfaces : []),
+            record.discoveredSurface,
+            fallbackSurface,
+          ].filter(Boolean)
+        )
+      ).sort();
+      return {
+        ...prior,
+        ...record,
+        handle: record.handle || prior.handle || '',
+        url: record.url || prior.url || '',
+        discoveredSurface: discoveredSurfaces[0] || fallbackSurface,
+        discoveredSurfaces,
+      };
+    };
     if (domRecords instanceof Map) {
-      domRecords.forEach((record, id) => completeById.set(String(id), record));
+      domRecords.forEach((record, id) =>
+        completeById.set(String(id), mergeRecord(completeById.get(String(id)), record, surface))
+      );
     }
     const surfaces = new Set([surface]);
     (history || []).forEach((entry) => {
       if (!entry || String(entry.rootStatusId || '') !== root) return;
-      surfaces.add(entry.surface || replyProbeSurfaceFromUrl(entry.sourceUrl));
+      const entrySurface = entry.surface || replyProbeSurfaceFromUrl(entry.sourceUrl);
+      surfaces.add(entrySurface);
       (entry.records || []).forEach((record) => {
         if (record && /^\d+$/.test(String(record.id || ''))) {
-          completeById.set(String(record.id), record);
+          const id = String(record.id);
+          completeById.set(id, mergeRecord(completeById.get(id), record, entrySurface));
         }
       });
     });
@@ -8535,18 +8665,27 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const id = String(record.id);
       const existing = networkById.get(id) || {};
       const handle = record.handle || existing.handle || '';
-      networkById.set(id, {
-        ...existing,
-        ...record,
+      networkById.set(
         id,
-        conversationId: root,
-        handle,
-        url:
-          record.url ||
-          existing.url ||
-          (handle ? `https://x.com/${handle}/status/${id}` : `https://x.com/i/web/status/${id}`),
-        discoveredSurface: record.discoveredSurface || discoveredSurface,
-      });
+        mergeRecord(
+          existing,
+          {
+            ...existing,
+            ...record,
+            id,
+            conversationId: root,
+            handle,
+            url:
+              record.url ||
+              existing.url ||
+              (handle
+                ? `https://x.com/${handle}/status/${id}`
+                : `https://x.com/i/web/status/${id}`),
+            discoveredSurface: record.discoveredSurface || discoveredSurface,
+          },
+          discoveredSurface
+        )
+      );
     };
     (networkRecords || []).forEach((record) => addNetworkRecord(record, surface));
     (history || []).forEach((entry) => {
@@ -8555,30 +8694,51 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       (entry.networkRecords || []).forEach((record) => addNetworkRecord(record, entrySurface));
     });
     const knownIds = new Set([...completeIds, ...networkById.keys()]);
-    const knownGaps = Array.from(networkById.values())
-      .filter((record) => !completeIds.has(String(record.id)))
-      .map((record) => ({
-        ...record,
-        captureStatus: 'network-only',
-        reason: record.unavailable
-          ? record.unavailableReason || 'unavailable'
-          : record.text
-            ? 'not-seen-in-dom'
-            : 'missing-text',
-      }))
+    const inventory = Array.from(knownIds)
+      .map((id) => {
+        const domRecord = completeById.get(id);
+        const networkRecord = networkById.get(id);
+        const record = mergeRecord(domRecord, networkRecord, surface);
+        const captureStatus = domRecord ? 'captured' : 'network-only';
+        const provenance = domRecord
+          ? networkRecord
+            ? 'network-confirmed+dom'
+            : 'dom-only'
+          : 'network-confirmed';
+        return {
+          ...record,
+          id,
+          conversationId: root,
+          captureStatus,
+          provenance,
+          reason: domRecord
+            ? 'seen-in-dom'
+            : record.unavailable
+              ? record.unavailableReason || 'unavailable'
+              : record.text
+                ? 'not-seen-in-dom'
+                : 'missing-text',
+        };
+      })
       .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const knownGaps = inventory.filter((record) => record.captureStatus === 'network-only');
     const expected = Math.max(0, Number(expectedDisplayedReplies) || 0);
     return {
-      contractVersion: 1,
+      contractVersion: 2,
       rootStatusId: root,
       surface,
       surfaces: Array.from(surfaces).sort(),
       expectedDisplayedReplies: expected,
+      publicReplyCountReference: expected,
+      publicReplyCountComparable: false,
       completeDomRecords: completeIds.size,
+      domObservedUnion: completeIds.size,
       networkReplyIds: networkById.size,
       knownReplyIds: knownIds.size,
+      knownConversationIds: knownIds.size,
+      inventory,
       knownGaps,
-      unidentifiedResidual: Math.max(0, expected - knownIds.size),
+      unidentifiedResidual: null,
     };
   }
 
@@ -8593,6 +8753,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       'reply_id',
       'url',
       'handle',
+      'provenance',
+      'surfaces',
       'capture_status',
       'reason',
       'conversation_id',
@@ -8603,16 +8765,20 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       '',
       '',
       '',
+      '',
+      '',
       'summary',
-      `surfaces=${(report.surfaces || []).join('+')}; expected_displayed=${report.expectedDisplayedReplies}; complete_union=${report.completeDomRecords}; known_ids=${report.knownReplyIds}; known_gaps=${report.knownGaps.length}; unidentified_residual=${report.unidentifiedResidual}`,
+      `surfaces=${(report.surfaces || []).join('+')}; x_public_reply_count_reference=${report.publicReplyCountReference || 0}; not_completeness_denominator=true; best_effort=true; cannot_detect=deleted+private+never-delivered; dom_observed_union=${report.domObservedUnion}; known_conversation_ids=${report.knownConversationIds}; network_only_gaps=${report.knownGaps.length}`,
       report.rootStatusId,
       '',
     ];
-    const rows = (report.knownGaps || []).map((record) => [
-      'known-gap',
+    const rows = (report.inventory || report.knownGaps || []).map((record) => [
+      record.captureStatus === 'network-only' ? 'known-gap' : 'captured',
       record.id,
       record.url,
       record.handle,
+      record.provenance,
+      (record.discoveredSurfaces || [record.discoveredSurface]).filter(Boolean).join('+'),
       record.captureStatus,
       record.reason,
       record.conversationId,
@@ -8794,7 +8960,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       surface,
     });
     const result = {
-      contractVersion: 1,
+      contractVersion: 2,
       rootStatusId: String(pending.rootStatusId),
       surface,
       expectedDisplayedReplies: Number(pending.expectedDisplayedReplies) || 0,
@@ -8827,13 +8993,13 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     } catch {
       // A completed result is already persisted; a stale pending key is harmless.
     }
-    const expected = result.expectedDisplayedReplies
-      ? ` / ${result.expectedDisplayedReplies} displayed by X`
+    const publicCount = result.expectedDisplayedReplies
+      ? ` X public reply-count reference: ${result.expectedDisplayedReplies} (not a completeness denominator).`
       : '';
-    const gapSummary = ` Union: ${gapReport.completeDomRecords}${expected}. Known gaps: ${gapReport.knownGaps.length}; unidentified: ${gapReport.unidentifiedResidual}.`;
+    const gapSummary = ` Union inventory: ${gapReport.domObservedUnion} DOM-observed; ${gapReport.knownConversationIds} conversation IDs known. Network-only gaps: ${gapReport.knownGaps.length}. Best effort: deleted, private, and never-delivered replies remain unknowable.`;
     const downloadSummary = reportDownloaded ? ' CSV downloaded.' : '';
     showToast(
-      `Reply probe finished: ${records.size}${expected}. Stop: ${stopReason}.${gapSummary}${downloadSummary} Result saved locally.`,
+      `Reply probe finished: ${records.size} DOM-observed on ${surface}. Stop: ${stopReason}.${publicCount}${gapSummary}${downloadSummary} Result saved locally.`,
       {
         error: !['pagination-idle', 'conversation-boundary'].includes(stopReason),
         sticky: true,
