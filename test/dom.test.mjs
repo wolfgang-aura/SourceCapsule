@@ -457,6 +457,7 @@ check(
     assert.equal(focusedMode.menuItems[1].key, 'reply-probe');
     assert.equal(focusedMode.menuItems[2].key, 'reply-probe-top');
     assert.equal(focusedMode.menuItems[3].key, 'reply-probe-relevant');
+    assert.ok(focusedMode.menuItems.slice(1, 4).every((item) => /experimental/i.test(item.label)));
     const continuationMode = engine.postControlCaptureMode(continuation, column);
     assert.equal(continuationMode.isThread, false);
     assert.equal(continuationMode.includeThread, false);
@@ -652,22 +653,47 @@ check('reply probe inventories SearchTimeline ids and reports only confirmed DOM
   assert.equal(report.knownGaps[0].id, '2000000000000000002');
   assert.equal(report.knownGaps[0].handle, 'network_only');
   assert.match(report.knownGaps[0].url, /network_only\/status\/2000000000000000002$/);
-  assert.equal(report.unidentifiedResidual, 1);
+  assert.equal(report.unidentifiedResidual, null);
   const csv = engine.replyGapReportCsv(report);
   assert.match(csv, /known-gap,2000000000000000002/);
   assert.match(csv, /Delivered by X but missed by the DOM collector/);
   assert.doesNotMatch(csv, /2999999999999999999/);
 });
 
-check('reply probe preserves five compact run inventories without duplicating full text', () => {
+check('reply probe cumulatively preserves each surface without duplicating full text', () => {
   const storageDom = new JSDOM('<!doctype html><body></body>', { url: 'https://x.com/' });
   const priorLocalStorage = global.localStorage;
   global.localStorage = storageDom.window.localStorage;
   try {
+    engine.writeReplyProbeResult({
+      contractVersion: 2,
+      rootStatusId: '2000000000000000000',
+      surface: 'latest',
+      expectedDisplayedReplies: 10,
+      uniquePostsCaptured: 1,
+      startedAt: '2026-08-17T00:00:00.000Z',
+      finishedAt: '2026-08-17T00:01:00.000Z',
+      elapsedMs: 60_000,
+      stopReason: 'pagination-idle',
+      sourceUrl: 'https://x.com/search?f=live',
+      records: [
+        {
+          id: '2000000000000000001',
+          handle: 'latest',
+          url: 'https://x.com/latest/status/2000000000000000001',
+          text: 'Full reply text must not be duplicated into history',
+          provenance: 'dom-observed',
+          discoveredSurface: 'latest',
+        },
+      ],
+      networkRecords: [],
+      gapReport: { knownReplyIds: 1, knownGaps: [] },
+    });
     for (let index = 0; index < 6; index += 1) {
       engine.writeReplyProbeResult({
-        contractVersion: 1,
+        contractVersion: 2,
         rootStatusId: '2000000000000000000',
+        surface: 'top',
         expectedDisplayedReplies: 10,
         uniquePostsCaptured: index,
         startedAt: `2026-08-17T00:00:0${index}.000Z`,
@@ -681,21 +707,29 @@ check('reply probe preserves five compact run inventories without duplicating fu
             handle: 'tester',
             url: `https://x.com/tester/status/200000000000000000${index}`,
             text: 'Full reply text must not be duplicated into history',
+            provenance: 'dom-observed',
+            discoveredSurface: 'top',
           },
         ],
         networkRecords: [],
         gapReport: {
           knownReplyIds: index,
           knownGaps: [],
-          unidentifiedResidual: 10 - index,
         },
       });
     }
     const history = engine.readReplyProbeHistory();
-    assert.equal(history.length, 5);
-    assert.equal(history[0].uniquePostsCaptured, 5);
-    assert.equal(history[4].uniquePostsCaptured, 1);
-    assert.equal(history[0].records[0].text, undefined);
+    assert.equal(history.length, 2);
+    const latest = history.find((entry) => entry.surface === 'latest');
+    const top = history.find((entry) => entry.surface === 'top');
+    assert.deepEqual(
+      latest.records.map((record) => record.id),
+      ['2000000000000000001']
+    );
+    assert.equal(top.records.length, 6);
+    assert.equal(top.runCount, 6);
+    assert.equal(top.records[0].text, undefined);
+    assert.equal(top.records[0].provenance, 'dom-observed');
   } finally {
     global.localStorage = priorLocalStorage;
   }
@@ -739,7 +773,65 @@ check('reply gap report unions complete ids across Latest, Top, and Relevant his
     report.knownGaps.map((record) => record.id),
     ['2000000000000000004']
   );
-  assert.equal(report.unidentifiedResidual, 1);
+  assert.equal(report.unidentifiedResidual, null);
+});
+
+check('reply audit labels provenance and treats X reply count as reference only', () => {
+  const rootStatusId = '2000000000000000000';
+  const report = engine.buildReplyGapReport({
+    rootStatusId,
+    expectedDisplayedReplies: 1,
+    surface: 'relevant',
+    domRecords: new Map([
+      [
+        '2000000000000000001',
+        {
+          id: '2000000000000000001',
+          handle: 'both',
+          discoveredSurface: 'relevant',
+        },
+      ],
+      [
+        '2000000000000000002',
+        {
+          id: '2000000000000000002',
+          handle: 'dom_only',
+          discoveredSurface: 'relevant',
+        },
+      ],
+    ]),
+    networkRecords: [
+      {
+        id: '2000000000000000001',
+        handle: 'both',
+        conversationId: rootStatusId,
+        discoveredSurface: 'relevant',
+      },
+      {
+        id: '2000000000000000003',
+        handle: 'network_only',
+        conversationId: rootStatusId,
+        discoveredSurface: 'relevant',
+      },
+    ],
+  });
+  assert.equal(report.publicReplyCountReference, 1);
+  assert.equal(report.publicReplyCountComparable, false);
+  assert.equal(report.unidentifiedResidual, null);
+  assert.deepEqual(
+    report.inventory.map(({ id, provenance }) => [id, provenance]),
+    [
+      ['2000000000000000001', 'network-confirmed+dom'],
+      ['2000000000000000002', 'dom-only'],
+      ['2000000000000000003', 'network-confirmed'],
+    ]
+  );
+  const csv = engine.replyGapReportCsv(report);
+  assert.match(csv, /x_public_reply_count_reference=1; not_completeness_denominator=true/);
+  assert.match(csv, /best_effort=true; cannot_detect=deleted\+private\+never-delivered/);
+  assert.match(csv, /captured,2000000000000000002[^\r\n]+dom-only/);
+  assert.match(csv, /known-gap,2000000000000000003[^\r\n]+network-confirmed/);
+  assert.doesNotMatch(csv, /unidentified_residual/);
 });
 
 check(
