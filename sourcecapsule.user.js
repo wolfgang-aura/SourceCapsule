@@ -8357,7 +8357,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   }
 
   async function runReplyProbe(pending, options = {}) {
-    const maxMs = Number(options.maxMs) || 120000;
+    // Large conversations can take several minutes because the probe intentionally lets X's
+    // own UI pace pagination. Four minutes is still bounded, but avoids reporting a false
+    // coverage ceiling when a ~1,000-reply search is simply one or two pages from exhaustion.
+    const maxMs = Number(options.maxMs) || 240000;
     const idleMs = Number(options.idleMs) || 12000;
     const tickMs = Number(options.tickMs) || 450;
     const records = new Map();
