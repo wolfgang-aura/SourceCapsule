@@ -455,6 +455,8 @@ check(
     // thread" on every focused post - assert order, not just presence.
     assert.equal(focusedMode.menuItems[0].key, 'library-thread');
     assert.equal(focusedMode.menuItems[1].key, 'reply-probe');
+    assert.equal(focusedMode.menuItems[2].key, 'reply-probe-top');
+    assert.equal(focusedMode.menuItems[3].key, 'reply-probe-relevant');
     const continuationMode = engine.postControlCaptureMode(continuation, column);
     assert.equal(continuationMode.isThread, false);
     assert.equal(continuationMode.includeThread, false);
@@ -507,12 +509,47 @@ check('reply probe collects unique timestamped search results and excludes ads/r
       engine.replyProbeSearchUrl('2000000000000000000'),
       'https://x.com/search?q=conversation_id%3A2000000000000000000&src=typed_query&f=live'
     );
+    assert.equal(
+      engine.replyProbeSearchUrl('2000000000000000000', 'top'),
+      'https://x.com/search?q=conversation_id%3A2000000000000000000&src=typed_query'
+    );
   } finally {
     global.window = priorWindow;
     global.document = priorWindow.document;
     global.Node = priorWindow.Node;
     global.location = priorWindow.location;
     global.localStorage = priorWindow.localStorage;
+  }
+});
+
+check('Relevant reply probe stops before X recommendation sections', () => {
+  const relevantDom = new JSDOM(
+    `<!doctype html><html><body><div data-testid="primaryColumn">
+      <article data-testid="tweet"><div data-testid="tweetText">Root</div><a href="/root/status/2000000000000000000"><time>Aug 9</time></a></article>
+      <article data-testid="tweet"><div data-testid="tweetText">Conversation reply</div><a href="/reply/status/2000000000000000001"><time>Aug 9</time></a></article>
+      <div><h2 role="heading">Discover more</h2></div>
+      <article data-testid="tweet"><div data-testid="tweetText">Unrelated recommendation</div><a href="/other/status/2999999999999999999"><time>Aug 9</time></a></article>
+    </div></body></html>`,
+    { url: 'https://x.com/root/status/2000000000000000000' }
+  );
+  const priorWindow = global.window;
+  global.window = relevantDom.window;
+  global.document = relevantDom.window.document;
+  global.Node = relevantDom.window.Node;
+  global.location = relevantDom.window.location;
+  try {
+    const records = new Map();
+    engine.captureVisibleReplyProbeTweets(records, '2000000000000000000', {
+      surface: 'relevant',
+      column: document.querySelector('[data-testid="primaryColumn"]'),
+    });
+    assert.deepEqual(Array.from(records.keys()), ['2000000000000000001']);
+    assert.equal(engine.replyProbeConversationBoundaryVisible(), true);
+  } finally {
+    global.window = priorWindow;
+    global.document = priorWindow.document;
+    global.Node = priorWindow.Node;
+    global.location = priorWindow.location;
   }
 });
 
@@ -662,6 +699,47 @@ check('reply probe preserves five compact run inventories without duplicating fu
   } finally {
     global.localStorage = priorLocalStorage;
   }
+});
+
+check('reply gap report unions complete ids across Latest, Top, and Relevant histories', () => {
+  const rootStatusId = '2000000000000000000';
+  const currentRecords = new Map([
+    ['2000000000000000002', { id: '2000000000000000002', handle: 'overlap' }],
+    ['2000000000000000003', { id: '2000000000000000003', handle: 'top_only' }],
+  ]);
+  const history = [
+    {
+      rootStatusId,
+      surface: 'latest',
+      records: [
+        { id: '2000000000000000001', handle: 'latest_only' },
+        { id: '2000000000000000002', handle: 'overlap' },
+      ],
+      networkRecords: [],
+    },
+    {
+      rootStatusId,
+      surface: 'relevant',
+      records: [{ id: '2000000000000000001', handle: 'latest_only' }],
+      networkRecords: [{ id: '2000000000000000004', handle: 'network_only' }],
+    },
+  ];
+  const report = engine.buildReplyGapReport({
+    rootStatusId,
+    expectedDisplayedReplies: 5,
+    domRecords: currentRecords,
+    networkRecords: [],
+    history,
+    surface: 'top',
+  });
+  assert.equal(report.completeDomRecords, 3);
+  assert.equal(report.knownReplyIds, 4);
+  assert.deepEqual(report.surfaces, ['latest', 'relevant', 'top']);
+  assert.deepEqual(
+    report.knownGaps.map((record) => record.id),
+    ['2000000000000000004']
+  );
+  assert.equal(report.unidentifiedResidual, 1);
 });
 
 check(

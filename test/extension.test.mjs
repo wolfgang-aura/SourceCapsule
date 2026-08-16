@@ -163,6 +163,15 @@ const searchCaptureResult = new Promise((resolve) => {
 await searchBridgeDom.window.fetch('https://x.com/i/api/graphql/test/SearchTimeline');
 const searchCapture = await searchCaptureResult;
 assert.equal(searchCapture.body, plainSearchBody);
+const detailCaptureResult = new Promise((resolve) => {
+  searchBridgeDom.window.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'response' && /TweetDetail/.test(event.data.url || ''))
+      resolve(event.data);
+  });
+});
+await searchBridgeDom.window.fetch('https://x.com/i/api/graphql/test/TweetDetail');
+const detailCapture = await detailCaptureResult;
+assert.equal(detailCapture.body, plainSearchBody);
 const bridgeResult = new Promise((resolve) => {
   bridgeDom.window.addEventListener('message', (event) => {
     if (event.data && event.data.source === 'SourceCapsule:folder-picker') resolve(event.data);
