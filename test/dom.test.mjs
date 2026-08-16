@@ -516,6 +516,154 @@ check('reply probe collects unique timestamped search results and excludes ads/r
   }
 });
 
+check('reply probe inventories SearchTimeline ids and reports only confirmed DOM gaps', () => {
+  const rootStatusId = '2000000000000000000';
+  const timelineBody = JSON.stringify({
+    data: {
+      search_by_raw_query: {
+        search_timeline: {
+          timeline: {
+            instructions: [
+              {
+                entries: [
+                  {
+                    content: {
+                      itemContent: {
+                        tweet_results: {
+                          result: {
+                            __typename: 'Tweet',
+                            rest_id: '2000000000000000001',
+                            core: {
+                              user_results: { result: { legacy: { screen_name: 'captured' } } },
+                            },
+                            legacy: {
+                              conversation_id_str: rootStatusId,
+                              full_text: 'Already captured from the DOM',
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                  {
+                    content: {
+                      itemContent: {
+                        tweet_results: {
+                          result: {
+                            __typename: 'TweetWithVisibilityResults',
+                            tweet: {
+                              __typename: 'Tweet',
+                              rest_id: '2000000000000000002',
+                              core: {
+                                user_results: {
+                                  result: { legacy: { screen_name: 'network_only' } },
+                                },
+                              },
+                              legacy: {
+                                conversation_id_str: rootStatusId,
+                                full_text: 'Delivered by X but missed by the DOM collector',
+                              },
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                  {
+                    content: {
+                      itemContent: {
+                        tweet_results: {
+                          result: {
+                            __typename: 'Tweet',
+                            rest_id: '2999999999999999999',
+                            legacy: {
+                              conversation_id_str: '2999999999999999999',
+                              full_text: 'Promoted or unrelated result',
+                            },
+                          },
+                        },
+                      },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      },
+    },
+  });
+  const inventory = engine.searchTimelineReplyRecordsFromCapturedBody(timelineBody);
+  assert.deepEqual(
+    inventory.map((record) => record.id),
+    ['2000000000000000001', '2000000000000000002', '2999999999999999999']
+  );
+  const domRecords = new Map([
+    [
+      '2000000000000000001',
+      { id: '2000000000000000001', handle: 'captured', text: 'Complete DOM record' },
+    ],
+  ]);
+  const report = engine.buildReplyGapReport({
+    rootStatusId,
+    expectedDisplayedReplies: 3,
+    domRecords,
+    networkRecords: inventory,
+  });
+  assert.equal(report.knownReplyIds, 2);
+  assert.equal(report.knownGaps.length, 1);
+  assert.equal(report.knownGaps[0].id, '2000000000000000002');
+  assert.equal(report.knownGaps[0].handle, 'network_only');
+  assert.match(report.knownGaps[0].url, /network_only\/status\/2000000000000000002$/);
+  assert.equal(report.unidentifiedResidual, 1);
+  const csv = engine.replyGapReportCsv(report);
+  assert.match(csv, /known-gap,2000000000000000002/);
+  assert.match(csv, /Delivered by X but missed by the DOM collector/);
+  assert.doesNotMatch(csv, /2999999999999999999/);
+});
+
+check('reply probe preserves five compact run inventories without duplicating full text', () => {
+  const storageDom = new JSDOM('<!doctype html><body></body>', { url: 'https://x.com/' });
+  const priorLocalStorage = global.localStorage;
+  global.localStorage = storageDom.window.localStorage;
+  try {
+    for (let index = 0; index < 6; index += 1) {
+      engine.writeReplyProbeResult({
+        contractVersion: 1,
+        rootStatusId: '2000000000000000000',
+        expectedDisplayedReplies: 10,
+        uniquePostsCaptured: index,
+        startedAt: `2026-08-17T00:00:0${index}.000Z`,
+        finishedAt: `2026-08-17T00:01:0${index}.000Z`,
+        elapsedMs: 60_000,
+        stopReason: 'timeout',
+        sourceUrl: 'https://x.com/search',
+        records: [
+          {
+            id: `200000000000000000${index}`,
+            handle: 'tester',
+            url: `https://x.com/tester/status/200000000000000000${index}`,
+            text: 'Full reply text must not be duplicated into history',
+          },
+        ],
+        networkRecords: [],
+        gapReport: {
+          knownReplyIds: index,
+          knownGaps: [],
+          unidentifiedResidual: 10 - index,
+        },
+      });
+    }
+    const history = engine.readReplyProbeHistory();
+    assert.equal(history.length, 5);
+    assert.equal(history[0].uniquePostsCaptured, 5);
+    assert.equal(history[4].uniquePostsCaptured, 1);
+    assert.equal(history[0].records[0].text, undefined);
+  } finally {
+    global.localStorage = priorLocalStorage;
+  }
+});
+
 check(
   'focused post with only one visible tweet still offers Save full thread as an escape hatch',
   () => {

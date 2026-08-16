@@ -6632,6 +6632,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   // { quotedId, quotedHandle }. Survives SPA navigations, capped like note tweets.
   const capturedQuotedRefs = new Map();
   const CAPTURED_QUOTED_REFS_MAX = 600;
+  // Reply ids passively inventoried from SearchTimeline responses X fetched for its own
+  // Latest-search UI. These let the reply probe distinguish a DOM miss from a reply whose
+  // identity X never delivered at all. Keyed by `<conversationId>:<statusId>`.
+  const capturedSearchTimelineReplies = new Map();
+  const CAPTURED_SEARCH_TIMELINE_REPLIES_MAX = 5000;
   const networkCaptureDiagnostics = {
     installed: false,
     mode: 'not-installed',
@@ -6644,6 +6649,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     candidates: 0,
     noteTweets: 0,
     quotedRefs: 0,
+    searchTimelineReplies: 0,
     truncatedResponses: 0,
     lastTruncatedUrl: '',
     errors: [],
@@ -6943,6 +6949,90 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return capturedQuotedRefs.get(String(parentStatusId || '')) || null;
   }
 
+  function searchTimelineReplyRecordsFromCapturedBody(body) {
+    const raw = String(body || '').trim();
+    if (!raw || (raw[0] !== '{' && raw[0] !== '[') || !/conversation_id_str/.test(raw)) {
+      return [];
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+    const records = new Map();
+    const seen = new Set();
+    const visit = (value) => {
+      if (!value || typeof value !== 'object' || seen.has(value)) return;
+      seen.add(value);
+      if (Array.isArray(value)) {
+        value.forEach(visit);
+        return;
+      }
+      const legacy = value.legacy && typeof value.legacy === 'object' ? value.legacy : null;
+      const id = String(value.rest_id || (legacy && legacy.id_str) || '');
+      const conversationId = String((legacy && legacy.conversation_id_str) || '');
+      if (/^\d+$/.test(id) && /^\d+$/.test(conversationId)) {
+        const userResult =
+          value.core &&
+          value.core.user_results &&
+          value.core.user_results.result &&
+          (value.core.user_results.result.user || value.core.user_results.result);
+        const userLegacy = (userResult && userResult.legacy) || {};
+        const handle = String(userLegacy.screen_name || '');
+        const text = String((legacy && (legacy.full_text || legacy.text)) || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        const unavailable = /Tombstone|Unavailable/i.test(String(value.__typename || ''));
+        const existing = records.get(id);
+        if (!existing || (!existing.handle && handle) || (!existing.text && text)) {
+          records.set(id, {
+            id,
+            conversationId,
+            handle,
+            url: handle
+              ? `https://x.com/${handle}/status/${id}`
+              : `https://x.com/i/web/status/${id}`,
+            text: text.slice(0, 2000),
+            unavailable,
+            unavailableReason: unavailable ? String(value.__typename || 'unavailable') : '',
+          });
+        }
+      }
+      Object.values(value).forEach(visit);
+    };
+    visit(parsed);
+    return Array.from(records.values());
+  }
+
+  function rememberCapturedSearchTimelineReply(record) {
+    if (!record || !/^\d+$/.test(record.id) || !/^\d+$/.test(record.conversationId)) return;
+    const key = `${record.conversationId}:${record.id}`;
+    const existing = capturedSearchTimelineReplies.get(key) || {};
+    if (
+      !existing.id &&
+      capturedSearchTimelineReplies.size >= CAPTURED_SEARCH_TIMELINE_REPLIES_MAX
+    ) {
+      capturedSearchTimelineReplies.delete(capturedSearchTimelineReplies.keys().next().value);
+    }
+    capturedSearchTimelineReplies.set(key, {
+      ...existing,
+      ...record,
+      handle: record.handle || existing.handle || '',
+      url: record.url || existing.url || '',
+      text: record.text || existing.text || '',
+      seenAt: new Date().toISOString(),
+    });
+    networkCaptureDiagnostics.searchTimelineReplies = capturedSearchTimelineReplies.size;
+  }
+
+  function getCapturedSearchTimelineReplies(conversationId) {
+    const root = String(conversationId || '');
+    return Array.from(capturedSearchTimelineReplies.values()).filter(
+      (record) => record.conversationId === root
+    );
+  }
+
   /** Full note text -> paragraph blocks (escaped, t.co urls linkified, \n-split). */
   function noteTweetParagraphBlocks(note) {
     let html = escapeHtml(decodeBasicEntities(String(note.text || '').trim()));
@@ -7069,6 +7159,13 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (quotedRefs.length) {
       quotedRefs.forEach(rememberCapturedQuotedRef);
       log('captured quoted-post refs for', quotedRefs.length, 'parent(s) from', payload.url || '');
+    }
+    if (/SearchTimeline/i.test(payload.url || '')) {
+      const replies = searchTimelineReplyRecordsFromCapturedBody(payload.body || '');
+      replies.forEach(rememberCapturedSearchTimelineReply);
+      if (replies.length) {
+        log('inventoried reply ids for', replies.length, 'SearchTimeline post(s)');
+      }
     }
     return candidates;
   }
@@ -8259,6 +8356,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 
   const REPLY_PROBE_PENDING_KEY = 'sourcecapsule:reply-probe:pending';
   const REPLY_PROBE_LAST_KEY = 'sourcecapsule:reply-probe:last';
+  const REPLY_PROBE_HISTORY_KEY = 'sourcecapsule:reply-probe:history';
+  const REPLY_PROBE_HISTORY_MAX = 5;
 
   function replyProbeSearchUrl(statusId) {
     const id = String(statusId || '');
@@ -8325,12 +8424,151 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     }
   }
 
+  function readReplyProbeHistory() {
+    try {
+      const value = JSON.parse(localStorage.getItem(REPLY_PROBE_HISTORY_KEY) || '[]');
+      return Array.isArray(value) ? value : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function compactReplyProbeHistoryEntry(result) {
+    const compactRecord = (record) => ({
+      id: String(record.id || ''),
+      handle: String(record.handle || ''),
+      url: String(record.url || ''),
+    });
+    return {
+      contractVersion: result.contractVersion,
+      rootStatusId: result.rootStatusId,
+      expectedDisplayedReplies: result.expectedDisplayedReplies,
+      uniquePostsCaptured: result.uniquePostsCaptured,
+      knownReplyIds: result.gapReport ? result.gapReport.knownReplyIds : 0,
+      knownGapCount: result.gapReport ? result.gapReport.knownGaps.length : 0,
+      unidentifiedResidual: result.gapReport ? result.gapReport.unidentifiedResidual : 0,
+      startedAt: result.startedAt,
+      finishedAt: result.finishedAt,
+      elapsedMs: result.elapsedMs,
+      stopReason: result.stopReason,
+      sourceUrl: result.sourceUrl,
+      records: (result.records || []).map(compactRecord),
+      networkRecords: (result.networkRecords || []).map(compactRecord),
+    };
+  }
+
   function writeReplyProbeResult(result) {
     try {
       localStorage.setItem(REPLY_PROBE_LAST_KEY, JSON.stringify(result));
+      const history = readReplyProbeHistory();
+      history.unshift(compactReplyProbeHistoryEntry(result));
+      localStorage.setItem(
+        REPLY_PROBE_HISTORY_KEY,
+        JSON.stringify(history.slice(0, REPLY_PROBE_HISTORY_MAX))
+      );
     } catch (error) {
       result.storageError = String((error && error.message) || error || 'storage failed');
     }
+  }
+
+  function buildReplyGapReport({
+    rootStatusId,
+    expectedDisplayedReplies = 0,
+    domRecords = new Map(),
+    networkRecords = [],
+  }) {
+    const root = String(rootStatusId || '');
+    const completeIds = new Set(
+      Array.from(domRecords instanceof Map ? domRecords.keys() : []).map(String)
+    );
+    completeIds.delete(root);
+    const networkById = new Map();
+    (networkRecords || []).forEach((record) => {
+      if (
+        !record ||
+        record.id === root ||
+        String(record.conversationId || '') !== root ||
+        !/^\d+$/.test(String(record.id || ''))
+      )
+        return;
+      networkById.set(String(record.id), record);
+    });
+    const knownIds = new Set([...completeIds, ...networkById.keys()]);
+    const knownGaps = Array.from(networkById.values())
+      .filter((record) => !completeIds.has(String(record.id)))
+      .map((record) => ({
+        ...record,
+        captureStatus: 'network-only',
+        reason: record.unavailable
+          ? record.unavailableReason || 'unavailable'
+          : record.text
+            ? 'not-seen-in-dom'
+            : 'missing-text',
+      }))
+      .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const expected = Math.max(0, Number(expectedDisplayedReplies) || 0);
+    return {
+      contractVersion: 1,
+      rootStatusId: root,
+      expectedDisplayedReplies: expected,
+      completeDomRecords: completeIds.size,
+      networkReplyIds: networkById.size,
+      knownReplyIds: knownIds.size,
+      knownGaps,
+      unidentifiedResidual: Math.max(0, expected - knownIds.size),
+    };
+  }
+
+  function csvCell(value) {
+    const text = String(value == null ? '' : value);
+    return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  }
+
+  function replyGapReportCsv(report) {
+    const columns = [
+      'record_type',
+      'reply_id',
+      'url',
+      'handle',
+      'capture_status',
+      'reason',
+      'conversation_id',
+      'text_preview',
+    ];
+    const summary = [
+      'summary',
+      '',
+      '',
+      '',
+      'summary',
+      `expected_displayed=${report.expectedDisplayedReplies}; complete_dom=${report.completeDomRecords}; known_ids=${report.knownReplyIds}; known_gaps=${report.knownGaps.length}; unidentified_residual=${report.unidentifiedResidual}`,
+      report.rootStatusId,
+      '',
+    ];
+    const rows = (report.knownGaps || []).map((record) => [
+      'known-gap',
+      record.id,
+      record.url,
+      record.handle,
+      record.captureStatus,
+      record.reason,
+      record.conversationId,
+      String(record.text || '').slice(0, 500),
+    ]);
+    return `\ufeff${[columns, summary, ...rows]
+      .map((row) => row.map(csvCell).join(','))
+      .join('\r\n')}\r\n`;
+  }
+
+  function downloadReplyGapReport(result) {
+    const report = result && result.gapReport;
+    if (!report) return false;
+    const filename = `sourcecapsule-reply-gaps-${report.rootStatusId || 'unknown'}.csv`;
+    downloadBlob(
+      filename,
+      new Blob([replyGapReportCsv(report)], { type: 'text/csv;charset=utf-8' })
+    );
+    return true;
   }
 
   function startReplyProbe(tweetEl) {
@@ -8440,6 +8678,13 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       }
     }
 
+    const networkRecords = getCapturedSearchTimelineReplies(pending.rootStatusId);
+    const gapReport = buildReplyGapReport({
+      rootStatusId: pending.rootStatusId,
+      expectedDisplayedReplies: pending.expectedDisplayedReplies,
+      domRecords: records,
+      networkRecords,
+    });
     const result = {
       contractVersion: 1,
       rootStatusId: String(pending.rootStatusId),
@@ -8455,8 +8700,18 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       sourceUrl: location.href,
       returnUrl: pending.returnUrl || '',
       records: Array.from(records.values()),
+      networkRecords,
+      gapReport,
     };
     writeReplyProbeResult(result);
+    let reportDownloaded = false;
+    if (options.downloadGapReport !== false) {
+      try {
+        reportDownloaded = downloadReplyGapReport(result);
+      } catch (error) {
+        result.downloadError = String((error && error.message) || error || 'download failed');
+      }
+    }
     try {
       sessionStorage.removeItem(REPLY_PROBE_PENDING_KEY);
     } catch {
@@ -8465,8 +8720,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const expected = result.expectedDisplayedReplies
       ? ` / ${result.expectedDisplayedReplies} displayed by X`
       : '';
+    const gapSummary = ` Known gaps: ${gapReport.knownGaps.length}; unidentified: ${gapReport.unidentifiedResidual}.`;
+    const downloadSummary = reportDownloaded ? ' CSV downloaded.' : '';
     showToast(
-      `Reply probe finished: ${records.size}${expected}. Stop: ${stopReason}. Result saved locally.`,
+      `Reply probe finished: ${records.size}${expected}. Stop: ${stopReason}.${gapSummary}${downloadSummary} Result saved locally.`,
       { error: stopReason !== 'pagination-idle', sticky: true }
     );
     log('reply probe result', result);
@@ -9476,7 +9733,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       // filtering those ordinary GraphQL responses out here defeats the
       // capturedQuotedRefs recovery layer entirely.
       body: /video_info|variants|video\.twimg\.com|amplify_video|ext_tw_video|tweet_video|note_tweet|quoted_status/i,
-      url: /\/graphql\/|\/i\/api\/|TweetDetail|TweetResult|Article|UserTweets|HomeTimeline/i,
+      url: /\/graphql\/|\/i\/api\/|TweetDetail|TweetResult|Article|UserTweets|HomeTimeline|SearchTimeline/i,
       contentType: /json|javascript|text/i,
     };
   }
@@ -9490,7 +9747,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       try {
         if (!body) return;
         const text = String(body);
-        if (!patterns.body.test(text)) return;
+        if (!patterns.body.test(text) && !/SearchTimeline/i.test(url || '')) return;
         handleNetworkCapturePayload({
           source: `${APP}:network-capture`,
           type: 'response',
@@ -9610,7 +9867,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         'i'
       );
       const urlPattern = new RegExp(
-        '/graphql/|/i/api/|TweetDetail|TweetResult|Article|UserTweets|HomeTimeline',
+        '/graphql/|/i/api/|TweetDetail|TweetResult|Article|UserTweets|HomeTimeline|SearchTimeline',
         'i'
       );
       const interestingBody = (text) => bodyPattern.test(text || '');
@@ -9621,7 +9878,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         try {
           if (sent >= MAX_MESSAGES || !body) return;
           const text = String(body);
-          if (!interestingBody(text)) return;
+          if (!interestingBody(text) && !/SearchTimeline/i.test(url || '')) return;
           sent += 1;
           window.postMessage(
             {
@@ -9870,6 +10127,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       displayedReplyCount,
       replyProbeTweetRecord,
       captureVisibleReplyProbeTweets,
+      searchTimelineReplyRecordsFromCapturedBody,
+      getCapturedSearchTimelineReplies,
+      buildReplyGapReport,
+      replyGapReportCsv,
+      readReplyProbeHistory,
+      writeReplyProbeResult,
       runReplyProbe,
       postControlCaptureMode,
       timelineArticlePreviewReason,
