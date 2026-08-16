@@ -457,6 +457,8 @@ check(
     assert.equal(focusedMode.menuItems[1].key, 'reply-probe');
     assert.equal(focusedMode.menuItems[2].key, 'reply-probe-top');
     assert.equal(focusedMode.menuItems[3].key, 'reply-probe-relevant');
+    assert.equal(focusedMode.menuItems[4].key, 'reply-audit-download');
+    assert.match(focusedMode.menuItems[4].label, /Download reply audit CSV/);
     assert.ok(focusedMode.menuItems.slice(1, 4).every((item) => /experimental/i.test(item.label)));
     const continuationMode = engine.postControlCaptureMode(continuation, column);
     assert.equal(continuationMode.isThread, false);
@@ -832,6 +834,36 @@ check('reply audit labels provenance and treats X reply count as reference only'
   assert.match(csv, /captured,2000000000000000002[^\r\n]+dom-only/);
   assert.match(csv, /known-gap,2000000000000000003[^\r\n]+network-confirmed/);
   assert.doesNotMatch(csv, /unidentified_residual/);
+});
+
+check('stored reply audit rebuilds one cumulative report for explicit download', () => {
+  const rootStatusId = '2000000000000000000';
+  const result = engine.buildStoredReplyAudit(
+    rootStatusId,
+    12,
+    [
+      {
+        id: '2000000000000000009',
+        conversationId: rootStatusId,
+        text: 'Network-only reply',
+      },
+    ],
+    [
+      {
+        rootStatusId,
+        surface: 'latest',
+        records: [{ id: '2000000000000000001', discoveredSurface: 'latest' }],
+        networkRecords: [],
+      },
+    ]
+  );
+  assert.equal(result.gapReport.publicReplyCountReference, 12);
+  assert.equal(result.gapReport.domObservedUnion, 1);
+  assert.equal(result.gapReport.knownConversationIds, 2);
+  assert.deepEqual(
+    result.gapReport.knownGaps.map((record) => record.id),
+    ['2000000000000000009']
+  );
 });
 
 check(

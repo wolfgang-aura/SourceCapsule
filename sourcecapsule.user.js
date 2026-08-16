@@ -8341,6 +8341,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     { key: 'reply-probe', label: 'Reply audit (experimental) · Latest' },
     { key: 'reply-probe-top', label: 'Reply audit (experimental) · Top' },
     { key: 'reply-probe-relevant', label: 'Reply audit (experimental) · Relevant' },
+    { key: 'reply-audit-download', label: 'Download reply audit CSV' },
     { divider: true },
     ...POST_EXPORT_TYPES,
   ];
@@ -8800,6 +8801,50 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return true;
   }
 
+  function buildStoredReplyAudit(
+    rootStatusId,
+    publicReplyCountReference = 0,
+    networkRecords = getCapturedSearchTimelineReplies(rootStatusId),
+    history = readReplyProbeHistory()
+  ) {
+    const gapReport = buildReplyGapReport({
+      rootStatusId,
+      expectedDisplayedReplies: publicReplyCountReference,
+      domRecords: new Map(),
+      networkRecords,
+      history,
+      surface: 'relevant',
+    });
+    return {
+      contractVersion: 2,
+      rootStatusId: String(rootStatusId || ''),
+      surface: 'combined',
+      expectedDisplayedReplies: Number(publicReplyCountReference) || 0,
+      gapReport,
+    };
+  }
+
+  function downloadStoredReplyAudit(tweetEl) {
+    const rootStatusId = tweetStatusId(tweetEl) || currentStatusId();
+    if (!rootStatusId) {
+      showToast('Open the original X post before downloading its reply audit.', {
+        error: true,
+      });
+      return false;
+    }
+    const result = buildStoredReplyAudit(rootStatusId, displayedReplyCount(tweetEl));
+    if (!result.gapReport.knownConversationIds) {
+      showToast('No reply audit data is stored for this post yet.', { error: true });
+      return false;
+    }
+    downloadReplyGapReport(result);
+    showToast(
+      `Reply audit CSV ready: ${result.gapReport.domObservedUnion} DOM-observed; ${result.gapReport.knownConversationIds} conversation IDs known; ${result.gapReport.knownGaps.length} network-only gaps.`,
+      { sticky: true }
+    );
+    return true;
+  }
+
   function replyProbeMaxMs(surface) {
     if (surface === 'relevant') return 90000;
     if (surface === 'top') return 120000;
@@ -8810,7 +8855,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     setTimeout(() => {
       runReplyProbe(pending, { maxMs: replyProbeMaxMs(pending.surface) }).catch((error) => {
         writeReplyProbeResult({
-          contractVersion: 1,
+          contractVersion: 2,
           rootStatusId: pending.rootStatusId,
           surface: pending.surface || 'latest',
           expectedDisplayedReplies: pending.expectedDisplayedReplies || 0,
@@ -8981,7 +9026,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     };
     writeReplyProbeResult(result);
     let reportDownloaded = false;
-    if (options.downloadGapReport !== false) {
+    if (options.downloadGapReport === true) {
       try {
         reportDownloaded = downloadReplyGapReport(result);
       } catch (error) {
@@ -8997,7 +9042,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       ? ` X public reply-count reference: ${result.expectedDisplayedReplies} (not a completeness denominator).`
       : '';
     const gapSummary = ` Union inventory: ${gapReport.domObservedUnion} DOM-observed; ${gapReport.knownConversationIds} conversation IDs known. Network-only gaps: ${gapReport.knownGaps.length}. Best effort: deleted, private, and never-delivered replies remain unknowable.`;
-    const downloadSummary = reportDownloaded ? ' CSV downloaded.' : '';
+    const downloadSummary = reportDownloaded
+      ? ' CSV downloaded.'
+      : ' Use “Download reply audit CSV” on the original post when finished.';
     showToast(
       `Reply probe finished: ${records.size} DOM-observed on ${surface}. Stop: ${stopReason}.${publicCount}${gapSummary}${downloadSummary} Result saved locally.`,
       {
@@ -9923,6 +9970,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           if (exportType === 'reply-probe') return startReplyProbe(tweetEl, 'latest');
           if (exportType === 'reply-probe-top') return startReplyProbe(tweetEl, 'top');
           if (exportType === 'reply-probe-relevant') return startReplyProbe(tweetEl, 'relevant');
+          if (exportType === 'reply-audit-download') return downloadStoredReplyAudit(tweetEl);
           const request = postExportRequest(exportType);
           return runExport(request.exportType, {
             targetTweetEl: tweetEl,
@@ -10401,6 +10449,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       getCapturedSearchTimelineReplies,
       buildReplyGapReport,
       replyGapReportCsv,
+      buildStoredReplyAudit,
       readReplyProbeHistory,
       writeReplyProbeResult,
       runReplyProbe,
