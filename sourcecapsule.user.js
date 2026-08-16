@@ -7160,11 +7160,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       quotedRefs.forEach(rememberCapturedQuotedRef);
       log('captured quoted-post refs for', quotedRefs.length, 'parent(s) from', payload.url || '');
     }
-    if (/SearchTimeline/i.test(payload.url || '')) {
+    if (/SearchTimeline|TweetDetail|TweetResult/i.test(payload.url || '')) {
       const replies = searchTimelineReplyRecordsFromCapturedBody(payload.body || '');
       replies.forEach(rememberCapturedSearchTimelineReply);
       if (replies.length) {
-        log('inventoried reply ids for', replies.length, 'SearchTimeline post(s)');
+        log('inventoried conversation ids for', replies.length, 'network-delivered post(s)');
       }
     }
     return candidates;
@@ -8338,7 +8338,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   ];
   const THREAD_EXPORT_TYPES = [
     { key: 'library-thread', label: 'Save full thread' },
-    { key: 'reply-probe', label: 'Probe all replies (experimental)' },
+    { key: 'reply-probe', label: 'Probe replies · Latest' },
+    { key: 'reply-probe-top', label: 'Probe replies · Top' },
+    { key: 'reply-probe-relevant', label: 'Probe replies · Relevant' },
     { divider: true },
     ...POST_EXPORT_TYPES,
   ];
@@ -8359,11 +8361,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   const REPLY_PROBE_HISTORY_KEY = 'sourcecapsule:reply-probe:history';
   const REPLY_PROBE_HISTORY_MAX = 5;
 
-  function replyProbeSearchUrl(statusId) {
+  function replyProbeSearchUrl(statusId, surface = 'latest') {
     const id = String(statusId || '');
     if (!/^\d+$/.test(id)) return '';
     const query = encodeURIComponent(`conversation_id:${id}`);
-    return `${location.origin}/search?q=${query}&src=typed_query&f=live`;
+    const mode = surface === 'top' ? '' : '&f=live';
+    return `${location.origin}/search?q=${query}&src=typed_query${mode}`;
   }
 
   function displayedReplyCount(tweetEl) {
@@ -8403,15 +8406,28 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     };
   }
 
-  function captureVisibleReplyProbeTweets(records, rootStatusId) {
+  function captureVisibleReplyProbeTweets(records, rootStatusId, options = {}) {
     let added = 0;
-    topLevelTweetEls(document).forEach((tweetEl) => {
+    const column =
+      options.column || pick(document, CONFIG.selectors.primaryColumn, { quiet: true });
+    const tweetEls = topLevelTweetEls(column || document).sort(compareDocumentOrder);
+    for (const tweetEl of tweetEls) {
+      if (options.surface === 'relevant' && column && hasThreadBoundaryBefore(tweetEl, column)) {
+        break;
+      }
       const record = replyProbeTweetRecord(tweetEl);
-      if (!record || record.id === String(rootStatusId || '') || records.has(record.id)) return;
+      if (!record || record.id === String(rootStatusId || '') || records.has(record.id)) continue;
       records.set(record.id, record);
       added += 1;
-    });
+    }
     return added;
+  }
+
+  function replyProbeConversationBoundaryVisible(root = document) {
+    const selector = CONFIG.selectors.threadBoundaryHeading.join(',');
+    return Array.from((root && root.querySelectorAll(selector)) || []).some((heading) =>
+      THREAD_BOUNDARY_TEXT.test(String(heading.textContent || '').replace(/\s+/g, ' '))
+    );
   }
 
   function readReplyProbePending() {
@@ -8433,6 +8449,16 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     }
   }
 
+  function replyProbeSurfaceFromUrl(url) {
+    try {
+      const parsed = new URL(String(url || ''), location.origin);
+      if (/\/status\/\d+/.test(parsed.pathname)) return 'relevant';
+      return parsed.searchParams.get('f') === 'live' ? 'latest' : 'top';
+    } catch {
+      return 'latest';
+    }
+  }
+
   function compactReplyProbeHistoryEntry(result) {
     const compactRecord = (record) => ({
       id: String(record.id || ''),
@@ -8442,6 +8468,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return {
       contractVersion: result.contractVersion,
       rootStatusId: result.rootStatusId,
+      surface: result.surface || replyProbeSurfaceFromUrl(result.sourceUrl),
       expectedDisplayedReplies: result.expectedDisplayedReplies,
       uniquePostsCaptured: result.uniquePostsCaptured,
       knownReplyIds: result.gapReport ? result.gapReport.knownReplyIds : 0,
@@ -8476,22 +8503,56 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     expectedDisplayedReplies = 0,
     domRecords = new Map(),
     networkRecords = [],
+    history = [],
+    surface = 'latest',
   }) {
     const root = String(rootStatusId || '');
-    const completeIds = new Set(
-      Array.from(domRecords instanceof Map ? domRecords.keys() : []).map(String)
-    );
+    const completeById = new Map();
+    if (domRecords instanceof Map) {
+      domRecords.forEach((record, id) => completeById.set(String(id), record));
+    }
+    const surfaces = new Set([surface]);
+    (history || []).forEach((entry) => {
+      if (!entry || String(entry.rootStatusId || '') !== root) return;
+      surfaces.add(entry.surface || replyProbeSurfaceFromUrl(entry.sourceUrl));
+      (entry.records || []).forEach((record) => {
+        if (record && /^\d+$/.test(String(record.id || ''))) {
+          completeById.set(String(record.id), record);
+        }
+      });
+    });
+    const completeIds = new Set(completeById.keys());
     completeIds.delete(root);
     const networkById = new Map();
-    (networkRecords || []).forEach((record) => {
+    const addNetworkRecord = (record, discoveredSurface = surface) => {
       if (
         !record ||
         record.id === root ||
-        String(record.conversationId || '') !== root ||
+        (record.conversationId && String(record.conversationId) !== root) ||
         !/^\d+$/.test(String(record.id || ''))
       )
         return;
-      networkById.set(String(record.id), record);
+      const id = String(record.id);
+      const existing = networkById.get(id) || {};
+      const handle = record.handle || existing.handle || '';
+      networkById.set(id, {
+        ...existing,
+        ...record,
+        id,
+        conversationId: root,
+        handle,
+        url:
+          record.url ||
+          existing.url ||
+          (handle ? `https://x.com/${handle}/status/${id}` : `https://x.com/i/web/status/${id}`),
+        discoveredSurface: record.discoveredSurface || discoveredSurface,
+      });
+    };
+    (networkRecords || []).forEach((record) => addNetworkRecord(record, surface));
+    (history || []).forEach((entry) => {
+      if (!entry || String(entry.rootStatusId || '') !== root) return;
+      const entrySurface = entry.surface || replyProbeSurfaceFromUrl(entry.sourceUrl);
+      (entry.networkRecords || []).forEach((record) => addNetworkRecord(record, entrySurface));
     });
     const knownIds = new Set([...completeIds, ...networkById.keys()]);
     const knownGaps = Array.from(networkById.values())
@@ -8510,6 +8571,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return {
       contractVersion: 1,
       rootStatusId: root,
+      surface,
+      surfaces: Array.from(surfaces).sort(),
       expectedDisplayedReplies: expected,
       completeDomRecords: completeIds.size,
       networkReplyIds: networkById.size,
@@ -8541,7 +8604,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       '',
       '',
       'summary',
-      `expected_displayed=${report.expectedDisplayedReplies}; complete_dom=${report.completeDomRecords}; known_ids=${report.knownReplyIds}; known_gaps=${report.knownGaps.length}; unidentified_residual=${report.unidentifiedResidual}`,
+      `surfaces=${(report.surfaces || []).join('+')}; expected_displayed=${report.expectedDisplayedReplies}; complete_union=${report.completeDomRecords}; known_ids=${report.knownReplyIds}; known_gaps=${report.knownGaps.length}; unidentified_residual=${report.unidentifiedResidual}`,
       report.rootStatusId,
       '',
     ];
@@ -8571,15 +8634,46 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return true;
   }
 
-  function startReplyProbe(tweetEl) {
+  function replyProbeMaxMs(surface) {
+    if (surface === 'relevant') return 90000;
+    if (surface === 'top') return 120000;
+    return 240000;
+  }
+
+  function runPendingReplyProbe(pending) {
+    setTimeout(() => {
+      runReplyProbe(pending, { maxMs: replyProbeMaxMs(pending.surface) }).catch((error) => {
+        writeReplyProbeResult({
+          contractVersion: 1,
+          rootStatusId: pending.rootStatusId,
+          surface: pending.surface || 'latest',
+          expectedDisplayedReplies: pending.expectedDisplayedReplies || 0,
+          uniquePostsCaptured: 0,
+          finishedAt: new Date().toISOString(),
+          stopReason: 'error',
+          error: String((error && error.message) || error || 'unknown error'),
+          records: [],
+          networkRecords: [],
+        });
+        showToast(`Reply probe failed: ${error.message}`, { error: true, sticky: true });
+      });
+    }, 1200);
+  }
+
+  function startReplyProbe(tweetEl, surface = 'latest') {
     const rootStatusId = tweetStatusId(tweetEl) || currentStatusId();
-    const url = replyProbeSearchUrl(rootStatusId);
+    const normalizedSurface = ['latest', 'top', 'relevant'].includes(surface) ? surface : 'latest';
+    const url =
+      normalizedSurface === 'relevant'
+        ? location.href
+        : replyProbeSearchUrl(rootStatusId, normalizedSurface);
     if (!url) {
       showToast('Reply probe could not determine the root post id.', { error: true, sticky: true });
       return;
     }
     const pending = {
       rootStatusId,
+      surface: normalizedSurface,
       expectedDisplayedReplies: displayedReplyCount(tweetEl),
       returnUrl: location.href,
       requestedAt: new Date().toISOString(),
@@ -8590,15 +8684,23 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       showToast(`Reply probe could not start: ${error.message}`, { error: true, sticky: true });
       return;
     }
-    showToast('Opening X Latest search for the reply probe...', { sticky: true });
-    location.href = url;
+    if (normalizedSurface === 'relevant') {
+      showToast('Probing X Relevant conversation in place...', { sticky: true });
+      runPendingReplyProbe(pending);
+    } else {
+      showToast(`Opening X ${normalizedSurface === 'top' ? 'Top' : 'Latest'} search...`, {
+        sticky: true,
+      });
+      location.href = url;
+    }
   }
 
   async function runReplyProbe(pending, options = {}) {
     // Large conversations can take several minutes because the probe intentionally lets X's
     // own UI pace pagination. Four minutes is still bounded, but avoids reporting a false
     // coverage ceiling when a ~1,000-reply search is simply one or two pages from exhaustion.
-    const maxMs = Number(options.maxMs) || 240000;
+    const surface = pending.surface || replyProbeSurfaceFromUrl(location.href);
+    const maxMs = Number(options.maxMs) || replyProbeMaxMs(surface);
     const idleMs = Number(options.idleMs) || 12000;
     const tickMs = Number(options.tickMs) || 450;
     const records = new Map();
@@ -8639,7 +8741,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         });
       } else {
         while (Date.now() - startedAt < maxMs) {
-          const added = captureVisibleReplyProbeTweets(records, pending.rootStatusId);
+          const added = captureVisibleReplyProbeTweets(records, pending.rootStatusId, { surface });
           if (added) lastNewAt = Date.now();
           maxVisibleTweets = Math.max(maxVisibleTweets, topLevelTweetEls(document).length);
           const pageText = String((document.body && document.body.innerText) || '');
@@ -8650,6 +8752,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           ].find((message) => pageText.includes(message));
           if (challenge) {
             stopReason = 'x-challenge';
+            break;
+          }
+          if (surface === 'relevant' && replyProbeConversationBoundaryVisible()) {
+            stopReason = 'conversation-boundary';
             break;
           }
 
@@ -8674,7 +8780,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           scrolls += 1;
           await sleep(nearBottom ? Math.max(900, tickMs) : tickMs);
         }
-        captureVisibleReplyProbeTweets(records, pending.rootStatusId);
+        captureVisibleReplyProbeTweets(records, pending.rootStatusId, { surface });
       }
     }
 
@@ -8684,10 +8790,13 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       expectedDisplayedReplies: pending.expectedDisplayedReplies,
       domRecords: records,
       networkRecords,
+      history: readReplyProbeHistory(),
+      surface,
     });
     const result = {
       contractVersion: 1,
       rootStatusId: String(pending.rootStatusId),
+      surface,
       expectedDisplayedReplies: Number(pending.expectedDisplayedReplies) || 0,
       uniquePostsCaptured: records.size,
       startedAt: new Date(startedAt).toISOString(),
@@ -8702,6 +8811,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       records: Array.from(records.values()),
       networkRecords,
       gapReport,
+      unionCompletePosts: gapReport.completeDomRecords,
     };
     writeReplyProbeResult(result);
     let reportDownloaded = false;
@@ -8720,11 +8830,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const expected = result.expectedDisplayedReplies
       ? ` / ${result.expectedDisplayedReplies} displayed by X`
       : '';
-    const gapSummary = ` Known gaps: ${gapReport.knownGaps.length}; unidentified: ${gapReport.unidentifiedResidual}.`;
+    const gapSummary = ` Union: ${gapReport.completeDomRecords}${expected}. Known gaps: ${gapReport.knownGaps.length}; unidentified: ${gapReport.unidentifiedResidual}.`;
     const downloadSummary = reportDownloaded ? ' CSV downloaded.' : '';
     showToast(
       `Reply probe finished: ${records.size}${expected}. Stop: ${stopReason}.${gapSummary}${downloadSummary} Result saved locally.`,
-      { error: stopReason !== 'pagination-idle', sticky: true }
+      {
+        error: !['pagination-idle', 'conversation-boundary'].includes(stopReason),
+        sticky: true,
+      }
     );
     log('reply probe result', result);
     return result;
@@ -8735,21 +8848,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (!pending) return;
     const query = new URLSearchParams(location.search).get('q') || '';
     if (query !== `conversation_id:${pending.rootStatusId}`) return;
-    setTimeout(() => {
-      runReplyProbe(pending).catch((error) => {
-        writeReplyProbeResult({
-          contractVersion: 1,
-          rootStatusId: pending.rootStatusId,
-          expectedDisplayedReplies: pending.expectedDisplayedReplies || 0,
-          uniquePostsCaptured: 0,
-          finishedAt: new Date().toISOString(),
-          stopReason: 'error',
-          error: String((error && error.message) || error || 'unknown error'),
-          records: [],
-        });
-        showToast(`Reply probe failed: ${error.message}`, { error: true, sticky: true });
-      });
-    }, 1200);
+    const live = new URLSearchParams(location.search).get('f') === 'live';
+    if ((pending.surface === 'top' && live) || (pending.surface !== 'top' && !live)) return;
+    runPendingReplyProbe(pending);
   }
 
   function hasOwnTweetText(tweetEl) {
@@ -9653,7 +9754,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           });
         },
         onPick: (exportType, trigger) => {
-          if (exportType === 'reply-probe') return startReplyProbe(tweetEl);
+          if (exportType === 'reply-probe') return startReplyProbe(tweetEl, 'latest');
+          if (exportType === 'reply-probe-top') return startReplyProbe(tweetEl, 'top');
+          if (exportType === 'reply-probe-relevant') return startReplyProbe(tweetEl, 'relevant');
           const request = postExportRequest(exportType);
           return runExport(request.exportType, {
             targetTweetEl: tweetEl,
@@ -9747,7 +9850,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       try {
         if (!body) return;
         const text = String(body);
-        if (!patterns.body.test(text) && !/SearchTimeline/i.test(url || '')) return;
+        if (!patterns.body.test(text) && !/SearchTimeline|TweetDetail/i.test(url || '')) return;
         handleNetworkCapturePayload({
           source: `${APP}:network-capture`,
           type: 'response',
@@ -9878,7 +9981,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         try {
           if (sent >= MAX_MESSAGES || !body) return;
           const text = String(body);
-          if (!interestingBody(text) && !/SearchTimeline/i.test(url || '')) return;
+          if (!interestingBody(text) && !/SearchTimeline|TweetDetail/i.test(url || '')) return;
           sent += 1;
           window.postMessage(
             {
@@ -10127,6 +10230,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       displayedReplyCount,
       replyProbeTweetRecord,
       captureVisibleReplyProbeTweets,
+      replyProbeConversationBoundaryVisible,
       searchTimelineReplyRecordsFromCapturedBody,
       getCapturedSearchTimelineReplies,
       buildReplyGapReport,

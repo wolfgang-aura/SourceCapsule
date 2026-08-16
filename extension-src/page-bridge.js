@@ -20,7 +20,7 @@
     try {
       if (sent >= MAX_MESSAGES || !body) return;
       const text = String(body);
-      if (!bodyPattern.test(text) && !/SearchTimeline/i.test(url || '')) return;
+      if (!bodyPattern.test(text) && !/SearchTimeline|TweetDetail/i.test(url || '')) return;
       sent += 1;
       window.postMessage(
         {
