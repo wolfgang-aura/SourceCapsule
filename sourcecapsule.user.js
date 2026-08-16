@@ -8353,7 +8353,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       return;
     }
     showToast('Opening X Latest search for the reply probe...', { sticky: true });
-    location.href = url;
+    // A nonce defeats X's SPA scroll restoration for a previous run of the same search.
+    // Without it, a repeated probe can resume near the old bottom and silently miss newer posts.
+    location.href = `${url}&sourcecapsule_probe=${Date.now()}`;
   }
 
   async function runReplyProbe(pending, options = {}) {
@@ -8376,8 +8378,17 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (!scroller) {
       stopReason = 'no-scroller';
     } else {
+      try {
+        history.scrollRestoration = 'manual';
+      } catch {
+        // Older userscript hosts may not expose scrollRestoration.
+      }
       scroller.scrollTo(0, 0);
-      await sleep(600);
+      await sleep(1200);
+      // X can apply its own SPA scroll restoration after first paint. Reset twice so a
+      // repeated probe always starts at the newest result rather than the prior run's tail.
+      scroller.scrollTo(0, 0);
+      await sleep(500);
       while (Date.now() - startedAt < maxMs) {
         const added = captureVisibleReplyProbeTweets(records, pending.rootStatusId);
         if (added) lastNewAt = Date.now();
