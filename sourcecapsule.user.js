@@ -9394,7 +9394,19 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 
   function replyArchiveReceiptLines(archive) {
     const gapReport = archive.gapReport || {};
-    const gaps = (gapReport.knownGaps || []).length;
+    // The gap report is computed BEFORE the recovery round, so once recovery works the
+    // raw list names replies whose bodies are in this very file. Listing a captured
+    // reply as uncaptured is the archive lying about itself - keep only the ids that
+    // genuinely still have no text.
+    const bodyless = new Set(
+      (archive.records || [])
+        .filter((record) => !String((record && record.text) || '').trim())
+        .map((record) => String(record.id))
+    );
+    const knownGaps = (gapReport.knownGaps || []).filter((gap) =>
+      bodyless.has(String(gap && gap.id))
+    );
+    const gaps = knownGaps.length;
     return [
       '## Capture receipt',
       '',
@@ -9418,7 +9430,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         ? [
             `### Known but uncaptured replies (${gaps})`,
             '',
-            ...(gapReport.knownGaps || []).map(
+            ...knownGaps.map(
               (gap) =>
                 `- ${gap.id}${gap.handle ? ` · @${gap.handle}` : ''} · ${gap.reason || 'not-seen'} · <${gap.url || ''}>`
             ),
@@ -9453,7 +9465,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         .join(' ');
       const when = record.createdAt || 'unknown time';
       lines.push(`${pad}- **${who || 'Unknown author'}** · ${when} · <${record.url || ''}>`);
-      const text = String(record.text || '').trim();
+      // Decode on the way OUT as well as on the way in: records captured before the
+      // capture-side fix are already in the store, and the merge invariant will never
+      // overwrite them, so a live archive still holds "-&gt;" in real reply bodies.
+      const text = decodeBasicEntities(record.text || '').trim();
       if (text) {
         text.split('\n').forEach((line) => lines.push(`${pad}  ${line}`));
         if (record.truncated) lines.push(`${pad}  _(X delivered only a truncated preview.)_`);
@@ -9497,7 +9512,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       record.createdAt || '',
       record.url || '',
       // Full text on purpose: this file IS the archive, not a preview of one.
-      String(record.text || ''),
+      decodeBasicEntities(record.text || ''),
       record.truncated ? 'true' : 'false',
       (record.mediaLinks || []).length,
       (record.mediaLinks || [])
