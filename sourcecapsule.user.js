@@ -8996,10 +8996,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       .filter(Boolean);
     const hasDom = atoms.some((atom) => /dom/i.test(atom));
     const hasNetwork = atoms.some((atom) => /network/i.test(atom));
-    if (hasDom && hasNetwork) return 'network-confirmed+dom';
-    if (hasNetwork) return 'network-confirmed';
-    if (hasDom) return 'dom-observed';
-    return atoms[0] || '';
+    const hasSyndication = atoms.some((atom) => /syndication/i.test(atom));
+    const parts = [];
+    if (hasNetwork) parts.push('network-confirmed');
+    if (hasDom) parts.push(parts.length ? 'dom' : 'dom-observed');
+    if (hasSyndication) parts.push('syndication');
+    return parts.join('+') || atoms[0] || '';
   }
 
   /**
@@ -9405,6 +9407,102 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return `\ufeff${[columns, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n')}\r\n`;
   }
 
+  // Bound the recovery round: this is the only part of the archive that makes network
+  // calls, and a 1,000-reply conversation could otherwise fire hundreds of them.
+  const REPLY_ARCHIVE_SYNDICATION_MAX = 250;
+  const REPLY_ARCHIVE_SYNDICATION_CONCURRENCY = 3;
+
+  /**
+   * Fill in replies X CONFIRMED exist (they arrived in a GraphQL payload) but never
+   * rendered, so no layer ever saw their text. Each is re-fetched by id through the
+   * same syndication endpoint the quote-card layer already uses. A 404 is
+   * authoritative - the reply is deleted or protected - and is recorded as an honest
+   * tombstone rather than retried or hidden.
+   */
+  async function enrichReplyArchiveViaSyndication(
+    records,
+    fetchFn = fetchTweetSyndication,
+    options = {}
+  ) {
+    const limit = Number(options.max) || REPLY_ARCHIVE_SYNDICATION_MAX;
+    const all = Array.isArray(records) ? records : [];
+    const pending = all
+      .filter(
+        (record) =>
+          record &&
+          /^\d+$/.test(String(record.id || '')) &&
+          !String(record.text || '').trim() &&
+          !record.unavailable
+      )
+      .slice(0, limit);
+    const patches = [];
+    let recovered = 0;
+    let unavailable = 0;
+    const errors = [];
+    await runWithConcurrency(
+      pending.map((record) => String(record.id)),
+      Number(options.concurrency) || REPLY_ARCHIVE_SYNDICATION_CONCURRENCY,
+      async (id) => {
+        try {
+          const payload = await fetchFn(id);
+          const text = String((payload && (payload.text || payload.full_text)) || '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (!text && !(payload && payload.mediaDetails)) return;
+          const user = (payload && payload.user) || {};
+          const handle = String(user.screen_name || '');
+          patches.push({
+            id,
+            handle,
+            displayName: String(user.name || ''),
+            url: handle
+              ? `https://x.com/${handle}/status/${id}`
+              : `https://x.com/i/web/status/${id}`,
+            text: text.slice(0, REPLY_ARCHIVE_TEXT_MAX),
+            truncated: false,
+            createdAt: safeIsoTime(payload.created_at || ''),
+            parentId: String(payload.in_reply_to_status_id_str || ''),
+            mediaLinks: replyMediaLinksFromLegacy({
+              extended_entities: {
+                media:
+                  payload.mediaDetails ||
+                  (payload.photos || []).map((photo) => ({ type: 'photo', ...photo })),
+              },
+            }),
+            provenance: 'syndication',
+          });
+          recovered += 1;
+        } catch (error) {
+          if (error && error.status === 404) {
+            patches.push({
+              id,
+              unavailable: true,
+              unavailableReason: 'syndication 404 (deleted, protected, or suspended)',
+              provenance: 'syndication',
+            });
+            unavailable += 1;
+            return;
+          }
+          errors.push(`${id}: ${(error && error.message) || error}`);
+        }
+      }
+    );
+    return {
+      records: mergeReplyArchiveRecords(all, patches),
+      attempted: pending.length,
+      recovered,
+      unavailable,
+      // Deliberately surfaced, not swallowed: a silent recovery failure would look
+      // identical to "X simply never delivered this reply".
+      errors,
+      skippedOverLimit: Math.max(
+        0,
+        all.filter((record) => record && !String(record.text || '').trim() && !record.unavailable)
+          .length - pending.length
+      ),
+    };
+  }
+
   /**
    * Load the stored archive for a root post and hand back both deliverables. Kept
    * separate from the download so tests (and the menu) can inspect it without a Blob.
@@ -9672,7 +9770,23 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         discoveredSurfaces: [surface],
       })),
     ];
-    const saved = await getReplyArchiveStore().save(pending.rootStatusId, archiveInput);
+    let saved = await getReplyArchiveStore().save(pending.rootStatusId, archiveInput);
+    // Save FIRST, then attempt recovery: if syndication is blocked or the tab is closed
+    // mid-round, everything the scroll pass collected is already durable.
+    if (options.recoverGaps !== false && saved.records.some((record) => !record.text)) {
+      try {
+        const recovery = await enrichReplyArchiveViaSyndication(saved.records);
+        result.gapsRecovered = recovery.recovered;
+        result.gapsUnavailable = recovery.unavailable;
+        result.gapRecoveryErrors = recovery.errors;
+        result.gapsSkippedOverLimit = recovery.skippedOverLimit;
+        if (recovery.recovered || recovery.unavailable) {
+          saved = await getReplyArchiveStore().save(pending.rootStatusId, recovery.records);
+        }
+      } catch (error) {
+        result.gapRecoveryError = String((error && error.message) || error);
+      }
+    }
     result.archivedReplies = saved.replyCount;
     result.archiveBackend = saved.backend;
     result.archiveBytes = saved.approxBytes;
@@ -9705,9 +9819,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const downloadSummary = reportDownloaded
       ? ' CSV downloaded.'
       : ' Use “Download reply archive” on the original post when finished.';
+    const recoverySummary = result.gapsRecovered
+      ? ` Syndication recovered ${result.gapsRecovered} reply bodies X never rendered${result.gapsUnavailable ? `; ${result.gapsUnavailable} confirmed deleted/protected` : ''}.`
+      : '';
     const archiveSummary = result.archiveStorageError
       ? ` ARCHIVE NOT SAVED: ${result.archiveStorageError}.`
-      : ` Archive now holds ${result.archivedReplies} replies with content (${result.archiveBackend}).`;
+      : ` Archive now holds ${result.archivedReplies} replies with content (${result.archiveBackend}).${recoverySummary}`;
     showToast(
       `Reply probe finished: ${records.size} DOM-observed on ${surface}. Stop: ${stopReason}.${publicCount}${gapSummary}${archiveSummary}${downloadSummary} Result saved locally.`,
       {
@@ -11126,6 +11243,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       replyArchiveCsv,
       replyMediaLinksFromLegacy,
       loadReplyArchiveForPost,
+      enrichReplyArchiveViaSyndication,
       downloadReplyArchive,
       getReplyArchiveStore,
       readReplyProbeHistory,

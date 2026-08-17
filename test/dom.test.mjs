@@ -3818,6 +3818,54 @@ await checkAsync(
   }
 );
 
+await checkAsync('syndication recovers replies X confirmed but never rendered', async () => {
+  const records = [
+    // Known from the GraphQL payload, but X never rendered it: no text yet.
+    {
+      id: '2000000000000000001',
+      text: '',
+      discoveredSurfaces: ['top'],
+      provenance: 'network-confirmed',
+    },
+    // Already complete — must NOT trigger a fetch.
+    { id: '2000000000000000002', text: 'Already captured.', discoveredSurfaces: ['latest'] },
+    // Deleted or protected: 404 is authoritative and must be recorded honestly.
+    { id: '2000000000000000003', text: '', discoveredSurfaces: ['top'] },
+  ];
+  const calls = [];
+  const outcome = await engine.enrichReplyArchiveViaSyndication(records, async (id) => {
+    calls.push(id);
+    if (id === '2000000000000000003') {
+      const error = new Error('syndication: HTTP 404');
+      error.status = 404;
+      throw error;
+    }
+    return {
+      id_str: id,
+      text: 'Recovered from syndication.',
+      created_at: '2026-08-11T09:30:00.000Z',
+      user: { screen_name: 'ghost', name: 'Ghost Replier' },
+      in_reply_to_status_id_str: '2000000000000000000',
+      mediaDetails: [{ type: 'photo', media_url_https: 'https://pbs.twimg.com/media/FFF.jpg' }],
+    };
+  });
+  assert.deepEqual(calls.sort(), ['2000000000000000001', '2000000000000000003']);
+  const byId = new Map(outcome.records.map((record) => [record.id, record]));
+  assert.equal(byId.get('2000000000000000001').text, 'Recovered from syndication.');
+  assert.equal(byId.get('2000000000000000001').handle, 'ghost');
+  assert.equal(byId.get('2000000000000000001').displayName, 'Ghost Replier');
+  assert.equal(byId.get('2000000000000000001').createdAt, '2026-08-11T09:30:00.000Z');
+  assert.equal(byId.get('2000000000000000001').parentId, '2000000000000000000');
+  assert.equal(byId.get('2000000000000000001').mediaLinks.length, 1);
+  assert.equal(byId.get('2000000000000000001').provenance, 'network-confirmed+syndication');
+  assert.equal(byId.get('2000000000000000002').text, 'Already captured.');
+  assert.equal(byId.get('2000000000000000003').unavailable, true);
+  assert.match(byId.get('2000000000000000003').unavailableReason, /404/);
+  assert.equal(outcome.recovered, 1);
+  assert.equal(outcome.unavailable, 1);
+  assert.equal(outcome.attempted, 2);
+});
+
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);
   process.exit(1);
