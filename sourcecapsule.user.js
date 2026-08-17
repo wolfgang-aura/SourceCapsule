@@ -9819,30 +9819,6 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         });
       } else {
         while (Date.now() - startedAt < maxMs) {
-          // X does not render conversation replies into a hidden tab, so a probe that
-          // runs in the background scrolls an empty page and captures nothing from the
-          // DOM. Measured live: a 752-reply conversation rendered exactly one article
-          // (the root) for a whole run because the window was behind a dialog. Pause,
-          // say so out loud, and never let hidden time masquerade as "X ran out of
-          // replies" - otherwise the run reports a coverage ceiling that is really a
-          // window-focus artifact.
-          // Test explicitly for "hidden", not for `document.hidden`: the latter is also
-          // true while a document is prerendering, which is not the background-tab case
-          // and must not pause a live run.
-          if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
-            hiddenMs += Math.max(500, tickMs);
-            if (!hiddenWarned) {
-              hiddenWarned = true;
-              showToast(
-                'Reply capture paused: X will not render replies while this tab is hidden. ' +
-                  'Bring this tab to the front to continue.',
-                { error: true, sticky: true }
-              );
-            }
-            lastNewAt = Date.now();
-            await sleep(Math.max(500, tickMs));
-            continue;
-          }
           const added = captureVisibleReplyProbeTweets(records, pending.rootStatusId, { surface });
           if (added) lastNewAt = Date.now();
           const visibleTweets = topLevelTweetEls(document);
@@ -9853,6 +9829,32 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
               (tweetEl) => String(tweetStatusId(tweetEl) || '') !== String(pending.rootStatusId)
             ).length
           );
+          // A hidden tab can starve the DOM pass: X sometimes renders no replies at all
+          // into a background tab, and a probe that scrolls an empty page reports a
+          // coverage ceiling that is really a window-focus artifact.
+          //
+          // The trigger is that starvation, NOT hiddenness by itself. Measured live:
+          // this tab reports visibilityState "hidden" while X happily renders replies
+          // into it, so pausing on the flag alone stalls a run that is working. Pause
+          // only while hidden AND nothing has rendered; keep hiddenMs either way so a
+          // thin result can still be explained afterwards.
+          // "hidden" is tested explicitly rather than `document.hidden`, which is also
+          // true while prerendering.
+          const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+          if (hidden) hiddenMs += Math.max(500, tickMs);
+          if (hidden && maxVisibleReplies === 0) {
+            if (!hiddenWarned) {
+              hiddenWarned = true;
+              showToast(
+                'Reply capture stalled: this tab is hidden and X has rendered no replies. ' +
+                  'Bring the tab to the front to continue.',
+                { error: true, sticky: true }
+              );
+            }
+            lastNewAt = Date.now();
+            await sleep(Math.max(500, tickMs));
+            continue;
+          }
           const pageText = String((document.body && document.body.innerText) || '');
           challenge = [
             'Rate limit exceeded',
@@ -10033,14 +10035,16 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     // A run that spent most of its time hidden did not measure this conversation's
     // coverage - it measured the tab being in the background. Say which one happened.
     const hiddenSummary =
-      hiddenMs > 0
-        ? ` WARNING: this tab was hidden for ${Math.round(hiddenMs / 1000)}s of the run; X does not render replies while hidden, so DOM coverage is not a real ceiling. Re-run with the tab in front.`
-        : '';
+      hiddenMs > 0 && !records.size
+        ? ` WARNING: this tab was hidden for ${Math.round(hiddenMs / 1000)}s and the DOM pass captured nothing; that is a window-focus artifact, not a coverage ceiling. Re-run with the tab in front.`
+        : hiddenMs > 0
+          ? ` Note: this tab was hidden for ${Math.round(hiddenMs / 1000)}s of the run, but replies still rendered.`
+          : '';
     showToast(
       `Reply probe finished: ${records.size} DOM-observed on ${surface}. Stop: ${stopReason}.${publicCount}${gapSummary}${archiveSummary}${downloadSummary}${hiddenSummary} Result saved locally.`,
       {
         error:
-          Boolean(hiddenSummary) ||
+          (hiddenMs > 0 && !records.size) ||
           !['pagination-idle', 'conversation-boundary'].includes(stopReason),
         sticky: true,
       }

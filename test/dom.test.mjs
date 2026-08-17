@@ -4260,8 +4260,31 @@ await checkAsync(
       assert.notEqual(
         result.stopReason,
         'no-results',
-        'a hidden tab must never be reported as an empty conversation'
+        'a hidden tab that rendered nothing must never be reported as an empty conversation'
       );
+
+      // ...but hiddenness ALONE must not stall a run that is working. Live, this tab
+      // reports "hidden" while X renders replies into it, so pausing on the flag alone
+      // blocked capture that was succeeding.
+      dom.window.document.querySelector('[data-testid="primaryColumn"]').innerHTML = `
+        <article data-testid="tweet">
+          <div data-testid="User-Name"><a href="/r"><span>R</span></a><a href="/r"><span>@r</span></a></div>
+          <div data-testid="tweetText">A reply rendered into a hidden tab.</div>
+          <a href="/r/status/2000000000000001001"><time datetime="2026-08-09T05:00:00.000Z">Aug 9</time></a>
+        </article>`;
+      const working = await engine.runReplyProbe(
+        { rootStatusId, surface: 'relevant', expectedDisplayedReplies: 752 },
+        {
+          maxMs: 4000,
+          topResetMs: 2000,
+          idleMs: 12000,
+          tickMs: 50,
+          emptyGraceMs: 0,
+          recoverGaps: false,
+        }
+      );
+      assert.equal(working.uniquePostsCaptured, 1, 'a hidden tab that renders must still capture');
+      assert.ok(working.hiddenMs > 0, 'hidden time is still recorded as a diagnostic');
     } finally {
       global.window = priorWindow;
       global.document = priorWindow.document;
