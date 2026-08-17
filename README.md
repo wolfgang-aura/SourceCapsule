@@ -35,11 +35,24 @@ copy-paste mangling, no dead links when the thread disappears.
 
 The source file is also the shipped artifact: plain JavaScript, no production build step.
 
+## What is new in v1.5
+
+- **Reply archive (experimental).** Capture the *replies* to a post — full text, author,
+  timestamp, parent id, and media links — as threaded Markdown plus a full-text CSV. See
+  [Reply archive](#reply-archive-experimental) below.
+- **A shorter menu.** The post drop-down had grown to ten items, which buried the common
+  actions; it is now six. Nothing lost capability: **Save locally + create AI link** was two
+  actions that are both still listed separately, and **Download ZIP (HTML + Markdown)** is the
+  non-Chromium fallback that **Save to library** already falls back to on its own.
+- **One image is one media link.** X serves the same image with and without a file extension
+  before the query string, so an image seen by two capture layers used to be recorded twice.
+  When two URLs name the same asset, the full-size rendition wins.
+
 ## What is new in v1.4.1
 
 - **Complete media in AI-readable links.** Choosing **Create AI readable link** now packages the
-  same captured images and video poster stills as **Save locally + create AI link**. Sharing no
-  longer depends on running a local save first. The existing 25 MB hosted-share cap still applies.
+  same captured images and video poster stills as a local save plus share. Sharing no longer
+  depends on running a local save first. The existing 25 MB hosted-share cap still applies.
 
 ## What is new in v1.4
 
@@ -74,9 +87,10 @@ The source file is also the shipped artifact: plain JavaScript, no production bu
   reduced-motion support. One-off HTML + Markdown downloads now arrive together in one ZIP.
 
 The product remains local-first. Nothing is uploaded until you explicitly choose
-**Create AI readable link** or **Save locally + create AI link** and confirm the expiry. In the combined flow, the local copy is
-completed first, so an upload failure cannot take it away. Shared capsules exclude raw video, are
-capped at 25 MB, and retain source links when media cannot be included.
+**Create AI readable link** and confirm the expiry — and the reply archive never uploads at
+all. When a save and a share are combined, the local copy is completed first, so an upload
+failure cannot take it away. Shared capsules exclude raw video, are capped at 25 MB, and
+retain source links when media cannot be included.
 
 ## Use it
 
@@ -90,8 +104,8 @@ On the X timeline, a status page, or an Article:
   - Save with note and tags
   - Copy clean Markdown
   - Create AI readable link
-  - Save locally + create AI link
-  - Download ZIP (HTML + Markdown)
+  - Capture replies (experimental) — on a focused post page
+  - Download reply archive — on a focused post page
 
 The first library save asks you to choose a root folder. Desktop Chromium writes folders directly.
 Browsers without the File System Access API receive a zip with the same structure.
@@ -111,6 +125,48 @@ Browsers without the File System Access API receive a zip with the same structur
 Thread capture is deliberately honest: it includes same-author posts visible during a progressive
 scroll, marks post boundaries, and records `best-effort` completeness in the manifest. X can
 virtualize or withhold posts, so this is not yet a guarantee of every reply in very long threads.
+
+## Reply archive (experimental)
+
+Everything above archives a post and its thread. This archives the **replies to** a post —
+what people said back — as threaded Markdown plus a full-text CSV.
+
+On an opened post, click **...** then:
+
+1. **Capture replies (experimental)** — one click walks all three of X's reply surfaces
+   (Latest, Top, Relevant) and merges them. Expect a few minutes on a large conversation;
+   progress is reported per surface. Leave the tab in front.
+2. **Download reply archive** — writes `sourcecapsule-replies-<id>.md` and `.csv`.
+
+Replies accumulate across runs and never shrink. A populated field is never overwritten by an
+empty one and the longer text always wins, so a truncated preview cannot clobber full
+long-form text, and a reply that disappears from a later surface keeps what was already
+captured. Storage is IndexedDB; if a write fails, it says so rather than losing the run
+silently.
+
+**Reply media is recorded as links only** — downloading media for thousands of replies is out
+of scope. Images, video, and posters are listed as URLs you can follow.
+
+### How complete is it?
+
+Every archive reports what it captured, lists any reply id it knows about but could not fetch,
+and refuses to treat X's public reply counter as a denominator. Measured across three real
+conversations:
+
+| Replies on X (counter) | Archived with content | Known but uncaptured |
+| --- | --- | --- |
+| 764 | 636 | 0 |
+| 670 | 537 | 0 |
+| 32 | 36 | 0 |
+
+In every case the archive captured **100% of the replies X actually delivered to the browser**.
+The shortfall against the counter in the first two is replies X never served at all — deleted,
+blocked, restricted, or simply never returned by any surface — which are undetectable by
+construction. The third row exceeds its counter because X's number appears to count direct
+replies only, while the archive also captures nested replies-to-replies.
+
+Coverage is best effort and the receipt in every export says so. Deleted, private, and
+never-delivered replies remain unknowable.
 
 ## AI readable links
 
@@ -181,6 +237,7 @@ Chrome Web Store publication is prepared.
 | Downloadable MP4 | Embedded in a full offline HTML archive |
 | HLS-only or blocked video | Poster and source link; clearly marked incomplete |
 | Agent bundle | Markdown plus real image/poster files; raw video excluded |
+| Replies to a post | Threaded Markdown + CSV with full text; media as links only (experimental) |
 | Provenance | Source URL, author, timestamp, warnings, and capture manifest |
 
 An archive never claims more than it actually preserved. Missing media, preview-only long-form
@@ -229,7 +286,7 @@ and extension packaging. It does not replace manual testing against X's live DOM
 Do not share sensitive posts through a public deployment until authentication and abuse controls
 exist. “Unguessable” is useful access control for v1 testing, not a replacement for user accounts.
 
-## Deliberately out of scope for v1.4
+## Deliberately out of scope for v1.5
 
 - AI summaries, chat, OCR, transcripts, or media descriptions
 - Bookmark scraping and bulk export
@@ -237,6 +294,7 @@ exist. “Unguessable” is useful access control for v1 testing, not a replacem
 - A hosted dashboard or full-text search
 - HLS video reassembly
 - Guaranteed capture of every post in arbitrarily long threads
+- Downloading reply media (the reply archive records links only)
 - Chrome Web Store publication
 
 ## License
