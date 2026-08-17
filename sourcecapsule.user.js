@@ -8572,30 +8572,55 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   }
 
   /**
-   * Empty placeholder records for replies X confirmed exist but never delivered
-   * content for. Syndication recovery walks the ARCHIVE, and a known gap is by
-   * definition not in it - so until these are seeded, the ids the receipt lists as
-   * "known but uncaptured" were the one set recovery never even tried.
+   * Empty placeholder records for every reply id the audit knows about but the
+   * archive has no body for.
+   *
+   * This is the difference between an id inventory and an archive. Measured live on
+   * 2026-08-17: the audit held 1,094 ids (1,087 of them seen in the DOM, with handle
+   * and permalink) while the archive held 79 bodies - because those ids were observed
+   * in runs where the archive was broken or did not exist yet. The ids survived; the
+   * content did not. Seeding them lets the syndication round fetch the bodies, which
+   * is the only path from "we saw 1,087 replies" to "we have 1,087 replies".
+   *
+   * Prefers the full inventory and falls back to knownGaps for older audit payloads.
    */
   function replyArchiveGapSeeds(gapReport, rootStatusId, existingRecords = [], surface = '') {
     const root = String(rootStatusId || '');
-    const have = new Set((existingRecords || []).map((record) => String(record && record.id)));
+    const withBody = new Set(
+      (existingRecords || [])
+        .filter((record) => record && String(record.text || '').trim())
+        .map((record) => String(record.id))
+    );
+    const alreadySeeded = new Set(
+      (existingRecords || []).map((record) => String(record && record.id))
+    );
+    const source =
+      (gapReport && gapReport.inventory && gapReport.inventory.length && gapReport.inventory) ||
+      (gapReport && gapReport.knownGaps) ||
+      [];
     const seen = new Set();
-    return ((gapReport && gapReport.knownGaps) || [])
-      .map((gap) => String((gap && (gap.id || gap.replyId)) || gap || ''))
-      .filter((id) => {
-        if (!/^\d+$/.test(id) || id === root || have.has(id) || seen.has(id)) return false;
+    return source
+      .map((entry) => (entry && typeof entry === 'object' ? entry : { id: entry }))
+      .filter((entry) => {
+        const id = String(entry.id || entry.replyId || '');
+        if (!/^\d+$/.test(id) || id === root) return false;
+        if (withBody.has(id) || alreadySeeded.has(id) || seen.has(id)) return false;
         seen.add(id);
         return true;
       })
-      .map((id) => ({
-        id,
-        conversationId: root,
-        url: `https://x.com/i/web/status/${id}`,
-        text: '',
-        provenance: 'network-confirmed',
-        discoveredSurfaces: surface ? [surface] : [],
-      }));
+      .map((entry) => {
+        const id = String(entry.id || entry.replyId);
+        return {
+          id,
+          conversationId: root,
+          // Keep whatever the audit already knows; recovery overwrites with the real body.
+          handle: String(entry.handle || ''),
+          url: String(entry.url || '') || `https://x.com/i/web/status/${id}`,
+          text: '',
+          provenance: entry.provenance || 'network-confirmed',
+          discoveredSurfaces: entry.discoveredSurfaces || (surface ? [surface] : []),
+        };
+      });
   }
 
   function replyProbeConversationBoundaryVisible(root = document) {
@@ -9488,8 +9513,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   }
 
   // Bound the recovery round: this is the only part of the archive that makes network
-  // calls, and a 1,000-reply conversation could otherwise fire hundreds of them.
-  const REPLY_ARCHIVE_SYNDICATION_MAX = 250;
+  // calls. The old bound of 250 was set before we knew the audit routinely holds ~1,100
+  // ids for a 1,000-reply conversation - it silently capped coverage at a quarter of
+  // what was recoverable. The cap now sits above a full conversation so the limiting
+  // factor is what X will actually serve, not an arbitrary number; the run stays paced
+  // by the concurrency limit and reports progress while it works.
+  const REPLY_ARCHIVE_SYNDICATION_MAX = 2000;
   const REPLY_ARCHIVE_SYNDICATION_CONCURRENCY = 3;
 
   /**
@@ -9518,7 +9547,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const patches = [];
     let recovered = 0;
     let unavailable = 0;
+    let attempted = 0;
     const errors = [];
+    // Recovering a full conversation is minutes of work, so it must never look hung:
+    // report every completion to the caller, which surfaces it as a live toast.
+    const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+    const tick = () => {
+      attempted += 1;
+      if (onProgress) onProgress({ attempted, total: pending.length, recovered, unavailable });
+    };
     await runWithConcurrency(
       pending.map((record) => String(record.id)),
       Number(options.concurrency) || REPLY_ARCHIVE_SYNDICATION_CONCURRENCY,
@@ -9564,6 +9601,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             return;
           }
           errors.push(`${id}: ${(error && error.message) || error}`);
+        } finally {
+          tick();
         }
       }
     );
@@ -9871,11 +9910,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       })),
     ].filter((record) => String(record.id) !== String(pending.rootStatusId));
     let saved = await getReplyArchiveStore().save(pending.rootStatusId, archiveInput);
-    // Replies X confirmed exist but never delivered content for have, until now, only
-    // ever been LISTED in the receipt: recovery walked the archive, and a known gap is
-    // by definition not in it. Seed them as empty records so the syndication round that
-    // owns exactly this case can fill them in. Seeding is harmless if it fails - the
-    // renderer and the receipt already state honestly that no text was delivered.
+    // Every id the audit knows but the archive has no body for gets seeded here, so the
+    // recovery round below can fetch it. Without this the archive only ever held what
+    // THIS run happened to see, while the audit remembered a thousand ids from earlier
+    // runs - measured live as 79 bodies against 1,094 known ids.
     if (options.recoverGaps !== false) {
       const seeds = replyArchiveGapSeeds(gapReport, pending.rootStatusId, saved.records, surface);
       if (seeds.length) {
@@ -9887,7 +9925,16 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     // mid-round, everything the scroll pass collected is already durable.
     if (options.recoverGaps !== false && saved.records.some((record) => !record.text)) {
       try {
-        const recovery = await enrichReplyArchiveViaSyndication(saved.records);
+        const recovery = await enrichReplyArchiveViaSyndication(saved.records, undefined, {
+          onProgress: ({ attempted, total, recovered }) => {
+            // Every 10th completion: often enough to prove liveness, rare enough not
+            // to thrash the DOM on a thousand-reply recovery.
+            if (attempted % 10 && attempted !== total) return;
+            showToast(`Recovering reply bodies: ${attempted}/${total} · ${recovered} recovered`, {
+              sticky: true,
+            });
+          },
+        });
         result.gapsRecovered = recovery.recovered;
         result.gapsUnavailable = recovery.unavailable;
         result.gapRecoveryErrors = recovery.errors;
