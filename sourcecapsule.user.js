@@ -9788,6 +9788,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     let maxVisibleTweets = 0;
     let maxVisibleReplies = 0;
     let challenge = '';
+    let hiddenMs = 0;
+    let hiddenWarned = false;
 
     if (!scroller) {
       stopReason = 'no-scroller';
@@ -9801,7 +9803,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       // the search at the top until it remains there for six consecutive observations;
       // otherwise fail explicitly instead of silently probing only the old tail segment.
       let stableTopChecks = 0;
-      const topResetDeadline = Date.now() + 8000;
+      const topResetDeadline = Date.now() + (Number(options.topResetMs) || 8000);
       while (Date.now() < topResetDeadline && stableTopChecks < 6) {
         scroller.scrollTo(0, 0);
         await sleep(250);
@@ -9817,6 +9819,30 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         });
       } else {
         while (Date.now() - startedAt < maxMs) {
+          // X does not render conversation replies into a hidden tab, so a probe that
+          // runs in the background scrolls an empty page and captures nothing from the
+          // DOM. Measured live: a 752-reply conversation rendered exactly one article
+          // (the root) for a whole run because the window was behind a dialog. Pause,
+          // say so out loud, and never let hidden time masquerade as "X ran out of
+          // replies" - otherwise the run reports a coverage ceiling that is really a
+          // window-focus artifact.
+          // Test explicitly for "hidden", not for `document.hidden`: the latter is also
+          // true while a document is prerendering, which is not the background-tab case
+          // and must not pause a live run.
+          if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+            hiddenMs += Math.max(500, tickMs);
+            if (!hiddenWarned) {
+              hiddenWarned = true;
+              showToast(
+                'Reply capture paused: X will not render replies while this tab is hidden. ' +
+                  'Bring this tab to the front to continue.',
+                { error: true, sticky: true }
+              );
+            }
+            lastNewAt = Date.now();
+            await sleep(Math.max(500, tickMs));
+            continue;
+          }
           const added = captureVisibleReplyProbeTweets(records, pending.rootStatusId, { surface });
           if (added) lastNewAt = Date.now();
           const visibleTweets = topLevelTweetEls(document);
@@ -9899,6 +9925,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       scrolls,
       maxVisibleTweets,
       maxVisibleReplies,
+      hiddenMs,
       sourceUrl: location.href,
       returnUrl: pending.returnUrl || '',
       records: Array.from(records.values()),
@@ -10003,10 +10030,18 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const archiveSummary = result.archiveStorageError
       ? ` ARCHIVE NOT SAVED: ${result.archiveStorageError}.`
       : ` Archive now holds ${result.archivedReplies} replies with content (${result.archiveBackend}).${recoverySummary}`;
+    // A run that spent most of its time hidden did not measure this conversation's
+    // coverage - it measured the tab being in the background. Say which one happened.
+    const hiddenSummary =
+      hiddenMs > 0
+        ? ` WARNING: this tab was hidden for ${Math.round(hiddenMs / 1000)}s of the run; X does not render replies while hidden, so DOM coverage is not a real ceiling. Re-run with the tab in front.`
+        : '';
     showToast(
-      `Reply probe finished: ${records.size} DOM-observed on ${surface}. Stop: ${stopReason}.${publicCount}${gapSummary}${archiveSummary}${downloadSummary} Result saved locally.`,
+      `Reply probe finished: ${records.size} DOM-observed on ${surface}. Stop: ${stopReason}.${publicCount}${gapSummary}${archiveSummary}${downloadSummary}${hiddenSummary} Result saved locally.`,
       {
-        error: !['pagination-idle', 'conversation-boundary'].includes(stopReason),
+        error:
+          Boolean(hiddenSummary) ||
+          !['pagination-idle', 'conversation-boundary'].includes(stopReason),
         sticky: true,
       }
     );
