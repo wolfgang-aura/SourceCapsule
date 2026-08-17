@@ -8555,6 +8555,20 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return added;
   }
 
+  /**
+   * Should the probe keep waiting instead of concluding "no-results"?
+   *
+   * Counted in REPLIES, never in tweets. The first version counted every rendered
+   * tweet, which is 0 only on a search surface: on a focused post ("Relevant") the
+   * root post always renders, so the count was 1 from the first tick and the grace
+   * window could never apply to the surface that needs it most. Run live against a
+   * ~1,000-reply conversation, that ended the probe after 13 seconds with zero DOM
+   * replies captured.
+   */
+  function replyProbeStillWarmingUp(visibleReplies, elapsedMs, emptyGraceMs) {
+    return Number(visibleReplies) === 0 && Number(elapsedMs) < Number(emptyGraceMs);
+  }
+
   function replyProbeConversationBoundaryVisible(root = document) {
     const selector = CONFIG.selectors.threadBoundaryHeading.join(',');
     return Array.from((root && root.querySelectorAll(selector)) || []).some((heading) =>
@@ -9677,7 +9691,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const maxMs = Number(options.maxMs) || replyProbeMaxMs(surface);
     const idleMs = Number(options.idleMs) || 12000;
     const tickMs = Number(options.tickMs) || 450;
-    // How long to keep waiting when the page has rendered no tweets at all.
+    // How long to keep waiting when the page has rendered no REPLIES yet.
     const emptyGraceMs = Math.min(Number(options.emptyGraceMs) || 45000, maxMs);
     const records = new Map();
     const scroller = document.scrollingElement || document.documentElement;
@@ -9687,6 +9701,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     let scrolls = 0;
     let stopReason = 'timeout';
     let maxVisibleTweets = 0;
+    let maxVisibleReplies = 0;
     let challenge = '';
 
     if (!scroller) {
@@ -9719,7 +9734,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         while (Date.now() - startedAt < maxMs) {
           const added = captureVisibleReplyProbeTweets(records, pending.rootStatusId, { surface });
           if (added) lastNewAt = Date.now();
-          maxVisibleTweets = Math.max(maxVisibleTweets, topLevelTweetEls(document).length);
+          const visibleTweets = topLevelTweetEls(document);
+          maxVisibleTweets = Math.max(maxVisibleTweets, visibleTweets.length);
+          maxVisibleReplies = Math.max(
+            maxVisibleReplies,
+            visibleTweets.filter(
+              (tweetEl) => String(tweetStatusId(tweetEl) || '') !== String(pending.rootStatusId)
+            ).length
+          );
           const pageText = String((document.body && document.body.innerText) || '');
           challenge = [
             'Rate limit exceeded',
@@ -9747,10 +9769,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           if (nearBottom && height === lastHeight && Date.now() - lastNewAt >= idleMs) {
             // Observed live: X had not rendered a single reply yet when the idle
             // window elapsed, so a healthy 1,000-reply conversation was reported as
-            // "no-results" after 12s. An idle page that has never shown ANY tweet has
+            // "no-results" after 12s. An idle page that has never shown a REPLY has
             // not finished loading - keep waiting for the grace window before
             // concluding the conversation is empty.
-            if (maxVisibleTweets === 0 && Date.now() - startedAt < emptyGraceMs) {
+            if (replyProbeStillWarmingUp(maxVisibleReplies, Date.now() - startedAt, emptyGraceMs)) {
               await sleep(Math.max(500, tickMs));
               continue;
             }
@@ -9791,6 +9813,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       challenge: challenge || '',
       scrolls,
       maxVisibleTweets,
+      maxVisibleReplies,
       sourceUrl: location.href,
       returnUrl: pending.returnUrl || '',
       records: Array.from(records.values()),
@@ -11278,6 +11301,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       replyProbeTweetRecord,
       captureVisibleReplyProbeTweets,
       replyProbeConversationBoundaryVisible,
+      replyProbeStillWarmingUp,
       searchTimelineReplyRecordsFromCapturedBody,
       getCapturedSearchTimelineReplies,
       buildReplyGapReport,
