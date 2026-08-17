@@ -4218,6 +4218,48 @@ await checkAsync(
   }
 );
 
+check('the receipt never lists a reply whose body is in the same file', () => {
+  // Live 2026-08-17: recovery filled all 7 "known but uncaptured" replies, yet the
+  // downloaded Markdown still listed those 7 as uncaptured - the gap report is built
+  // before the recovery round.
+  const rootStatusId = '2000000000000000000';
+  const archive = engine.buildReplyArchive({
+    rootStatusId,
+    records: [
+      { id: '2000000000000000901', handle: 'a', text: 'Recovered after the gap report.' },
+      { id: '2000000000000000902', handle: 'b', text: '' },
+    ],
+    gapReport: {
+      knownConversationIds: 2,
+      knownGaps: [
+        { id: '2000000000000000901', reason: 'missing-text' },
+        { id: '2000000000000000902', reason: 'missing-text' },
+      ],
+    },
+  });
+  const markdown = engine.renderReplyArchiveMarkdown(archive);
+  assert.ok(markdown.includes('Known but uncaptured (network-only) replies: 1'));
+  assert.ok(markdown.includes('### Known but uncaptured replies (1)'));
+  assert.ok(markdown.includes('- 2000000000000000902'));
+  assert.ok(
+    !markdown.includes('- 2000000000000000901 ·'),
+    'a reply whose text is in this file must not be listed as uncaptured'
+  );
+});
+
+check('archives captured before the decode fix still export as plain text', () => {
+  // The merge invariant never overwrites stored text, so records captured before the
+  // capture-side decode keep X's encoding forever unless export decodes as well.
+  const archive = engine.buildReplyArchive({
+    rootStatusId: '2000000000000000000',
+    records: [
+      { id: '2000000000000000101', handle: 'old', text: 'Space company -&gt; Drones &amp; more' },
+    ],
+  });
+  assert.ok(engine.renderReplyArchiveMarkdown(archive).includes('Space company -> Drones & more'));
+  assert.ok(engine.replyArchiveCsv(archive).includes('Space company -> Drones & more'));
+});
+
 check('the archive title carries exactly one @', () => {
   // handleFromSourceUrl returns "@name"; the DOM/record path stores a bare "name".
   ['@aleabitoreddit', 'aleabitoreddit'].forEach((handle) => {
