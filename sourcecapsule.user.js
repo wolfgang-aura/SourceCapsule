@@ -7029,7 +7029,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           value.core.user_results.result &&
           (value.core.user_results.result.user || value.core.user_results.result);
         const userLegacy = (userResult && userResult.legacy) || {};
-        const handle = String(userLegacy.screen_name || '');
+        // X moved screen_name/name out of the user's `legacy` block and into
+        // `user_results.result.core`. Live capture returned empty handles for every
+        // reply until this fallback existed; check both, newest shape first.
+        const userCore = (userResult && userResult.core) || {};
+        const handle = String(userCore.screen_name || userLegacy.screen_name || '');
+        const displayName = String(userCore.name || userLegacy.name || '');
         const previewText = String((legacy && (legacy.full_text || legacy.text)) || '')
           .replace(/\s+/g, ' ')
           .trim();
@@ -7052,7 +7057,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             id,
             conversationId,
             handle,
-            displayName: String(userLegacy.name || (existing && existing.displayName) || ''),
+            displayName: displayName || (existing && existing.displayName) || '',
             url: handle
               ? `https://x.com/${handle}/status/${id}`
               : `https://x.com/i/web/status/${id}`,
@@ -9242,7 +9247,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     backend = '',
     storageError = '',
   }) {
-    const merged = mergeReplyArchiveRecords([], records);
+    // Defence in depth: archives written before the root post was filtered on input
+    // still hold it, and it must never be rendered as one of its own replies.
+    const merged = mergeReplyArchiveRecords([], records).filter(
+      (record) => String(record.id) !== String(rootStatusId || '')
+    );
     const surfaces = Array.from(
       new Set(merged.flatMap((record) => record.discoveredSurfaces || []))
     ).sort();
@@ -9668,6 +9677,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const maxMs = Number(options.maxMs) || replyProbeMaxMs(surface);
     const idleMs = Number(options.idleMs) || 12000;
     const tickMs = Number(options.tickMs) || 450;
+    // How long to keep waiting when the page has rendered no tweets at all.
+    const emptyGraceMs = Math.min(Number(options.emptyGraceMs) || 45000, maxMs);
     const records = new Map();
     const scroller = document.scrollingElement || document.documentElement;
     const startedAt = Date.now();
@@ -9734,6 +9745,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           const nearBottom =
             scroller.scrollTop + viewport >= height - Math.max(300, viewport * 0.4);
           if (nearBottom && height === lastHeight && Date.now() - lastNewAt >= idleMs) {
+            // Observed live: X had not rendered a single reply yet when the idle
+            // window elapsed, so a healthy 1,000-reply conversation was reported as
+            // "no-results" after 12s. An idle page that has never shown ANY tweet has
+            // not finished loading - keep waiting for the grace window before
+            // concluding the conversation is empty.
+            if (maxVisibleTweets === 0 && Date.now() - startedAt < emptyGraceMs) {
+              await sleep(Math.max(500, tickMs));
+              continue;
+            }
             stopReason = records.size ? 'pagination-idle' : 'no-results';
             break;
           }
@@ -9778,11 +9798,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       gapReport,
       unionCompletePosts: gapReport.completeDomRecords,
     };
-    writeReplyProbeResult(result);
-
     // The archive is the deliverable: persist the reply CONTENT from both layers,
     // merged into whatever previous surfaces already stored. This is deliberately
     // separate from writeReplyProbeResult (an audit trail that keeps IDs only).
+    // The root post itself arrives in the GraphQL payload with its own conversation
+    // id; it is the thing being replied to, not a reply, so it must not be archived.
     const archiveInput = [
       ...Array.from(records.values()).map((record) => ({
         ...record,
@@ -9795,7 +9815,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         provenance: 'network-confirmed',
         discoveredSurfaces: [surface],
       })),
-    ];
+    ].filter((record) => String(record.id) !== String(pending.rootStatusId));
     let saved = await getReplyArchiveStore().save(pending.rootStatusId, archiveInput);
     // Save FIRST, then attempt recovery: if syndication is blocked or the tab is closed
     // mid-round, everything the scroll pass collected is already durable.
@@ -9825,6 +9845,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         sticky: true,
       });
     }
+    // Persist the audit trail only AFTER the archive outcome is known - writing it
+    // earlier stored a result whose archive fields were all undefined, which made the
+    // saved diagnostics useless for telling a failed write from a skipped one.
+    writeReplyProbeResult(result);
     let reportDownloaded = false;
     if (options.downloadGapReport === true) {
       try {

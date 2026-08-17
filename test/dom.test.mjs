@@ -3968,6 +3968,104 @@ await checkAsync(
   }
 );
 
+// Three more defects found only by running against live X on 2026-08-17.
+check('reply author is read from the current X user shape (core.screen_name)', () => {
+  const rootStatusId = '2000000000000000000';
+  // Live capture returned an EMPTY handle for all 37 replies: X now carries
+  // screen_name/name on `user_results.result.core`, not on the user's `legacy`.
+  const modernShape = JSON.stringify({
+    rest_id: '2000000000000000201',
+    core: {
+      user_results: {
+        result: { core: { screen_name: 'modern_user', name: 'Modern User' }, legacy: {} },
+      },
+    },
+    legacy: { conversation_id_str: rootStatusId, full_text: 'Reply from the new user shape.' },
+  });
+  const [modern] = engine.searchTimelineReplyRecordsFromCapturedBody(modernShape);
+  assert.equal(modern.handle, 'modern_user');
+  assert.equal(modern.displayName, 'Modern User');
+  assert.equal(modern.url, 'https://x.com/modern_user/status/2000000000000000201');
+
+  // The older shape must keep working — X has not removed it everywhere.
+  const legacyShape = JSON.stringify({
+    rest_id: '2000000000000000202',
+    core: {
+      user_results: { result: { legacy: { screen_name: 'legacy_user', name: 'Legacy User' } } },
+    },
+    legacy: { conversation_id_str: rootStatusId, full_text: 'Reply from the old user shape.' },
+  });
+  const [old] = engine.searchTimelineReplyRecordsFromCapturedBody(legacyShape);
+  assert.equal(old.handle, 'legacy_user');
+  assert.equal(old.displayName, 'Legacy User');
+});
+
+check('the root post is never archived as a reply to itself', () => {
+  const rootStatusId = '2000000000000000000';
+  const archive = engine.buildReplyArchive({
+    rootStatusId,
+    records: [
+      // The root arrives in the GraphQL payload carrying its own conversation id.
+      { id: rootStatusId, handle: 'author', text: 'The original post body.' },
+      { id: '2000000000000000101', handle: 'replier', text: 'An actual reply.' },
+    ],
+  });
+  assert.equal(archive.replyCount, 1);
+  assert.equal(archive.records[0].id, '2000000000000000101');
+  assert.ok(!engine.renderReplyArchiveMarkdown(archive).includes('The original post body.'));
+});
+
+await checkAsync('a slow-rendering conversation is not reported as no-results', async () => {
+  const rootStatusId = '2000000000000000000';
+  // Live failure: X had rendered nothing when the 12s idle window elapsed, so a
+  // healthy ~1,000-reply conversation stopped as "no-results" after 12 seconds.
+  const dom = new JSDOM(
+    `<!doctype html><html><body><div data-testid="primaryColumn"></div></body></html>`,
+    {
+      url: `https://x.com/search?q=conversation_id%3A${rootStatusId}&f=live`,
+    }
+  );
+  const priorWindow = global.window;
+  const priorHistory = global.history;
+  global.window = dom.window;
+  global.document = dom.window.document;
+  global.Node = dom.window.Node;
+  global.location = dom.window.location;
+  global.localStorage = dom.window.localStorage;
+  global.history = dom.window.history;
+  dom.window.document.documentElement.scrollTo = () => {};
+  try {
+    // Replies appear only after the idle window would have fired.
+    setTimeout(() => {
+      dom.window.document.querySelector('[data-testid="primaryColumn"]').innerHTML = `
+        <article data-testid="tweet">
+          <div data-testid="User-Name"><a href="/late"><span>Late</span></a><a href="/late"><span>@late</span></a></div>
+          <div data-testid="tweetText">A reply that rendered late.</div>
+          <a href="/late/status/2000000000000000501"><time datetime="2026-08-11T09:00:00.000Z">Aug 11</time></a>
+        </article>`;
+    }, 900);
+    const result = await engine.runReplyProbe(
+      { rootStatusId, surface: 'latest', expectedDisplayedReplies: 1 },
+      { maxMs: 6000, idleMs: 0, tickMs: 40, emptyGraceMs: 4000, recoverGaps: false }
+    );
+    assert.notEqual(result.stopReason, 'no-results', 'must wait out the empty grace window');
+    assert.equal(result.uniquePostsCaptured, 1);
+    // The saved audit trail must record the archive outcome, not undefined.
+    const savedResult = JSON.parse(
+      dom.window.localStorage.getItem('sourcecapsule:reply-probe:last')
+    );
+    assert.equal(typeof savedResult.archivedReplies, 'number');
+    assert.equal(savedResult.archiveStorageError, '');
+  } finally {
+    global.window = priorWindow;
+    global.document = priorWindow.document;
+    global.Node = priorWindow.Node;
+    global.location = priorWindow.location;
+    global.localStorage = priorWindow.localStorage;
+    global.history = priorHistory;
+  }
+});
+
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);
   process.exit(1);
