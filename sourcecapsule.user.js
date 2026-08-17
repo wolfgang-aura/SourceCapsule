@@ -8386,38 +8386,36 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return model;
   }
 
-  // The export choices offered by every Export control, grouped: save variants,
-  // then share/clipboard, then loose file downloads. The primary trigger button
-  // already quick-saves, so the menu holds only the variants - and the single
-  // "HTML + Markdown" download covers the removed HTML-only/Markdown-only modes
-  // (the engine still supports the 'html' and 'md' keys).
+  // The export choices offered by every Export control. The menu is deliberately
+  // short: a ten-item drop-down made the common actions hard to find, so only the
+  // ones worth a click of their own are listed.
+  //
+  // Removed from the MENU, not from the engine: 'library-share' was just "save,
+  // then share" - two items that are already here - and 'both' (the HTML + Markdown
+  // ZIP) is a fallback for non-Chromium, which "Save to library" already falls back
+  // to on its own. runExport still honours 'library-share', 'both', 'html' and 'md',
+  // so the extension popup and any saved automation keep working.
   const EXPORT_TYPES = [
     { key: 'library', label: 'Save to library' },
     { key: 'library-note', label: 'Save with note / tags' },
     { divider: true },
     { key: 'copy', label: 'Copy clean Markdown' },
     { key: 'share', label: 'Create AI readable link' },
-    { key: 'library-share', label: 'Save locally + create AI link' },
-    { divider: true },
-    { key: 'both', label: 'Download ZIP (HTML + Markdown)' },
   ];
   const POST_EXPORT_TYPES = [
     { key: 'library-note', label: 'Save with note / tags' },
-    { divider: true },
     { key: 'copy', label: 'Copy Markdown' },
     { key: 'share', label: 'Create AI readable link' },
-    { key: 'library-share', label: 'Save locally + create AI link' },
-    { divider: true },
-    { key: 'both', label: 'Download ZIP (HTML + Markdown)' },
   ];
+  // Which X surface the probe scrolls is an implementation detail of how X paginates
+  // replies, not a choice a reader should have to make - and picking only one gives
+  // up the coverage the others contribute. One item runs all three and merges.
   const THREAD_EXPORT_TYPES = [
     { key: 'library-thread', label: 'Save full thread' },
-    { key: 'reply-probe', label: 'Capture replies (experimental) · Latest' },
-    { key: 'reply-probe-top', label: 'Capture replies (experimental) · Top' },
-    { key: 'reply-probe-relevant', label: 'Capture replies (experimental) · Relevant' },
-    { key: 'reply-archive-download', label: 'Download reply archive (Markdown + CSV)' },
-    { divider: true },
     ...POST_EXPORT_TYPES,
+    { divider: true },
+    { key: 'reply-probe', label: 'Capture replies (experimental)' },
+    { key: 'reply-archive-download', label: 'Download reply archive' },
   ];
 
   function exportTypeNeedsCaptureOptions(exportType) {
@@ -9764,20 +9762,78 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     }, 1200);
   }
 
-  function startReplyProbe(tweetEl, surface = 'latest') {
-    const rootStatusId = tweetStatusId(tweetEl) || currentStatusId();
-    const normalizedSurface = ['latest', 'top', 'relevant'].includes(surface) ? surface : 'latest';
+  const REPLY_PROBE_SURFACES = ['latest', 'top', 'relevant'];
+
+  function replyProbeSurfaceLabel(surface) {
+    if (surface === 'top') return 'Top';
+    if (surface === 'relevant') return 'Relevant';
+    return 'Latest';
+  }
+
+  /**
+   * Hand control to the next surface in the pass.
+   *
+   * "relevant" is probed in place on the post page while the other two are X search
+   * pages, so advancing is a navigation in every case - which is why the queue has to
+   * live in sessionStorage rather than in a closure. Returns false when the pass is
+   * over, so the caller can report the final result instead of chaining.
+   */
+  function nextReplyProbePass(pending) {
+    const queue = Array.isArray(pending && pending.queue) ? pending.queue.filter(Boolean) : [];
+    if (!queue.length) return null;
+    const [surface, ...rest] = queue;
+    if (!REPLY_PROBE_SURFACES.includes(surface)) return null;
+    return {
+      ...pending,
+      surface,
+      queue: rest,
+      passIndex: Number(pending.passIndex || 1) + 1,
+    };
+  }
+
+  function advanceReplyProbe(pending) {
+    const next = nextReplyProbePass(pending);
+    if (!next) return false;
+    const surface = next.surface;
     const url =
-      normalizedSurface === 'relevant'
-        ? location.href
-        : replyProbeSearchUrl(rootStatusId, normalizedSurface);
+      surface === 'relevant'
+        ? next.returnUrl || location.href
+        : replyProbeSearchUrl(next.rootStatusId, surface);
+    if (!url) return false;
+    try {
+      sessionStorage.setItem(REPLY_PROBE_PENDING_KEY, JSON.stringify(next));
+    } catch {
+      // Cannot carry the queue across the navigation; stop cleanly rather than
+      // silently restarting the surface we just finished.
+      return false;
+    }
+    showToast(
+      `Reply capture ${next.passIndex}/${next.passTotal}: opening X ${replyProbeSurfaceLabel(surface)}...`,
+      { sticky: true }
+    );
+    location.href = url;
+    return true;
+  }
+
+  function startReplyProbe(tweetEl, surface = 'all') {
+    const rootStatusId = tweetStatusId(tweetEl) || currentStatusId();
+    // A single menu item asks for the most complete capture, which means every surface.
+    // An explicit single surface is still honoured - the extension popup and the tests
+    // drive one at a time.
+    const requested = surface === 'all' ? REPLY_PROBE_SURFACES.slice() : [surface];
+    const surfaces = requested.filter((name) => REPLY_PROBE_SURFACES.includes(name));
+    const [first, ...queue] = surfaces.length ? surfaces : ['latest'];
+    const url = first === 'relevant' ? location.href : replyProbeSearchUrl(rootStatusId, first);
     if (!url) {
       showToast('Reply probe could not determine the root post id.', { error: true, sticky: true });
       return;
     }
     const pending = {
       rootStatusId,
-      surface: normalizedSurface,
+      surface: first,
+      queue,
+      passIndex: 1,
+      passTotal: queue.length + 1,
       expectedDisplayedReplies: displayedReplyCount(tweetEl),
       returnUrl: location.href,
       requestedAt: new Date().toISOString(),
@@ -9788,11 +9844,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       showToast(`Reply probe could not start: ${error.message}`, { error: true, sticky: true });
       return;
     }
-    if (normalizedSurface === 'relevant') {
-      showToast('Probing X Relevant conversation in place...', { sticky: true });
+    const progress = pending.passTotal > 1 ? `${pending.passIndex}/${pending.passTotal}: ` : '';
+    if (first === 'relevant') {
+      showToast(`Reply capture ${progress}probing X Relevant conversation in place...`, {
+        sticky: true,
+      });
       runPendingReplyProbe(pending);
     } else {
-      showToast(`Opening X ${normalizedSurface === 'top' ? 'Top' : 'Latest'} search...`, {
+      showToast(`Reply capture ${progress}opening X ${replyProbeSurfaceLabel(first)} search...`, {
         sticky: true,
       });
       location.href = url;
@@ -10045,6 +10104,18 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         result.downloadError = String((error && error.message) || error || 'download failed');
       }
     }
+    // Chain BEFORE clearing the pending key: advanceReplyProbe overwrites it with the
+    // next surface, and clearing afterwards would delete the queue it just wrote.
+    // The archive for this surface is already saved above, so a pass interrupted here
+    // (closed tab, navigation) keeps everything captured so far.
+    if (options.chainSurfaces !== false && advanceReplyProbe(pending)) {
+      log('reply probe surface finished, advancing', {
+        surface,
+        captured: records.size,
+        remaining: pending.queue,
+      });
+      return result;
+    }
     try {
       sessionStorage.removeItem(REPLY_PROBE_PENDING_KEY);
     } catch {
@@ -10071,8 +10142,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         : hiddenMs > 0
           ? ` Note: this tab was hidden for ${Math.round(hiddenMs / 1000)}s of the run, but replies still rendered.`
           : '';
+    // Name the whole pass, not just its last leg: after a three-surface run the final
+    // toast is the only report the reader sees, and "on relevant" alone would read as
+    // if the other two never happened.
+    const passSummary =
+      Number(pending.passTotal || 1) > 1
+        ? `${records.size} DOM-observed on ${surface} (surface ${pending.passIndex || 1} of ${pending.passTotal}; the archive total below spans all of them)`
+        : `${records.size} DOM-observed on ${surface}`;
     showToast(
-      `Reply probe finished: ${records.size} DOM-observed on ${surface}. Stop: ${stopReason}.${publicCount}${gapSummary}${archiveSummary}${downloadSummary}${hiddenSummary} Result saved locally.`,
+      `Reply probe finished: ${passSummary}. Stop: ${stopReason}.${publicCount}${gapSummary}${archiveSummary}${downloadSummary}${hiddenSummary} Result saved locally.`,
       {
         error:
           (hiddenMs > 0 && !records.size) ||
@@ -10087,6 +10165,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   function maybeResumeReplyProbe() {
     const pending = readReplyProbePending();
     if (!pending) return;
+    // "relevant" is probed on the post page itself, not on an X search page. When a
+    // multi-surface pass advances to it, the browser lands back on the post, where the
+    // conversation_id query below can never match - so it needs its own resume gate.
+    if (pending.surface === 'relevant') {
+      if (String(currentStatusId() || '') !== String(pending.rootStatusId)) return;
+      runPendingReplyProbe(pending);
+      return;
+    }
     const query = new URLSearchParams(location.search).get('q') || '';
     if (query !== `conversation_id:${pending.rootStatusId}`) return;
     const live = new URLSearchParams(location.search).get('f') === 'live';
@@ -10995,7 +11081,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           });
         },
         onPick: (exportType, trigger) => {
-          if (exportType === 'reply-probe') return startReplyProbe(tweetEl, 'latest');
+          // 'reply-probe' now means "the most complete capture", i.e. every surface.
+          // The per-surface keys are kept as entry points for the extension popup and
+          // for anyone diagnosing one surface in isolation; they are just not menu items.
+          if (exportType === 'reply-probe') return startReplyProbe(tweetEl, 'all');
+          if (exportType === 'reply-probe-latest') return startReplyProbe(tweetEl, 'latest');
           if (exportType === 'reply-probe-top') return startReplyProbe(tweetEl, 'top');
           if (exportType === 'reply-probe-relevant') return startReplyProbe(tweetEl, 'relevant');
           if (exportType === 'reply-archive-download') return downloadReplyArchive(tweetEl);
@@ -11477,6 +11567,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       captureVisibleReplyProbeTweets,
       replyProbeConversationBoundaryVisible,
       replyProbeStillWarmingUp,
+      nextReplyProbePass,
+      REPLY_PROBE_SURFACES,
       replyArchiveGapSeeds,
       searchTimelineReplyRecordsFromCapturedBody,
       getCapturedSearchTimelineReplies,

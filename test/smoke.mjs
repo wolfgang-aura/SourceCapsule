@@ -19,11 +19,20 @@ const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
 const engine = require(join(here, '..', 'sourcecapsule.user.js'));
 
+// The combined "save locally + create AI link" action was removed from the MENU - it
+// was two items that are both still listed - but the engine must keep serving the key,
+// because the extension popup and saved automation drive exportType directly.
 assert.ok(
-  engine.EXPORT_TYPES.some(
-    (item) => item.key === 'library-share' && item.label === 'Save locally + create AI link'
-  ),
-  'combined local-save and AI readable link action is available'
+  !engine.EXPORT_TYPES.some((item) => item.key === 'library-share'),
+  'combined local-save + AI link is no longer a menu item'
+);
+assert.deepEqual(engine.postExportRequest('library-share'), {
+  exportType: 'library-share',
+  includeThread: false,
+});
+assert.ok(
+  engine.exportTypeNeedsCaptureOptions('library-share'),
+  'library-share still routes through the capture-options path'
 );
 assert.ok(
   engine.THREAD_EXPORT_TYPES.some(

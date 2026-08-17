@@ -454,12 +454,15 @@ check(
     // Manual checklist T02 requires the drop-down's first item to be "Save full
     // thread" on every focused post - assert order, not just presence.
     assert.equal(focusedMode.menuItems[0].key, 'library-thread');
-    assert.equal(focusedMode.menuItems[1].key, 'reply-probe');
-    assert.equal(focusedMode.menuItems[2].key, 'reply-probe-top');
-    assert.equal(focusedMode.menuItems[3].key, 'reply-probe-relevant');
-    assert.equal(focusedMode.menuItems[4].key, 'reply-archive-download');
-    assert.match(focusedMode.menuItems[4].label, /Download reply archive/);
-    assert.ok(focusedMode.menuItems.slice(1, 4).every((item) => /experimental/i.test(item.label)));
+    // The three per-surface capture items collapsed into one that runs all of them.
+    const focusedKeys = focusedMode.menuItems.filter((item) => !item.divider).map((i) => i.key);
+    assert.ok(!focusedKeys.some((key) => /^reply-probe-/.test(key)), 'no per-surface menu items');
+    const probe = focusedMode.menuItems.find((item) => item.key === 'reply-probe');
+    assert.match(probe.label, /experimental/i);
+    const archive = focusedMode.menuItems.find((item) => item.key === 'reply-archive-download');
+    assert.match(archive.label, /Download reply archive/);
+    // Capture and download stay adjacent and last: they are one workflow.
+    assert.deepEqual(focusedKeys.slice(-2), ['reply-probe', 'reply-archive-download']);
     const continuationMode = engine.postControlCaptureMode(continuation, column);
     assert.equal(continuationMode.isThread, false);
     assert.equal(continuationMode.includeThread, false);
@@ -4451,6 +4454,64 @@ check('the media count in the receipt matches the media the file actually lists'
     `receipt says ${archive.mediaLinkCount} media links, body lists ${rendered}`
   );
   assert.equal(archive.mediaLinkCount, 3);
+});
+
+check('the post menu offers six items, and no item the engine cannot serve', () => {
+  // A ten-item drop-down buried the common actions. This pins the short menu so a
+  // future addition is a deliberate decision rather than a drift back to ten.
+  const keys = engine.THREAD_EXPORT_TYPES.filter((item) => !item.divider).map((item) => item.key);
+  assert.deepEqual(keys, [
+    'library-thread',
+    'library-note',
+    'copy',
+    'share',
+    'reply-probe',
+    'reply-archive-download',
+  ]);
+  // Removed from the menu only - runExport must still honour the keys, because the
+  // extension popup and saved automation drive them directly.
+  const menus = [engine.EXPORT_TYPES, engine.POST_EXPORT_TYPES, engine.THREAD_EXPORT_TYPES];
+  menus.forEach((menu) => {
+    const menuKeys = menu.filter((item) => !item.divider).map((item) => item.key);
+    ['library-share', 'both', 'html', 'md'].forEach((gone) => {
+      assert.ok(!menuKeys.includes(gone), `${gone} should not be a menu item`);
+    });
+    assert.ok(
+      menuKeys.every((key) => typeof key === 'string' && key),
+      'every menu item needs a key'
+    );
+  });
+});
+
+check('one capture pass walks every surface, then stops', () => {
+  // The queue has to survive a navigation per surface, so it lives in the pending
+  // record. Walk it the way the run loop does and assert it terminates.
+  let pending = {
+    rootStatusId: '2000000000000000000',
+    surface: 'latest',
+    queue: ['top', 'relevant'],
+    passIndex: 1,
+    passTotal: 3,
+  };
+  const walked = [pending.surface];
+  for (let i = 0; i < 10; i++) {
+    const next = engine.nextReplyProbePass(pending);
+    if (!next) break;
+    walked.push(next.surface);
+    pending = next;
+  }
+  assert.deepEqual(walked, engine.REPLY_PROBE_SURFACES);
+  assert.equal(pending.passIndex, 3);
+  // Terminates: the last surface must not chain again, or the pass would loop forever.
+  assert.equal(engine.nextReplyProbePass(pending), null);
+});
+
+check('a capture pass never advances to a surface it does not understand', () => {
+  assert.equal(engine.nextReplyProbePass({ queue: [] }), null);
+  assert.equal(engine.nextReplyProbePass({}), null);
+  assert.equal(engine.nextReplyProbePass({ queue: ['nonsense'] }), null);
+  // A single-surface run (popup, diagnostics) carries no queue and must not chain.
+  assert.equal(engine.nextReplyProbePass({ surface: 'top', queue: undefined }), null);
 });
 
 if (failures) {
