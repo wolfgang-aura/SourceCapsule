@@ -9270,9 +9270,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         roots.push(record);
       }
     });
-    const byTime = (a, b) =>
-      String(a.createdAt || '').localeCompare(String(b.createdAt || '')) ||
-      String(a.id).localeCompare(String(b.id));
+    // Undated replies (usually tombstones) sort LAST, not first — an empty string would
+    // otherwise float removed content to the top of the conversation.
+    const byTime = (a, b) => {
+      const at = String(a.createdAt || '');
+      const bt = String(b.createdAt || '');
+      if (Boolean(at) !== Boolean(bt)) return at ? -1 : 1;
+      return at.localeCompare(bt) || String(a.id).localeCompare(String(b.id));
+    };
     const out = [];
     const visited = new Set();
     const walk = (record, depth) => {
@@ -9306,8 +9311,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       `- Surfaces merged: ${(archive.surfaces.length ? archive.surfaces : ['none']).join(', ')}`,
       `- Conversation IDs known: ${gapReport.knownConversationIds || archive.replyCount}`,
       `- Known but uncaptured (network-only) replies: ${gaps}`,
-      archive.storageError ? `- **Storage error:** ${archive.storageError}` : '',
-      archive.updatedAt ? `- Archive last written: ${archive.updatedAt}` : '',
+      // `null` marks an omitted line; '' is a real blank line Markdown needs.
+      archive.storageError ? `- **Storage error:** ${archive.storageError}` : null,
+      archive.updatedAt ? `- Archive last written: ${archive.updatedAt}` : null,
       '',
       'This capture is **best effort**. X does not publish a complete reply list, and' +
         ' deleted, private, blocked, and never-delivered replies are undetectable. The' +
@@ -9326,7 +9332,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             '',
           ]
         : []),
-    ].filter((line) => line !== '');
+    ].filter((line) => line !== null);
   }
 
   function renderReplyArchiveMarkdown(archive) {
@@ -9399,7 +9405,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       String(record.text || ''),
       record.truncated ? 'true' : 'false',
       (record.mediaLinks || []).length,
-      (record.mediaLinks || []).map((media) => `${media.type}:${media.url}`).join(' | '),
+      (record.mediaLinks || [])
+        .map(
+          (media) => `${media.type}:${media.url}${media.poster ? ` (poster: ${media.poster})` : ''}`
+        )
+        .join(' | '),
       (record.discoveredSurfaces || []).join('+'),
       record.provenance || '',
       record.unavailable ? record.unavailableReason || 'true' : 'false',
