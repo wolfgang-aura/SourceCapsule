@@ -4160,6 +4160,36 @@ check('reply text is stored decoded, not HTML-encoded', () => {
   assert.equal(record.text, 'Space company -> Drones & microgravity <pharma>');
 });
 
+check('known-but-uncaptured replies are seeded so recovery can reach them', () => {
+  // The live archive's receipt listed 7 "known but uncaptured" ids that syndication
+  // recovery never attempted: it walks the archive, and these were never in it.
+  const rootStatusId = '2000000000000000000';
+  const gapReport = {
+    knownGaps: [
+      { id: '2000000000000000701', captureStatus: 'network-only' },
+      { id: '2000000000000000702', captureStatus: 'network-only' },
+      { id: '2000000000000000703', captureStatus: 'network-only' },
+      // Already archived with content, plus the root itself: neither is a gap.
+      { id: '2000000000000000101', captureStatus: 'network-only' },
+      { id: rootStatusId, captureStatus: 'network-only' },
+    ],
+  };
+  const seeds = engine.replyArchiveGapSeeds(
+    gapReport,
+    rootStatusId,
+    [{ id: '2000000000000000101', text: 'Already captured.' }],
+    'top'
+  );
+  assert.deepEqual(
+    seeds.map((seed) => seed.id),
+    ['2000000000000000701', '2000000000000000702', '2000000000000000703']
+  );
+  assert.equal(seeds[0].text, '');
+  assert.equal(seeds[0].conversationId, rootStatusId);
+  // Seeds must be exactly what enrichReplyArchiveViaSyndication selects for recovery.
+  assert.equal(engine.replyArchiveGapSeeds({}, rootStatusId, [], 'top').length, 0);
+});
+
 check('the archive title carries exactly one @', () => {
   // handleFromSourceUrl returns "@name"; the DOM/record path stores a bare "name".
   ['@aleabitoreddit', 'aleabitoreddit'].forEach((handle) => {
