@@ -6,6 +6,61 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-18
+
+### Added
+
+- **Reply archive (experimental).** Capture the *replies* to a post — full text, author,
+  timestamp, parent id, and media links — and export them as threaded Markdown plus a
+  full-text CSV. Found under **Capture replies (experimental)** on any opened post, then
+  **Download reply archive**. One click runs all three of X's reply surfaces (Latest, Top,
+  Relevant) and merges them; each surface saves before moving on, so an interrupted pass
+  keeps everything captured so far.
+
+  Replies accumulate across runs and never shrink: a populated field is never overwritten
+  by an empty one and the longer text always wins, so a truncated timeline preview cannot
+  clobber full long-form text, and a reply that vanishes from a later surface keeps what
+  was already captured. Storage is IndexedDB, because a large archive overruns
+  localStorage's quota — and if a write fails, it says so instead of silently losing the run.
+
+  **On completeness.** Measured across two ~600-reply conversations, the archive captured
+  100% of the replies X actually delivered to the browser (zero known-but-uncaptured), which
+  came to 80–83% of X's public reply counter. The remainder are replies X never served at
+  all — deleted, blocked, restricted, or simply never returned by any surface — and they are
+  undetectable by construction. Every export therefore reports what it captured, lists any
+  reply id it knows about but could not fetch, and refuses to treat X's reply counter as a
+  denominator. Coverage is best effort and the receipt says so.
+
+  Reply media is recorded as **links only**, deliberately: downloading media for thousands
+  of replies is out of scope for this feature.
+
+### Changed
+
+- **The post menu is shorter.** It had grown to ten items, which buried the common actions;
+  it is now six. "Save locally + create AI link" was two actions that are both still listed
+  separately, and "Download ZIP (HTML + Markdown)" is the non-Chromium fallback that "Save
+  to library" already falls back to on its own. Both remain fully supported by the engine
+  and by the extension popup — they are simply no longer separate menu entries. The three
+  per-surface reply-capture items became one that runs all three.
+
+### Fixed
+
+- An image recorded by two different capture layers is now one media link. X serves the same
+  image with and without a file extension before the query string, so images seen by both the
+  DOM and GraphQL layers were being stored, counted, and listed twice — one real archive
+  showed 311 image links covering only 162 distinct images. When two URLs name the same
+  asset, the full-size rendition wins.
+- The capture receipt no longer lists a reply as "uncaptured" when its body is in the same
+  file, no longer double-prints the `@` in the archive title, and no longer renders X's HTML
+  encoding (`-&gt;`) in reply bodies.
+- The root post is no longer archived as a reply to itself.
+- A reply archive now creates its store correctly on installs that had already picked a
+  library folder. Previously the shared database already existed at an older version, so the
+  archive's table was never created and every write failed.
+- Reply capture no longer reports "no results" on a healthy conversation just because X had
+  not rendered its first reply yet, and no longer stalls a working run in a background tab —
+  it pauses only when the tab is hidden *and* nothing has rendered, which is the real failure.
+
 ### Documentation
 
 - SECURITY.md now lists every `@connect` host the shipped userscript declares (the

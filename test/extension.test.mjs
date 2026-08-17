@@ -227,7 +227,6 @@ const expectedFiles = [
 ];
 assert.deepEqual(fs.readdirSync(out).sort(), expectedFiles);
 assert.equal(manifest.version, pkg.version);
-assert.equal(pkg.version, '1.4.1');
 assert.ok(
   manifest.content_scripts.some(
     (entry) => entry.world === 'MAIN' && entry.js.includes('page-bridge.js')
@@ -240,8 +239,19 @@ const packagedText = expectedFiles
 assert.doesNotMatch(JSON.stringify(manifest.host_permissions), /localhost|127\.0\.0\.1/);
 assert.doesNotMatch(packagedText, /share\.sourcecapsule\.app/);
 assert.match(packagedText, /sourcecapsule-share\.wolfgang-aura\.workers\.dev/);
+// Version parity, enforced against the userscript header rather than a literal.
+// The header is the master version (see SOURCE_OF_TRUTH.md), and there are FIVE places
+// that must agree - the header, the in-script VERSION constant, package.json,
+// manifest.json, and the newest CHANGELOG heading. A hard-coded expectation here meant
+// every release had to hand-edit this test, and a missed copy elsewhere still shipped:
+// userscript managers compare @version, so a bump that misses the header reaches nobody.
 const userscript = fs.readFileSync(path.join(root, 'sourcecapsule.user.js'), 'utf8');
-assert.match(userscript, /@version\s+1\.4\.1/);
-assert.match(userscript, /const VERSION = '1\.4\.1'/);
+const headerVersion = (userscript.match(/@version\s+(\d+\.\d+\.\d+)/) || [])[1];
+assert.ok(headerVersion, 'userscript header declares a semver @version');
+assert.equal(pkg.version, headerVersion, 'package.json matches the userscript header');
+assert.match(userscript, new RegExp(`const VERSION = '${headerVersion.replace(/\./g, '\\.')}'`));
+const changelog = fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8');
+const newestRelease = (changelog.match(/^## \[(\d+\.\d+\.\d+)\]/m) || [])[1];
+assert.equal(newestRelease, headerVersion, 'newest CHANGELOG entry matches the shipped version');
 
 console.log('\nAll MV3 extension checks passed.');
