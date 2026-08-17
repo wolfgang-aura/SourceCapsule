@@ -4355,6 +4355,104 @@ check('the archive title carries exactly one @', () => {
   });
 });
 
+check('the same image recorded in both of X pbs URL forms is one media link', () => {
+  // Found in a live 635-reply archive: 311 pbs image URLs covering only 162 distinct
+  // images. X serves an image with and without a file extension before the query
+  // ("/media/<id>?format=jpg" and "/media/<id>.jpg?format=jpg"), the DOM and GraphQL
+  // layers each prefer a different form, and the dedupe key was the raw URL - so every
+  // image seen by both layers was recorded, counted, and rendered twice.
+  const bare = 'https://pbs.twimg.com/media/HP2MntkWkAA3Owv?format=jpg&name=orig';
+  const dotted = 'https://pbs.twimg.com/media/HP2MntkWkAA3Owv.jpg?format=jpg&name=orig';
+  const merged = engine.mergeReplyMediaLinks(
+    [{ type: 'image', url: bare }],
+    [{ type: 'image', url: dotted }]
+  );
+  assert.equal(merged.length, 1, `expected one image, got ${merged.length}`);
+
+  // Distinct images must still survive, and a different media type at the same id is
+  // its own link - collapsing everything would be the opposite bug.
+  assert.equal(
+    engine.mergeReplyMediaLinks(
+      [{ type: 'image', url: bare }],
+      [{ type: 'image', url: 'https://pbs.twimg.com/media/DIFFERENTid00?format=jpg&name=orig' }]
+    ).length,
+    2
+  );
+});
+
+check('a larger rendition replaces the thumbnail it duplicates', () => {
+  // Same image, two sizes: the archive should keep the full-size link, whichever
+  // order the layers happened to record them in.
+  const small = 'https://pbs.twimg.com/media/HP2MntkWkAA3Owv?format=jpg&name=small';
+  const orig = 'https://pbs.twimg.com/media/HP2MntkWkAA3Owv.jpg?format=jpg&name=orig';
+  [
+    [small, orig],
+    [orig, small],
+  ].forEach(([first, second]) => {
+    const merged = engine.mergeReplyMediaLinks(
+      [{ type: 'image', url: first }],
+      [{ type: 'image', url: second }]
+    );
+    assert.equal(merged.length, 1);
+    assert.ok(
+      merged[0].url.includes('name=orig'),
+      `expected the orig rendition to win, got ${merged[0].url}`
+    );
+  });
+});
+
+check('the media count in the receipt matches the media the file actually lists', () => {
+  // The live archive's receipt claimed 372 media links while its own body listed 366.
+  // A receipt that disagrees with the file it heads is the archive lying about itself,
+  // so pin the two together.
+  const archive = engine.buildReplyArchive({
+    rootStatusId: '2000000000000000000',
+    records: [
+      {
+        id: '2000000000000000103',
+        handle: 'c',
+        text: 'A poster still, whose type carries a hyphen.',
+        mediaLinks: [
+          { type: 'video-poster', url: 'https://pbs.twimg.com/amplify_video_thumb/9/img/z.jpg' },
+        ],
+      },
+      {
+        id: '2000000000000000101',
+        handle: 'a',
+        text: 'One image, recorded by both layers.',
+        mediaLinks: [
+          { type: 'image', url: 'https://pbs.twimg.com/media/HP2MntkWkAA3Owv?format=jpg' },
+          { type: 'image', url: 'https://pbs.twimg.com/media/HP2MntkWkAA3Owv.jpg?format=jpg' },
+        ],
+      },
+      {
+        id: '2000000000000000102',
+        handle: 'b',
+        text: 'A video.',
+        mediaLinks: [
+          {
+            type: 'video',
+            url: 'https://video.twimg.com/amplify_video/1/vid/avc1/854x480/x.mp4?tag=29',
+            poster: 'https://pbs.twimg.com/amplify_video_thumb/1/img/y.jpg',
+          },
+        ],
+      },
+    ],
+  });
+  const rendered = engine
+    .renderReplyArchiveMarkdown(archive)
+    .split('\n')
+    // Media types are not all plain words - "video-poster" carries a hyphen, which is
+    // exactly the blind spot that made a hand-audit of the live file miscount it.
+    .filter((line) => /^\s*- [^:]+: https?:/.test(line)).length;
+  assert.equal(
+    rendered,
+    archive.mediaLinkCount,
+    `receipt says ${archive.mediaLinkCount} media links, body lists ${rendered}`
+  );
+  assert.equal(archive.mediaLinkCount, 3);
+});
+
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);
   process.exit(1);

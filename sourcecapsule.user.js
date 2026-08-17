@@ -9039,8 +9039,38 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   const REPLY_ARCHIVE_DB = 'sourcecapsule';
   const REPLY_ARCHIVE_TABLE = 'reply-archive';
 
+  /**
+   * The identity of the underlying asset, not of the URL string that happens to name it.
+   *
+   * X serves one image under several interchangeable URLs: with and without a file
+   * extension before the query (`/media/<id>?format=jpg` vs `/media/<id>.jpg?format=jpg`)
+   * and at different `name=` renditions. The DOM and GraphQL layers each prefer a
+   * different form, so keying on the raw string recorded every image both layers saw
+   * twice - measured live at 311 image links covering 162 distinct images.
+   *
+   * Only the known twimg shapes are canonicalised; any other URL keeps its full string,
+   * because dropping a query from an arbitrary host could merge genuinely distinct media.
+   */
+  function replyArchiveMediaIdentity(url) {
+    const raw = String(url || '');
+    const image = raw.match(/^https?:\/\/pbs\.twimg\.com\/([^?#]+?)(?:\.[A-Za-z0-9]+)?(?:[?#]|$)/);
+    if (image) return `pbs:${image[1]}`;
+    const video = raw.match(/^https?:\/\/video\.twimg\.com\/([^?#]+)/);
+    if (video) return `video:${video[1]}`;
+    return raw;
+  }
+
   function replyArchiveMediaKey(media) {
-    return `${media.type || ''}|${media.url || ''}`;
+    return `${media.type || ''}|${replyArchiveMediaIdentity(media.url)}`;
+  }
+
+  /** Prefer the full-size rendition when two URLs name the same asset. */
+  function richerMediaUrl(existing, incoming) {
+    if (!existing) return incoming;
+    if (!incoming) return existing;
+    const orig = (url) => /[?&]name=orig(?:&|$)/.test(String(url));
+    if (orig(incoming) && !orig(existing)) return incoming;
+    return existing;
   }
 
   function mergeReplyMediaLinks(prior = [], incoming = []) {
@@ -9053,6 +9083,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         byKey.set(key, {
           ...existing,
           ...media,
+          url: richerMediaUrl(existing.url, media.url),
           poster: media.poster || existing.poster || '',
           permalink: media.permalink || existing.permalink || '',
         });
