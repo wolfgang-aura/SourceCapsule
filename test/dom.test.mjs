@@ -4066,6 +4066,81 @@ await checkAsync('a slow-rendering conversation is not reported as no-results', 
   }
 });
 
+// Found running the Relevant surface against live X on 2026-08-17: the probe stopped
+// after 13s with `no-results` on a ~1,000-reply conversation because the grace window
+// only waited when the page had rendered NO tweet at all. On a focused post the root
+// post always renders, so `maxVisibleTweets` is 1 from the first tick and the grace
+// window could never apply to the one surface that needs it most.
+await checkAsync('the root post alone does not count as replies having rendered', async () => {
+  const rootStatusId = '2000000000000000000';
+  const dom = new JSDOM(
+    `<!doctype html><html><body><div data-testid="primaryColumn">
+      <article data-testid="tweet">
+        <div data-testid="User-Name"><a href="/author"><span>Author</span></a><a href="/author"><span>@author</span></a></div>
+        <div data-testid="tweetText">The original post everyone is replying to.</div>
+        <a href="/author/status/${rootStatusId}"><time datetime="2026-08-09T04:11:00.000Z">Aug 9</time></a>
+      </article>
+    </div></body></html>`,
+    { url: `https://x.com/author/status/${rootStatusId}` }
+  );
+  const priorWindow = global.window;
+  const priorHistory = global.history;
+  global.window = dom.window;
+  global.document = dom.window.document;
+  global.Node = dom.window.Node;
+  global.location = dom.window.location;
+  global.localStorage = dom.window.localStorage;
+  global.history = dom.window.history;
+  dom.window.document.documentElement.scrollTo = () => {};
+  try {
+    // X renders the replies only after the idle window would have fired.
+    setTimeout(() => {
+      dom.window.document.querySelector('[data-testid="primaryColumn"]').insertAdjacentHTML(
+        'beforeend',
+        `<article data-testid="tweet">
+          <div data-testid="User-Name"><a href="/late"><span>Late</span></a><a href="/late"><span>@late</span></a></div>
+          <div data-testid="tweetText">A reply that rendered late.</div>
+          <a href="/late/status/2000000000000000601"><time datetime="2026-08-09T05:00:00.000Z">Aug 9</time></a>
+        </article>`
+      );
+    }, 900);
+    // The live failure is the grace-window DECISION, taken while only the root post
+    // has rendered. jsdom never settles scrollHeight, so the probe loop cannot reach
+    // that branch here - assert the decision directly, then that the probe still
+    // reports how many REPLIES it ever saw, which is what the decision reads.
+    assert.equal(
+      engine.replyProbeStillWarmingUp(0, 13000, 45000),
+      true,
+      'only the root post rendered: the probe must keep waiting, not stop at no-results'
+    );
+    assert.equal(
+      engine.replyProbeStillWarmingUp(1, 13000, 45000),
+      false,
+      'once a reply has rendered, an idle page really is exhausted'
+    );
+    assert.equal(
+      engine.replyProbeStillWarmingUp(0, 46000, 45000),
+      false,
+      'the grace window is bounded'
+    );
+
+    const result = await engine.runReplyProbe(
+      { rootStatusId, surface: 'relevant', expectedDisplayedReplies: 1 },
+      { maxMs: 2000, idleMs: 12000, tickMs: 40, emptyGraceMs: 1000, recoverGaps: false }
+    );
+    assert.equal(result.uniquePostsCaptured, 1, 'the late reply is captured, the root is not');
+    assert.equal(result.maxVisibleTweets, 2, 'root + reply were both on screen');
+    assert.equal(result.maxVisibleReplies, 1, 'but only one of them is a reply');
+  } finally {
+    global.window = priorWindow;
+    global.document = priorWindow.document;
+    global.Node = priorWindow.Node;
+    global.location = priorWindow.location;
+    global.localStorage = priorWindow.localStorage;
+    global.history = priorHistory;
+  }
+});
+
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);
   process.exit(1);
