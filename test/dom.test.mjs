@@ -4160,35 +4160,63 @@ check('reply text is stored decoded, not HTML-encoded', () => {
   assert.equal(record.text, 'Space company -> Drones & microgravity <pharma>');
 });
 
-check('known-but-uncaptured replies are seeded so recovery can reach them', () => {
-  // The live archive's receipt listed 7 "known but uncaptured" ids that syndication
-  // recovery never attempted: it walks the archive, and these were never in it.
-  const rootStatusId = '2000000000000000000';
-  const gapReport = {
-    knownGaps: [
-      { id: '2000000000000000701', captureStatus: 'network-only' },
-      { id: '2000000000000000702', captureStatus: 'network-only' },
-      { id: '2000000000000000703', captureStatus: 'network-only' },
-      // Already archived with content, plus the root itself: neither is a gap.
-      { id: '2000000000000000101', captureStatus: 'network-only' },
-      { id: rootStatusId, captureStatus: 'network-only' },
-    ],
-  };
-  const seeds = engine.replyArchiveGapSeeds(
-    gapReport,
-    rootStatusId,
-    [{ id: '2000000000000000101', text: 'Already captured.' }],
-    'top'
-  );
-  assert.deepEqual(
-    seeds.map((seed) => seed.id),
-    ['2000000000000000701', '2000000000000000702', '2000000000000000703']
-  );
-  assert.equal(seeds[0].text, '');
-  assert.equal(seeds[0].conversationId, rootStatusId);
-  // Seeds must be exactly what enrichReplyArchiveViaSyndication selects for recovery.
-  assert.equal(engine.replyArchiveGapSeeds({}, rootStatusId, [], 'top').length, 0);
-});
+await checkAsync(
+  'every known reply id without a body is recovered, not just the gaps',
+  async () => {
+    // Measured live 2026-08-17: the audit held 1,094 ids (1,087 of them DOM-observed,
+    // with handle and permalink) while the archive held 79 bodies, because those ids
+    // were seen in runs whose archive write never happened. Seeding only the 7
+    // "network-only" gaps left ~1,000 recoverable replies untouched.
+    const rootStatusId = '2000000000000000000';
+    const gapReport = {
+      inventory: [
+        // Seen in the DOM by an earlier run: id and handle known, body never stored.
+        {
+          id: '2000000000000000801',
+          handle: 'seen_earlier',
+          url: 'https://x.com/seen_earlier/status/2000000000000000801',
+          captureStatus: 'captured',
+        },
+        { id: '2000000000000000802', handle: 'also_seen', captureStatus: 'captured' },
+        { id: '2000000000000000803', captureStatus: 'network-only' },
+        // Already has a body, and the root itself: neither needs recovery.
+        { id: '2000000000000000101', captureStatus: 'captured' },
+        { id: rootStatusId, captureStatus: 'captured' },
+      ],
+      knownGaps: [{ id: '2000000000000000803', captureStatus: 'network-only' }],
+    };
+    const existing = [{ id: '2000000000000000101', text: 'Already captured.' }];
+    const seeds = engine.replyArchiveGapSeeds(gapReport, rootStatusId, existing, 'top');
+    assert.deepEqual(
+      seeds.map((seed) => seed.id),
+      ['2000000000000000801', '2000000000000000802', '2000000000000000803'],
+      'DOM-observed ids without a body must be seeded too, not only network-only gaps'
+    );
+    assert.equal(seeds[0].handle, 'seen_earlier', 'what the audit knows is carried over');
+    assert.equal(seeds[0].url, 'https://x.com/seen_earlier/status/2000000000000000801');
+    assert.equal(seeds[1].url, 'https://x.com/i/web/status/2000000000000000802');
+    assert.equal(engine.replyArchiveGapSeeds({}, rootStatusId, [], 'top').length, 0);
+
+    // ...and recovery then fetches exactly those seeds, reporting progress as it goes.
+    const progress = [];
+    const recovery = await engine.enrichReplyArchiveViaSyndication(
+      [...existing, ...seeds],
+      async (id) => ({
+        text: `Body for ${id}`,
+        user: { screen_name: 'recovered', name: 'Recovered' },
+        created_at: 'Sun Aug 09 04:11:50 +0000 2026',
+      }),
+      { concurrency: 2, onProgress: (update) => progress.push(update) }
+    );
+    assert.equal(recovery.attempted, 3);
+    assert.equal(recovery.recovered, 3);
+    assert.equal(recovery.skippedOverLimit, 0);
+    assert.equal(progress.length, 3, 'each completion reports, so a long round never looks hung');
+    assert.equal(progress[progress.length - 1].attempted, 3);
+    assert.equal(recovery.records.length, 4);
+    assert.ok(recovery.records.every((record) => String(record.text || '').trim()));
+  }
+);
 
 check('the archive title carries exactly one @', () => {
   // handleFromSourceUrl returns "@name"; the DOM/record path stores a bare "name".
