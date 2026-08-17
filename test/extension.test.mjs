@@ -135,6 +135,28 @@ const quoteCapture = await quoteCaptureResult;
 assert.equal(quoteCapture.body, quoteOnlyBody);
 assert.match(quoteCapture.body, /quoted_status_id_str/);
 assert.equal(engine.networkCapturePatterns().body.test(quoteOnlyBody), true);
+// A page of PLAIN TEXT replies carries no media, note, or quote markers. Before
+// `conversation_id_str` joined the filter these bodies were dropped before the reply
+// archive ever saw them, which is invisible from the outside — hence this regression.
+const plainReplyBody = JSON.stringify({
+  rest_id: '300',
+  core: { user_results: { result: { legacy: { screen_name: 'plain_replier' } } } },
+  legacy: { conversation_id_str: '100', full_text: 'Just words, no media at all.' },
+});
+assert.equal(engine.networkCapturePatterns().body.test(plainReplyBody), true);
+assert.equal(
+  /video_info|variants|video\.twimg\.com|amplify_video|ext_tw_video|tweet_video|note_tweet|quoted_status/i.test(
+    plainReplyBody
+  ),
+  false,
+  'fixture must not accidentally match the pre-existing filter terms'
+);
+const bridgeSource = fs.readFileSync(path.join(root, 'extension-src', 'page-bridge.js'), 'utf8');
+assert.match(
+  bridgeSource,
+  /conversation_id_str/,
+  'extension bridge body filter must stay aligned with networkCapturePatterns()'
+);
 assert.equal(
   engine.networkCapturePatterns().url.test('https://x.com/i/api/graphql/test/SearchTimeline'),
   true

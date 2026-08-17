@@ -8405,10 +8405,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   ];
   const THREAD_EXPORT_TYPES = [
     { key: 'library-thread', label: 'Save full thread' },
-    { key: 'reply-probe', label: 'Reply audit (experimental) · Latest' },
-    { key: 'reply-probe-top', label: 'Reply audit (experimental) · Top' },
-    { key: 'reply-probe-relevant', label: 'Reply audit (experimental) · Relevant' },
-    { key: 'reply-audit-download', label: 'Download reply audit CSV' },
+    { key: 'reply-probe', label: 'Capture replies (experimental) · Latest' },
+    { key: 'reply-probe-top', label: 'Capture replies (experimental) · Top' },
+    { key: 'reply-probe-relevant', label: 'Capture replies (experimental) · Relevant' },
+    { key: 'reply-archive-download', label: 'Download reply archive (Markdown + CSV)' },
     { divider: true },
     ...POST_EXPORT_TYPES,
   ];
@@ -8947,26 +8947,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     };
   }
 
-  function downloadStoredReplyAudit(tweetEl) {
-    const rootStatusId = tweetStatusId(tweetEl) || currentStatusId();
-    if (!rootStatusId) {
-      showToast('Open the original X post before downloading its reply audit.', {
-        error: true,
-      });
-      return false;
-    }
-    const result = buildStoredReplyAudit(rootStatusId, displayedReplyCount(tweetEl));
-    if (!result.gapReport.knownConversationIds) {
-      showToast('No reply audit data is stored for this post yet.', { error: true });
-      return false;
-    }
-    downloadReplyGapReport(result);
-    showToast(
-      `Reply audit CSV ready: ${result.gapReport.domObservedUnion} DOM-observed; ${result.gapReport.knownConversationIds} conversation IDs known; ${result.gapReport.knownGaps.length} network-only gaps.`,
-      { sticky: true }
-    );
-    return true;
-  }
+  // NOTE: the standalone "download reply audit CSV" action was removed when the archive
+  // shipped - the audit is now the receipt section inside the archive's Markdown, and
+  // the gap rows are listed there by id. `buildStoredReplyAudit` stays as the shared
+  // report builder (and remains covered by tests).
 
   // -------------------------------------------------------------------------
   // Reply ARCHIVE.
@@ -9139,8 +9123,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return {
       name: 'indexeddb',
       get: (key) => run('readonly', (store) => store.get(key)),
-      set: (key, value) =>
-        run('readwrite', (store) => store.put(value, key)).then(() => undefined),
+      set: (key, value) => run('readwrite', (store) => store.put(value, key)).then(() => undefined),
     };
   }
 
@@ -9300,10 +9283,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     };
     roots.sort(byTime).forEach((record) => walk(record, 0));
     // Anything trapped in a cycle still belongs in the archive.
-    records.filter((record) => !visited.has(String(record.id))).forEach((record) => {
-      visited.add(String(record.id));
-      out.push({ record, depth: 0 });
-    });
+    records
+      .filter((record) => !visited.has(String(record.id)))
+      .forEach((record) => {
+        visited.add(String(record.id));
+        out.push({ record, depth: 0 });
+      });
     return out;
   }
 
@@ -9324,8 +9309,21 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       '',
       'This capture is **best effort**. X does not publish a complete reply list, and' +
         ' deleted, private, blocked, and never-delivered replies are undetectable. The' +
-        " X reply counter is a reference only, not a completeness denominator.",
+        ' X reply counter is a reference only, not a completeness denominator.',
       '',
+      // Name the gaps rather than only counting them: these are replies X confirmed
+      // exist but never handed over, and the reader is entitled to know which.
+      ...(gaps
+        ? [
+            `### Known but uncaptured replies (${gaps})`,
+            '',
+            ...(gapReport.knownGaps || []).map(
+              (gap) =>
+                `- ${gap.id}${gap.handle ? ` · @${gap.handle}` : ''} · ${gap.reason || 'not-seen'} · <${gap.url || ''}>`
+            ),
+            '',
+          ]
+        : []),
     ].filter((line) => line !== '');
   }
 
@@ -9405,6 +9403,76 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       record.unavailable ? record.unavailableReason || 'true' : 'false',
     ]);
     return `\ufeff${[columns, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n')}\r\n`;
+  }
+
+  /**
+   * Load the stored archive for a root post and hand back both deliverables. Kept
+   * separate from the download so tests (and the menu) can inspect it without a Blob.
+   */
+  async function loadReplyArchiveForPost(rootStatusId, publicReplyCountReference = 0) {
+    const stored = await getReplyArchiveStore().load(rootStatusId);
+    // The network layer may hold replies from THIS page load that no probe has run over
+    // yet; fold them in so the download is never staler than what the browser has seen.
+    const liveNetworkRecords = getCapturedSearchTimelineReplies(rootStatusId).map((record) => ({
+      ...record,
+      provenance: 'network-confirmed',
+    }));
+    const records = mergeReplyArchiveRecords(stored.records, liveNetworkRecords);
+    const gapReport = buildReplyGapReport({
+      rootStatusId,
+      expectedDisplayedReplies: publicReplyCountReference,
+      domRecords: new Map(),
+      networkRecords: liveNetworkRecords,
+      history: readReplyProbeHistory(),
+      surface: 'relevant',
+    });
+    return buildReplyArchive({
+      rootStatusId,
+      rootPost: { handle: handleFromSourceUrl(location.href) || '', url: location.href },
+      records,
+      gapReport,
+      updatedAt: stored.updatedAt,
+      backend: stored.backend,
+      storageError: stored.storageError,
+    });
+  }
+
+  async function downloadReplyArchive(tweetEl) {
+    const rootStatusId = tweetStatusId(tweetEl) || currentStatusId();
+    if (!rootStatusId) {
+      showToast('Open the original X post before downloading its reply archive.', { error: true });
+      return false;
+    }
+    let archive;
+    try {
+      archive = await loadReplyArchiveForPost(rootStatusId, displayedReplyCount(tweetEl));
+    } catch (error) {
+      showToast(`Reply archive could not be read: ${error.message}`, { error: true, sticky: true });
+      return false;
+    }
+    if (!archive.replyCount) {
+      showToast(
+        'No replies are archived for this post yet. Run “Capture replies (experimental)” first.',
+        { error: true, sticky: true }
+      );
+      return false;
+    }
+    const base = `sourcecapsule-replies-${archive.rootStatusId}`;
+    downloadBlob(
+      `${base}.md`,
+      new Blob([renderReplyArchiveMarkdown(archive)], { type: 'text/markdown;charset=utf-8' })
+    );
+    downloadBlob(
+      `${base}.csv`,
+      new Blob([replyArchiveCsv(archive)], { type: 'text/csv;charset=utf-8' })
+    );
+    showToast(
+      `Reply archive: ${archive.withTextCount} of ${archive.replyCount} replies have text; ` +
+        `${archive.mediaLinkCount} media links; ${archive.truncatedCount} still truncated by X. ` +
+        `Markdown + CSV downloaded.${archive.storageError ? ` Storage warning: ${archive.storageError}` : ''}`,
+      { sticky: true, error: Boolean(archive.storageError) }
+    );
+    return true;
   }
 
   function replyProbeMaxMs(surface) {
@@ -9587,6 +9655,36 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       unionCompletePosts: gapReport.completeDomRecords,
     };
     writeReplyProbeResult(result);
+
+    // The archive is the deliverable: persist the reply CONTENT from both layers,
+    // merged into whatever previous surfaces already stored. This is deliberately
+    // separate from writeReplyProbeResult (an audit trail that keeps IDs only).
+    const archiveInput = [
+      ...Array.from(records.values()).map((record) => ({
+        ...record,
+        conversationId: String(pending.rootStatusId),
+        provenance: record.provenance || 'dom-observed',
+        discoveredSurfaces: [surface],
+      })),
+      ...networkRecords.map((record) => ({
+        ...record,
+        provenance: 'network-confirmed',
+        discoveredSurfaces: [surface],
+      })),
+    ];
+    const saved = await getReplyArchiveStore().save(pending.rootStatusId, archiveInput);
+    result.archivedReplies = saved.replyCount;
+    result.archiveBackend = saved.backend;
+    result.archiveBytes = saved.approxBytes;
+    result.archiveStorageError = saved.ok ? '' : saved.storageError;
+    if (!saved.ok) {
+      // Storage is the one step here that can fail invisibly and lose everything the
+      // run just collected, so it gets its own loud, sticky message.
+      showToast(`Reply archive could NOT be saved (${saved.backend}): ${saved.storageError}`, {
+        error: true,
+        sticky: true,
+      });
+    }
     let reportDownloaded = false;
     if (options.downloadGapReport === true) {
       try {
@@ -9606,9 +9704,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const gapSummary = ` Union inventory: ${gapReport.domObservedUnion} DOM-observed; ${gapReport.knownConversationIds} conversation IDs known. Network-only gaps: ${gapReport.knownGaps.length}. Best effort: deleted, private, and never-delivered replies remain unknowable.`;
     const downloadSummary = reportDownloaded
       ? ' CSV downloaded.'
-      : ' Use “Download reply audit CSV” on the original post when finished.';
+      : ' Use “Download reply archive” on the original post when finished.';
+    const archiveSummary = result.archiveStorageError
+      ? ` ARCHIVE NOT SAVED: ${result.archiveStorageError}.`
+      : ` Archive now holds ${result.archivedReplies} replies with content (${result.archiveBackend}).`;
     showToast(
-      `Reply probe finished: ${records.size} DOM-observed on ${surface}. Stop: ${stopReason}.${publicCount}${gapSummary}${downloadSummary} Result saved locally.`,
+      `Reply probe finished: ${records.size} DOM-observed on ${surface}. Stop: ${stopReason}.${publicCount}${gapSummary}${archiveSummary}${downloadSummary} Result saved locally.`,
       {
         error: !['pagination-idle', 'conversation-boundary'].includes(stopReason),
         sticky: true,
@@ -10532,7 +10633,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           if (exportType === 'reply-probe') return startReplyProbe(tweetEl, 'latest');
           if (exportType === 'reply-probe-top') return startReplyProbe(tweetEl, 'top');
           if (exportType === 'reply-probe-relevant') return startReplyProbe(tweetEl, 'relevant');
-          if (exportType === 'reply-audit-download') return downloadStoredReplyAudit(tweetEl);
+          if (exportType === 'reply-archive-download') return downloadReplyArchive(tweetEl);
           const request = postExportRequest(exportType);
           return runExport(request.exportType, {
             targetTweetEl: tweetEl,
@@ -10610,8 +10711,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       // Keep this aligned with both MAIN-world bridge implementations. Quote
       // refs are useful even when the post contains no video or long-form text;
       // filtering those ordinary GraphQL responses out here defeats the
-      // capturedQuotedRefs recovery layer entirely.
-      body: /video_info|variants|video\.twimg\.com|amplify_video|ext_tw_video|tweet_video|note_tweet|quoted_status/i,
+      // capturedQuotedRefs recovery layer entirely. `conversation_id_str` is
+      // likewise mandatory: an ordinary page of text-only replies matches none
+      // of the media/note/quote terms, so without it the reply archive would
+      // silently never see the SearchTimeline/TweetDetail bodies it is built on.
+      body: /video_info|variants|video\.twimg\.com|amplify_video|ext_tw_video|tweet_video|note_tweet|quoted_status|conversation_id_str/i,
       url: /\/graphql\/|\/i\/api\/|TweetDetail|TweetResult|Article|UserTweets|HomeTimeline|SearchTimeline/i,
       contentType: /json|javascript|text/i,
     };
@@ -10742,7 +10846,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const MAX_MESSAGES = 200;
       let sent = 0;
       const bodyPattern = new RegExp(
-        'video_info|variants|video\\.twimg\\.com|amplify_video|ext_tw_video|tweet_video|note_tweet|quoted_status',
+        'video_info|variants|video\\.twimg\\.com|amplify_video|ext_tw_video|tweet_video|note_tweet|quoted_status|conversation_id_str',
         'i'
       );
       const urlPattern = new RegExp(
@@ -11021,6 +11125,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       renderReplyArchiveMarkdown,
       replyArchiveCsv,
       replyMediaLinksFromLegacy,
+      loadReplyArchiveForPost,
+      downloadReplyArchive,
+      getReplyArchiveStore,
       readReplyProbeHistory,
       writeReplyProbeResult,
       runReplyProbe,

@@ -10,8 +10,11 @@
   window.__SourceCapsuleExtensionBridgeInstalled = true;
 
   let sent = 0;
+  // Must stay aligned with networkCapturePatterns() in sourcecapsule.user.js.
+  // `conversation_id_str` is required for the reply archive: a page of plain
+  // text replies matches none of the media/note/quote terms.
   const bodyPattern =
-    /video_info|variants|video\.twimg\.com|amplify_video|ext_tw_video|tweet_video|note_tweet|quoted_status/i;
+    /video_info|variants|video\.twimg\.com|amplify_video|ext_tw_video|tweet_video|note_tweet|quoted_status|conversation_id_str/i;
   const urlPattern =
     /\/graphql\/|\/i\/api\/|TweetDetail|TweetResult|Article|UserTweets|HomeTimeline|SearchTimeline/i;
   const shouldRead = (url, contentType) =>

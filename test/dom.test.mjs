@@ -457,8 +457,8 @@ check(
     assert.equal(focusedMode.menuItems[1].key, 'reply-probe');
     assert.equal(focusedMode.menuItems[2].key, 'reply-probe-top');
     assert.equal(focusedMode.menuItems[3].key, 'reply-probe-relevant');
-    assert.equal(focusedMode.menuItems[4].key, 'reply-audit-download');
-    assert.match(focusedMode.menuItems[4].label, /Download reply audit CSV/);
+    assert.equal(focusedMode.menuItems[4].key, 'reply-archive-download');
+    assert.match(focusedMode.menuItems[4].label, /Download reply archive/);
     assert.ok(focusedMode.menuItems.slice(1, 4).every((item) => /experimental/i.test(item.label)));
     const continuationMode = engine.postControlCaptureMode(continuation, column);
     assert.equal(continuationMode.isThread, false);
@@ -3490,12 +3490,16 @@ check('captured GraphQL replies carry full text, parent id, and media links', ()
                         rest_id: '2000000000000000101',
                         core: {
                           user_results: {
-                            result: { legacy: { screen_name: 'deepreplier', name: 'Deep Replier' } },
+                            result: {
+                              legacy: { screen_name: 'deepreplier', name: 'Deep Replier' },
+                            },
                           },
                         },
                         note_tweet: {
                           note_tweet_results: {
-                            result: { text: 'A very long reply that X only delivers in note form.' },
+                            result: {
+                              text: 'A very long reply that X only delivers in note form.',
+                            },
                           },
                         },
                         legacy: {
@@ -3508,15 +3512,24 @@ check('captured GraphQL replies carry full text, parent id, and media links', ()
                               {
                                 type: 'photo',
                                 media_url_https: 'https://pbs.twimg.com/media/DDD.jpg',
-                                expanded_url: 'https://x.com/deepreplier/status/2000000000000000101/photo/1',
+                                expanded_url:
+                                  'https://x.com/deepreplier/status/2000000000000000101/photo/1',
                               },
                               {
                                 type: 'video',
                                 media_url_https: 'https://pbs.twimg.com/ext_tw_video_thumb/EEE.jpg',
                                 video_info: {
                                   variants: [
-                                    { bitrate: 832000, content_type: 'video/mp4', url: 'https://video.twimg.com/low.mp4' },
-                                    { bitrate: 2176000, content_type: 'video/mp4', url: 'https://video.twimg.com/high.mp4' },
+                                    {
+                                      bitrate: 832000,
+                                      content_type: 'video/mp4',
+                                      url: 'https://video.twimg.com/low.mp4',
+                                    },
+                                    {
+                                      bitrate: 2176000,
+                                      content_type: 'video/mp4',
+                                      url: 'https://video.twimg.com/high.mp4',
+                                    },
                                   ],
                                 },
                               },
@@ -3594,51 +3607,61 @@ check('archive merge never loses reply text across surfaces or repeated runs', (
   assert.match(fuller[0].text, /Now with the rest of it\.$/);
 });
 
-await checkAsync('reply archive store round-trips full content and reports write failures', async () => {
-  const memory = new Map();
-  const store = engine.createReplyArchiveStore({
-    async get(key) {
-      return memory.get(key) || null;
-    },
-    async set(key, value) {
-      memory.set(key, value);
-    },
-    name: 'memory',
-  });
-  const rootStatusId = '2000000000000000000';
-  await store.save(rootStatusId, [
-    {
-      id: '2000000000000000101',
-      handle: 'replier',
-      text: 'Round-tripped reply text.',
-      mediaLinks: [{ type: 'image', url: 'https://pbs.twimg.com/media/AAA?format=jpg&name=orig' }],
-      discoveredSurfaces: ['latest'],
-    },
-  ]);
-  await store.save(rootStatusId, [
-    { id: '2000000000000000102', handle: 'other', text: 'Second run reply.', discoveredSurfaces: ['top'] },
-  ]);
-  const loaded = await store.load(rootStatusId);
-  assert.equal(loaded.records.length, 2, 'a second run must merge, not replace');
-  const first = loaded.records.find((record) => record.id === '2000000000000000101');
-  assert.equal(first.text, 'Round-tripped reply text.');
-  assert.equal(first.mediaLinks.length, 1);
-  assert.equal(loaded.storageError, '');
+await checkAsync(
+  'reply archive store round-trips full content and reports write failures',
+  async () => {
+    const memory = new Map();
+    const store = engine.createReplyArchiveStore({
+      async get(key) {
+        return memory.get(key) || null;
+      },
+      async set(key, value) {
+        memory.set(key, value);
+      },
+      name: 'memory',
+    });
+    const rootStatusId = '2000000000000000000';
+    await store.save(rootStatusId, [
+      {
+        id: '2000000000000000101',
+        handle: 'replier',
+        text: 'Round-tripped reply text.',
+        mediaLinks: [
+          { type: 'image', url: 'https://pbs.twimg.com/media/AAA?format=jpg&name=orig' },
+        ],
+        discoveredSurfaces: ['latest'],
+      },
+    ]);
+    await store.save(rootStatusId, [
+      {
+        id: '2000000000000000102',
+        handle: 'other',
+        text: 'Second run reply.',
+        discoveredSurfaces: ['top'],
+      },
+    ]);
+    const loaded = await store.load(rootStatusId);
+    assert.equal(loaded.records.length, 2, 'a second run must merge, not replace');
+    const first = loaded.records.find((record) => record.id === '2000000000000000101');
+    assert.equal(first.text, 'Round-tripped reply text.');
+    assert.equal(first.mediaLinks.length, 1);
+    assert.equal(loaded.storageError, '');
 
-  // Silent-failure guard: a failing backend must surface, not swallow.
-  const broken = engine.createReplyArchiveStore({
-    async get() {
-      return null;
-    },
-    async set() {
-      throw new Error('QuotaExceededError');
-    },
-    name: 'broken',
-  });
-  const saved = await broken.save(rootStatusId, [{ id: '2000000000000000103', text: 'x' }]);
-  assert.equal(saved.ok, false);
-  assert.match(saved.storageError, /QuotaExceeded/);
-});
+    // Silent-failure guard: a failing backend must surface, not swallow.
+    const broken = engine.createReplyArchiveStore({
+      async get() {
+        return null;
+      },
+      async set() {
+        throw new Error('QuotaExceededError');
+      },
+      name: 'broken',
+    });
+    const saved = await broken.save(rootStatusId, [{ id: '2000000000000000103', text: 'x' }]);
+    assert.equal(saved.ok, false);
+    assert.match(saved.storageError, /QuotaExceeded/);
+  }
+);
 
 check('reply archive exports the actual replies, threaded, with media links', () => {
   const archive = engine.buildReplyArchive({
@@ -3653,7 +3676,9 @@ check('reply archive exports the actual replies, threaded, with media links', ()
         text: 'Top level reply text.',
         createdAt: '2026-08-11T09:30:00.000Z',
         parentId: '2000000000000000000',
-        mediaLinks: [{ type: 'image', url: 'https://pbs.twimg.com/media/AAA?format=jpg&name=orig' }],
+        mediaLinks: [
+          { type: 'image', url: 'https://pbs.twimg.com/media/AAA?format=jpg&name=orig' },
+        ],
         discoveredSurfaces: ['latest'],
         provenance: 'dom-observed',
       },
@@ -3669,7 +3694,12 @@ check('reply archive exports the actual replies, threaded, with media links', ()
         provenance: 'network-confirmed',
       },
     ],
-    gapReport: { knownGaps: [], knownConversationIds: 2, domObservedUnion: 2, surfaces: ['latest', 'top'] },
+    gapReport: {
+      knownGaps: [],
+      knownConversationIds: 2,
+      domObservedUnion: 2,
+      surfaces: ['latest', 'top'],
+    },
   });
   assert.equal(archive.replyCount, 2);
 
@@ -3695,6 +3725,98 @@ check('reply archive exports the actual replies, threaded, with media links', ()
   // Full text, not a 500-char preview column.
   assert.match(csv, /"Nested answer, comma, ""quoted""\."/);
 });
+
+await checkAsync(
+  'two probe runs on different surfaces accumulate reply text instead of replacing it',
+  async () => {
+    const rootStatusId = '2000000000000000000';
+    const pageFor = (articles) =>
+      `<!doctype html><html><body><div data-testid="primaryColumn">${articles}</div></body></html>`;
+    const article = (id, handle, text) => `
+      <article data-testid="tweet">
+        <div data-testid="User-Name"><a href="/${handle}"><span>${handle} name</span></a><a href="/${handle}"><span>@${handle}</span></a></div>
+        <div data-testid="tweetText">${text}</div>
+        <a href="/${handle}/status/${id}"><time datetime="2026-08-11T09:0${id.slice(-1)}:00.000Z">Aug 11</time></a>
+      </article>`;
+
+    // "Latest" shows replies A and B.
+    const latestDom = new JSDOM(
+      pageFor(
+        article('2000000000000000001', 'alpha', 'Reply ALPHA only ever appears on Latest.') +
+          article('2000000000000000002', 'bravo', 'Reply BRAVO appears on both surfaces.')
+      ),
+      { url: `https://x.com/search?q=conversation_id%3A${rootStatusId}&f=live` }
+    );
+    // "Top" shows B (again) and C, and has dropped A entirely — the regression case.
+    const topDom = new JSDOM(
+      pageFor(
+        article('2000000000000000002', 'bravo', 'Reply BRAVO appears on both surfaces.') +
+          article('2000000000000000003', 'charlie', 'Reply CHARLIE only ever appears on Top.')
+      ),
+      { url: `https://x.com/search?q=conversation_id%3A${rootStatusId}` }
+    );
+
+    const priorWindow = global.window;
+    const priorHistory = global.history;
+    // Both runs must share ONE storage origin, or the test would prove nothing.
+    const sharedStorage = latestDom.window.localStorage;
+    sharedStorage.clear();
+
+    const runOn = async (dom, surface) => {
+      global.window = dom.window;
+      global.document = dom.window.document;
+      global.Node = dom.window.Node;
+      global.location = dom.window.location;
+      global.localStorage = sharedStorage;
+      global.history = dom.window.history;
+      // jsdom does not implement scrolling; the probe only needs it to be callable.
+      const scroller = dom.window.document.documentElement;
+      scroller.scrollTo = () => {};
+      Object.defineProperty(scroller, 'scrollHeight', { value: 1000, configurable: true });
+      Object.defineProperty(scroller, 'scrollTop', { value: 0, configurable: true });
+      return engine.runReplyProbe(
+        { rootStatusId, surface, expectedDisplayedReplies: 3, returnUrl: dom.window.location.href },
+        { maxMs: 2500, idleMs: 0, tickMs: 5 }
+      );
+    };
+
+    try {
+      const latestResult = await runOn(latestDom, 'latest');
+      assert.equal(latestResult.archiveStorageError, '', 'archive write must not fail silently');
+      assert.equal(latestResult.archivedReplies, 2);
+
+      const topResult = await runOn(topDom, 'top');
+      assert.equal(topResult.archiveStorageError, '');
+      assert.equal(topResult.archivedReplies, 3, 'Top must ADD to the archive, not replace it');
+
+      const stored = await engine.getReplyArchiveStore().load(rootStatusId);
+      const byId = new Map(stored.records.map((record) => [record.id, record]));
+      assert.equal(byId.size, 3);
+      // The whole point: a reply that vanished from the second surface keeps its text.
+      assert.match(byId.get('2000000000000000001').text, /Reply ALPHA/);
+      assert.match(byId.get('2000000000000000003').text, /Reply CHARLIE/);
+      assert.deepEqual(byId.get('2000000000000000002').discoveredSurfaces, ['latest', 'top']);
+
+      const archive = engine.buildReplyArchive({
+        rootStatusId,
+        records: stored.records,
+        gapReport: null,
+      });
+      const markdown = engine.renderReplyArchiveMarkdown(archive);
+      assert.match(markdown, /Reply ALPHA/);
+      assert.match(markdown, /Reply BRAVO/);
+      assert.match(markdown, /Reply CHARLIE/);
+      assert.match(engine.replyArchiveCsv(archive), /Reply CHARLIE/);
+    } finally {
+      global.window = priorWindow;
+      global.document = priorWindow.document;
+      global.Node = priorWindow.Node;
+      global.location = priorWindow.location;
+      global.localStorage = priorWindow.localStorage;
+      global.history = priorHistory;
+    }
+  }
+);
 
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);
