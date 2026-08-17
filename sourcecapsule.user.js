@@ -6949,6 +6949,56 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return capturedQuotedRefs.get(String(parentStatusId || '')) || null;
   }
 
+  /** Full long-form ("note") text hanging off a GraphQL tweet result, if X sent one. */
+  function replyNoteTextFromResult(result) {
+    const note = result && result.note_tweet;
+    if (!note || typeof note !== 'object') return '';
+    const inner = (note.note_tweet_results && note.note_tweet_results.result) || note;
+    return String((inner && (inner.text || inner.full_text)) || '');
+  }
+
+  /**
+   * Media LINKS for a reply out of a GraphQL `legacy` block. Unlike the DOM path this
+   * can name the actual MP4, so a video reply keeps both a playable source and a poster.
+   * Still links only - the archive never downloads reply media bytes.
+   */
+  function replyMediaLinksFromLegacy(legacy) {
+    const media =
+      (legacy && legacy.extended_entities && legacy.extended_entities.media) ||
+      (legacy && legacy.entities && legacy.entities.media) ||
+      [];
+    if (!Array.isArray(media)) return [];
+    const links = [];
+    const seen = new Set();
+    media.forEach((item) => {
+      if (!item || typeof item !== 'object') return;
+      const poster = safeUrl(item.media_url_https || item.media_url || '');
+      const type = String(item.type || 'photo');
+      if (type === 'photo') {
+        const url = poster && highResImageUrl(poster);
+        if (url && !seen.has(url)) {
+          seen.add(url);
+          links.push({ type: 'image', url, permalink: safeUrl(item.expanded_url || '') || '' });
+        }
+        return;
+      }
+      // Bitrate-sorted variants: the highest-bitrate MP4 is the archival one.
+      const variants = (item.video_info && item.video_info.variants) || [];
+      const best = (Array.isArray(variants) ? variants : [])
+        .filter((variant) => variant && /mp4/i.test(String(variant.content_type || '')))
+        .sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0))[0];
+      const url = safeUrl((best && best.url) || '') || poster;
+      if (!url || seen.has(url)) return;
+      seen.add(url);
+      links.push({
+        type: type === 'animated_gif' ? 'gif' : 'video',
+        url,
+        poster: poster || '',
+      });
+    });
+    return links;
+  }
+
   function searchTimelineReplyRecordsFromCapturedBody(body) {
     const raw = String(body || '').trim();
     if (!raw || (raw[0] !== '{' && raw[0] !== '[') || !/conversation_id_str/.test(raw)) {
@@ -6980,20 +7030,37 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           (value.core.user_results.result.user || value.core.user_results.result);
         const userLegacy = (userResult && userResult.legacy) || {};
         const handle = String(userLegacy.screen_name || '');
-        const text = String((legacy && (legacy.full_text || legacy.text)) || '')
+        const previewText = String((legacy && (legacy.full_text || legacy.text)) || '')
           .replace(/\s+/g, ' ')
           .trim();
+        // A long reply arrives as a truncated `full_text` plus the real body in
+        // `note_tweet`. The note always wins; otherwise the archive would store an
+        // ellipsis where the reply's actual content should be.
+        const noteText = String(replyNoteTextFromResult(value) || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        const text = noteText || previewText;
         const unavailable = /Tombstone|Unavailable/i.test(String(value.__typename || ''));
         const existing = records.get(id);
-        if (!existing || (!existing.handle && handle) || (!existing.text && text)) {
+        if (
+          !existing ||
+          (!existing.handle && handle) ||
+          String(existing.text || '').length < text.length
+        ) {
           records.set(id, {
+            ...(existing || {}),
             id,
             conversationId,
             handle,
+            displayName: String(userLegacy.name || (existing && existing.displayName) || ''),
             url: handle
               ? `https://x.com/${handle}/status/${id}`
               : `https://x.com/i/web/status/${id}`,
-            text: text.slice(0, 2000),
+            text: text.slice(0, REPLY_ARCHIVE_TEXT_MAX),
+            truncated: !noteText && /[…]$/.test(previewText),
+            createdAt: safeIsoTime((legacy && legacy.created_at) || ''),
+            parentId: String((legacy && legacy.in_reply_to_status_id_str) || ''),
+            mediaLinks: replyMediaLinksFromLegacy(legacy),
             unavailable,
             unavailableReason: unavailable ? String(value.__typename || 'unavailable') : '',
           });
@@ -8357,6 +8424,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     };
   }
 
+  // Per-reply text cap. Generous enough for long-form replies, bounded so one abusive
+  // reply cannot blow the archive's storage budget on its own.
+  const REPLY_ARCHIVE_TEXT_MAX = 12000;
   const REPLY_PROBE_PENDING_KEY = 'sourcecapsule:reply-probe:pending';
   const REPLY_PROBE_LAST_KEY = 'sourcecapsule:reply-probe:last';
   const REPLY_PROBE_HISTORY_KEY = 'sourcecapsule:reply-probe:history';
@@ -8379,6 +8449,50 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return match ? Number(match[1].replace(/,/g, '')) || 0 : 0;
   }
 
+  /**
+   * Display name out of a User-Name block, without the trailing @handle.
+   * `authorFromNameBlock` relies on X's newline-separated `innerText`, which jsdom (and
+   * some userscript hosts reading `textContent`) never produce - so "Reply Person@replier"
+   * would leak into the archive as the author's name. Strip from the first @token.
+   */
+  function replyDisplayNameFromTweet(tweetEl) {
+    const nameBlock = pick(tweetEl, CONFIG.selectors.userName, { quiet: true });
+    if (!nameBlock) return '';
+    const line =
+      String(nameBlock.innerText || nameBlock.textContent || '')
+        .split('\n')
+        .map((part) => part.trim())
+        .filter(Boolean)[0] || '';
+    const handleMatch = line.match(/@[A-Za-z0-9_]+/);
+    return (handleMatch ? line.slice(0, handleMatch.index) : line).replace(/[·•]\s*$/, '').trim();
+  }
+
+  /**
+   * Media LINKS for one reply. Deliberately links, never bytes: a 1,000-reply archive
+   * that inlined media would be gigabytes, so the archive records where the media lives
+   * and lets the reader follow it. Videos contribute their poster still only - the DOM
+   * never exposes an MP4 URL (that lives in the GraphQL payload; see the network path).
+   */
+  function replyMediaLinksFromTweet(tweetEl) {
+    const links = [];
+    const seen = new Set();
+    const add = (type, url, extra = {}) => {
+      const safe = safeUrl(url);
+      if (!safe || seen.has(safe)) return;
+      seen.add(safe);
+      links.push({ type, url: safe, ...extra });
+    };
+    pickAll(tweetEl, CONFIG.selectors.tweetPhoto).forEach((img) => {
+      if (img && img.src) add('image', highResImageUrl(img.src));
+    });
+    pickAll(tweetEl, CONFIG.selectors.videoPlayer).forEach((player) => {
+      const video = player.querySelector('video[poster]') || player.querySelector('video');
+      const poster = video && video.getAttribute('poster');
+      if (poster) add('video-poster', poster);
+    });
+    return links;
+  }
+
   function replyProbeTweetRecord(tweetEl) {
     if (!tweetEl) return null;
     // Promoted posts in timelines commonly have status/analytics links but no timestamp.
@@ -8395,15 +8509,24 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     }
     const handleMatch = pathname.match(/^\/([^/]+)\/status\/\d+/);
     const textEl = pick(tweetEl, CONFIG.selectors.tweetText, { quiet: true });
+    const text = String((textEl && textEl.textContent) || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const datetime = String(time.getAttribute('datetime') || '');
+    const seenAt = new Date().toISOString();
     return {
       id,
       handle: handleMatch ? handleMatch[1] : '',
+      displayName: replyDisplayNameFromTweet(tweetEl),
       url: normalizeStatusUrl(anchor.href),
-      text: String((textEl && textEl.textContent) || '')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 2000),
-      seenAt: new Date().toISOString(),
+      text: text.slice(0, REPLY_ARCHIVE_TEXT_MAX),
+      // X truncates long replies in the timeline DOM; the GraphQL note text wins later.
+      truncated: /[…]$/.test(text) || text.length > REPLY_ARCHIVE_TEXT_MAX,
+      createdAt: datetime,
+      mediaLinks: replyMediaLinksFromTweet(tweetEl),
+      seenAt,
+      firstSeenAt: seenAt,
+      lastSeenAt: seenAt,
     };
   }
 
@@ -8843,6 +8966,445 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       { sticky: true }
     );
     return true;
+  }
+
+  // -------------------------------------------------------------------------
+  // Reply ARCHIVE.
+  //
+  // The auditor above answers "which reply IDs exist?". This answers the thing
+  // that actually ships: "what did they SAY?". Every reply keeps its full text,
+  // author, timestamp, parent, and media links, merged across every surface and
+  // every re-run so content can only ever accumulate - never be overwritten by a
+  // later, thinner sighting of the same reply.
+  // -------------------------------------------------------------------------
+
+  const REPLY_ARCHIVE_KEY_PREFIX = 'sourcecapsule:reply-archive:';
+  const REPLY_ARCHIVE_DB = 'sourcecapsule';
+  const REPLY_ARCHIVE_TABLE = 'reply-archive';
+
+  function replyArchiveMediaKey(media) {
+    return `${media.type || ''}|${media.url || ''}`;
+  }
+
+  function mergeReplyMediaLinks(prior = [], incoming = []) {
+    const byKey = new Map();
+    [...(Array.isArray(prior) ? prior : []), ...(Array.isArray(incoming) ? incoming : [])].forEach(
+      (media) => {
+        if (!media || !media.url) return;
+        const key = replyArchiveMediaKey(media);
+        const existing = byKey.get(key) || {};
+        byKey.set(key, {
+          ...existing,
+          ...media,
+          poster: media.poster || existing.poster || '',
+          permalink: media.permalink || existing.permalink || '',
+        });
+      }
+    );
+    return Array.from(byKey.values());
+  }
+
+  /** Union the provenance atoms of two sightings without inventing a new vocabulary. */
+  function mergeReplyProvenance(...values) {
+    const atoms = values
+      .filter(Boolean)
+      .flatMap((value) => String(value).split('+'))
+      .filter(Boolean);
+    const hasDom = atoms.some((atom) => /dom/i.test(atom));
+    const hasNetwork = atoms.some((atom) => /network/i.test(atom));
+    if (hasDom && hasNetwork) return 'network-confirmed+dom';
+    if (hasNetwork) return 'network-confirmed';
+    if (hasDom) return 'dom-observed';
+    return atoms[0] || '';
+  }
+
+  /**
+   * Merge reply records by id. The invariant that matters: a field that already holds
+   * content is NEVER replaced by an empty one, and the LONGER text always wins (a
+   * truncated timeline preview must lose to the full note text). This is the exact
+   * defect that made the previous iteration an ID inventory instead of an archive.
+   */
+  function mergeReplyArchiveRecords(existing = [], incoming = []) {
+    const byId = new Map();
+    [...(existing || []), ...(incoming || [])].forEach((record) => {
+      if (!record) return;
+      const id = String(record.id || '');
+      if (!/^\d+$/.test(id)) return;
+      const prior = byId.get(id) || {};
+      const priorText = String(prior.text || '');
+      const nextText = String(record.text || '');
+      const text = nextText.length > priorText.length ? nextText : priorText;
+      const surfaces = Array.from(
+        new Set(
+          [
+            ...(Array.isArray(prior.discoveredSurfaces) ? prior.discoveredSurfaces : []),
+            prior.discoveredSurface,
+            ...(Array.isArray(record.discoveredSurfaces) ? record.discoveredSurfaces : []),
+            record.discoveredSurface,
+          ].filter(Boolean)
+        )
+      ).sort();
+      const seenTimes = [
+        prior.firstSeenAt,
+        prior.lastSeenAt,
+        prior.seenAt,
+        record.firstSeenAt,
+        record.lastSeenAt,
+        record.seenAt,
+      ]
+        .filter(Boolean)
+        .sort();
+      byId.set(id, {
+        ...prior,
+        ...record,
+        id,
+        handle: record.handle || prior.handle || '',
+        displayName: record.displayName || prior.displayName || '',
+        url:
+          record.url ||
+          prior.url ||
+          (record.handle || prior.handle
+            ? `https://x.com/${record.handle || prior.handle}/status/${id}`
+            : `https://x.com/i/web/status/${id}`),
+        text,
+        // Truncation is only still true if the winning text is itself the truncated one.
+        truncated: text === nextText ? Boolean(record.truncated) : Boolean(prior.truncated),
+        createdAt: record.createdAt || prior.createdAt || '',
+        parentId: record.parentId || prior.parentId || '',
+        conversationId: record.conversationId || prior.conversationId || '',
+        mediaLinks: mergeReplyMediaLinks(prior.mediaLinks, record.mediaLinks),
+        unavailable: Boolean(record.unavailable || prior.unavailable),
+        unavailableReason: record.unavailableReason || prior.unavailableReason || '',
+        provenance: mergeReplyProvenance(prior.provenance, record.provenance),
+        discoveredSurface: surfaces[0] || '',
+        discoveredSurfaces: surfaces,
+        firstSeenAt: seenTimes[0] || '',
+        lastSeenAt: seenTimes[seenTimes.length - 1] || '',
+      });
+    });
+    return Array.from(byId.values()).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  }
+
+  /**
+   * IndexedDB-backed archive storage. Measured before choosing: a 1,000-reply
+   * conversation runs to a few MB once full text and media links are kept, and the
+   * history holds several roots - which overruns localStorage's ~5 MB origin quota and
+   * would fail as a silent QuotaExceededError. IndexedDB is the primary; localStorage is
+   * a last-resort fallback, and either way a write failure is RETURNED, never swallowed.
+   */
+  function indexedDbReplyArchiveBackend() {
+    const idb =
+      (typeof indexedDB !== 'undefined' && indexedDB) ||
+      (typeof window !== 'undefined' && window.indexedDB) ||
+      null;
+    if (!idb) return null;
+    const open = () =>
+      new Promise((resolve, reject) => {
+        let request;
+        try {
+          request = idb.open(REPLY_ARCHIVE_DB, 1);
+        } catch (error) {
+          reject(error);
+          return;
+        }
+        request.onupgradeneeded = () => {
+          const db = request.result;
+          if (!db.objectStoreNames.contains(REPLY_ARCHIVE_TABLE)) {
+            db.createObjectStore(REPLY_ARCHIVE_TABLE);
+          }
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error || new Error('indexedDB open failed'));
+      });
+    const run = (mode, fn) =>
+      open().then(
+        (db) =>
+          new Promise((resolve, reject) => {
+            const tx = db.transaction(REPLY_ARCHIVE_TABLE, mode);
+            const request = fn(tx.objectStore(REPLY_ARCHIVE_TABLE));
+            tx.oncomplete = () => {
+              db.close();
+              resolve(request ? request.result : undefined);
+            };
+            tx.onabort = () => {
+              db.close();
+              reject(tx.error || new Error('indexedDB transaction aborted'));
+            };
+            tx.onerror = () => {
+              db.close();
+              reject(tx.error || new Error('indexedDB transaction failed'));
+            };
+          })
+      );
+    return {
+      name: 'indexeddb',
+      get: (key) => run('readonly', (store) => store.get(key)),
+      set: (key, value) =>
+        run('readwrite', (store) => store.put(value, key)).then(() => undefined),
+    };
+  }
+
+  function localStorageReplyArchiveBackend() {
+    return {
+      name: 'localstorage',
+      async get(key) {
+        return localStorage.getItem(key);
+      },
+      async set(key, value) {
+        localStorage.setItem(key, JSON.stringify(value));
+      },
+    };
+  }
+
+  function defaultReplyArchiveBackend() {
+    return indexedDbReplyArchiveBackend() || localStorageReplyArchiveBackend();
+  }
+
+  function createReplyArchiveStore(adapter) {
+    const backend = adapter || defaultReplyArchiveBackend();
+    const keyFor = (rootStatusId) => `${REPLY_ARCHIVE_KEY_PREFIX}${String(rootStatusId || '')}`;
+    const errorText = (error) => String((error && error.message) || error || 'storage failed');
+    const store = {
+      name: backend.name || 'unknown',
+      async load(rootStatusId) {
+        const root = String(rootStatusId || '');
+        try {
+          const raw = await backend.get(keyFor(root));
+          const value = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          const records = Array.isArray(value && value.records) ? value.records : [];
+          return {
+            rootStatusId: root,
+            backend: store.name,
+            updatedAt: String((value && value.updatedAt) || ''),
+            records: mergeReplyArchiveRecords([], records),
+            storageError: '',
+          };
+        } catch (error) {
+          return {
+            rootStatusId: root,
+            backend: store.name,
+            updatedAt: '',
+            records: [],
+            storageError: errorText(error),
+          };
+        }
+      },
+      async save(rootStatusId, records) {
+        const root = String(rootStatusId || '');
+        const prior = await store.load(root);
+        const merged = mergeReplyArchiveRecords(prior.records, records || []);
+        const payload = {
+          contractVersion: 3,
+          rootStatusId: root,
+          updatedAt: new Date().toISOString(),
+          records: merged,
+        };
+        try {
+          await backend.set(keyFor(root), payload);
+          return {
+            ok: true,
+            backend: store.name,
+            records: merged,
+            replyCount: merged.length,
+            approxBytes: JSON.stringify(payload).length,
+            storageError: prior.storageError || '',
+            updatedAt: payload.updatedAt,
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            backend: store.name,
+            records: merged,
+            replyCount: merged.length,
+            approxBytes: JSON.stringify(payload).length,
+            storageError: errorText(error),
+            updatedAt: '',
+          };
+        }
+      },
+    };
+    return store;
+  }
+
+  let replyArchiveStore = null;
+  function getReplyArchiveStore() {
+    if (!replyArchiveStore) replyArchiveStore = createReplyArchiveStore();
+    return replyArchiveStore;
+  }
+
+  function buildReplyArchive({
+    rootStatusId,
+    rootPost = null,
+    records = [],
+    gapReport = null,
+    updatedAt = '',
+    backend = '',
+    storageError = '',
+  }) {
+    const merged = mergeReplyArchiveRecords([], records);
+    const surfaces = Array.from(
+      new Set(merged.flatMap((record) => record.discoveredSurfaces || []))
+    ).sort();
+    return {
+      contractVersion: 3,
+      rootStatusId: String(rootStatusId || ''),
+      rootPost: rootPost || null,
+      generatedAt: new Date().toISOString(),
+      updatedAt: String(updatedAt || ''),
+      backend: String(backend || ''),
+      storageError: String(storageError || ''),
+      surfaces,
+      records: merged,
+      replyCount: merged.length,
+      withTextCount: merged.filter((record) => String(record.text || '').trim()).length,
+      truncatedCount: merged.filter((record) => record.truncated).length,
+      mediaLinkCount: merged.reduce(
+        (total, record) => total + ((record.mediaLinks || []).length || 0),
+        0
+      ),
+      gapReport: gapReport || null,
+    };
+  }
+
+  /**
+   * Order replies as a conversation tree. Any reply whose parent is not itself in the
+   * archive is treated as top-level, so a partially-captured conversation still renders
+   * every reply it holds rather than hiding orphans.
+   */
+  function replyArchiveTree(archive) {
+    const records = (archive && archive.records) || [];
+    const byId = new Map(records.map((record) => [String(record.id), record]));
+    const children = new Map();
+    const roots = [];
+    records.forEach((record) => {
+      const parentId = String(record.parentId || '');
+      if (parentId && parentId !== String(record.id) && byId.has(parentId)) {
+        if (!children.has(parentId)) children.set(parentId, []);
+        children.get(parentId).push(record);
+      } else {
+        roots.push(record);
+      }
+    });
+    const byTime = (a, b) =>
+      String(a.createdAt || '').localeCompare(String(b.createdAt || '')) ||
+      String(a.id).localeCompare(String(b.id));
+    const out = [];
+    const visited = new Set();
+    const walk = (record, depth) => {
+      const id = String(record.id);
+      // Guard against a malformed parent cycle turning the render into a hang.
+      if (visited.has(id)) return;
+      visited.add(id);
+      out.push({ record, depth });
+      (children.get(id) || []).sort(byTime).forEach((child) => walk(child, depth + 1));
+    };
+    roots.sort(byTime).forEach((record) => walk(record, 0));
+    // Anything trapped in a cycle still belongs in the archive.
+    records.filter((record) => !visited.has(String(record.id))).forEach((record) => {
+      visited.add(String(record.id));
+      out.push({ record, depth: 0 });
+    });
+    return out;
+  }
+
+  function replyArchiveReceiptLines(archive) {
+    const gapReport = archive.gapReport || {};
+    const gaps = (gapReport.knownGaps || []).length;
+    return [
+      '## Capture receipt',
+      '',
+      `- Replies archived with content: ${archive.withTextCount} of ${archive.replyCount}`,
+      `- Media links recorded: ${archive.mediaLinkCount} (links only — reply media is not downloaded)`,
+      `- Still truncated by X: ${archive.truncatedCount}`,
+      `- Surfaces merged: ${(archive.surfaces.length ? archive.surfaces : ['none']).join(', ')}`,
+      `- Conversation IDs known: ${gapReport.knownConversationIds || archive.replyCount}`,
+      `- Known but uncaptured (network-only) replies: ${gaps}`,
+      archive.storageError ? `- **Storage error:** ${archive.storageError}` : '',
+      archive.updatedAt ? `- Archive last written: ${archive.updatedAt}` : '',
+      '',
+      'This capture is **best effort**. X does not publish a complete reply list, and' +
+        ' deleted, private, blocked, and never-delivered replies are undetectable. The' +
+        " X reply counter is a reference only, not a completeness denominator.",
+      '',
+    ].filter((line) => line !== '');
+  }
+
+  function renderReplyArchiveMarkdown(archive) {
+    const rootPost = archive.rootPost || {};
+    const rootUrl = rootPost.url || `https://x.com/i/web/status/${archive.rootStatusId}`;
+    const lines = [
+      `# Replies to ${rootPost.handle ? `@${rootPost.handle}` : 'post'} ${archive.rootStatusId}`,
+      '',
+      `Source: ${rootUrl}`,
+      `Replies archived: ${archive.replyCount}`,
+      `Generated: ${archive.generatedAt}`,
+      '',
+      ...replyArchiveReceiptLines(archive),
+      '## Replies',
+      '',
+    ];
+    const tree = replyArchiveTree(archive);
+    if (!tree.length) lines.push('_No replies captured for this post yet._', '');
+    tree.forEach(({ record, depth }) => {
+      const pad = '  '.repeat(depth);
+      const who = [record.displayName, record.handle ? `@${record.handle}` : '']
+        .filter(Boolean)
+        .join(' ');
+      const when = record.createdAt || 'unknown time';
+      lines.push(`${pad}- **${who || 'Unknown author'}** · ${when} · <${record.url || ''}>`);
+      const text = String(record.text || '').trim();
+      if (text) {
+        text.split('\n').forEach((line) => lines.push(`${pad}  ${line}`));
+        if (record.truncated) lines.push(`${pad}  _(X delivered only a truncated preview.)_`);
+      } else if (record.unavailable) {
+        lines.push(`${pad}  _(Unavailable on X: ${record.unavailableReason || 'removed'}.)_`);
+      } else {
+        lines.push(`${pad}  _(No text content was ever delivered for this reply.)_`);
+      }
+      (record.mediaLinks || []).forEach((media) => {
+        const poster = media.poster ? ` (poster: ${media.poster})` : '';
+        lines.push(`${pad}  - ${media.type}: ${media.url}${poster}`);
+      });
+      lines.push('');
+    });
+    return lines.join('\n');
+  }
+
+  function replyArchiveCsv(archive) {
+    const columns = [
+      'reply_id',
+      'parent_id',
+      'conversation_id',
+      'handle',
+      'display_name',
+      'created_at',
+      'url',
+      'text',
+      'truncated',
+      'media_count',
+      'media_links',
+      'surfaces',
+      'provenance',
+      'unavailable',
+    ];
+    const rows = replyArchiveTree(archive).map(({ record }) => [
+      record.id,
+      record.parentId || '',
+      record.conversationId || archive.rootStatusId,
+      record.handle || '',
+      record.displayName || '',
+      record.createdAt || '',
+      record.url || '',
+      // Full text on purpose: this file IS the archive, not a preview of one.
+      String(record.text || ''),
+      record.truncated ? 'true' : 'false',
+      (record.mediaLinks || []).length,
+      (record.mediaLinks || []).map((media) => `${media.type}:${media.url}`).join(' | '),
+      (record.discoveredSurfaces || []).join('+'),
+      record.provenance || '',
+      record.unavailable ? record.unavailableReason || 'true' : 'false',
+    ]);
+    return `\ufeff${[columns, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n')}\r\n`;
   }
 
   function replyProbeMaxMs(surface) {
@@ -10450,6 +11012,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       buildReplyGapReport,
       replyGapReportCsv,
       buildStoredReplyAudit,
+      mergeReplyArchiveRecords,
+      mergeReplyMediaLinks,
+      mergeReplyProvenance,
+      createReplyArchiveStore,
+      buildReplyArchive,
+      replyArchiveTree,
+      renderReplyArchiveMarkdown,
+      replyArchiveCsv,
+      replyMediaLinksFromLegacy,
       readReplyProbeHistory,
       writeReplyProbeResult,
       runReplyProbe,
