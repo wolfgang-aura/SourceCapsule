@@ -8571,6 +8571,33 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return Number(visibleReplies) === 0 && Number(elapsedMs) < Number(emptyGraceMs);
   }
 
+  /**
+   * Empty placeholder records for replies X confirmed exist but never delivered
+   * content for. Syndication recovery walks the ARCHIVE, and a known gap is by
+   * definition not in it - so until these are seeded, the ids the receipt lists as
+   * "known but uncaptured" were the one set recovery never even tried.
+   */
+  function replyArchiveGapSeeds(gapReport, rootStatusId, existingRecords = [], surface = '') {
+    const root = String(rootStatusId || '');
+    const have = new Set((existingRecords || []).map((record) => String(record && record.id)));
+    const seen = new Set();
+    return ((gapReport && gapReport.knownGaps) || [])
+      .map((gap) => String((gap && (gap.id || gap.replyId)) || gap || ''))
+      .filter((id) => {
+        if (!/^\d+$/.test(id) || id === root || have.has(id) || seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      })
+      .map((id) => ({
+        id,
+        conversationId: root,
+        url: `https://x.com/i/web/status/${id}`,
+        text: '',
+        provenance: 'network-confirmed',
+        discoveredSurfaces: surface ? [surface] : [],
+      }));
+  }
+
   function replyProbeConversationBoundaryVisible(root = document) {
     const selector = CONFIG.selectors.threadBoundaryHeading.join(',');
     return Array.from((root && root.querySelectorAll(selector)) || []).some((heading) =>
@@ -9844,6 +9871,18 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       })),
     ].filter((record) => String(record.id) !== String(pending.rootStatusId));
     let saved = await getReplyArchiveStore().save(pending.rootStatusId, archiveInput);
+    // Replies X confirmed exist but never delivered content for have, until now, only
+    // ever been LISTED in the receipt: recovery walked the archive, and a known gap is
+    // by definition not in it. Seed them as empty records so the syndication round that
+    // owns exactly this case can fill them in. Seeding is harmless if it fails - the
+    // renderer and the receipt already state honestly that no text was delivered.
+    if (options.recoverGaps !== false) {
+      const seeds = replyArchiveGapSeeds(gapReport, pending.rootStatusId, saved.records, surface);
+      if (seeds.length) {
+        saved = await getReplyArchiveStore().save(pending.rootStatusId, seeds);
+        result.gapsSeeded = seeds.length;
+      }
+    }
     // Save FIRST, then attempt recovery: if syndication is blocked or the tab is closed
     // mid-round, everything the scroll pass collected is already durable.
     if (options.recoverGaps !== false && saved.records.some((record) => !record.text)) {
@@ -11306,6 +11345,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       captureVisibleReplyProbeTweets,
       replyProbeConversationBoundaryVisible,
       replyProbeStillWarmingUp,
+      replyArchiveGapSeeds,
       searchTimelineReplyRecordsFromCapturedBody,
       getCapturedSearchTimelineReplies,
       buildReplyGapReport,
