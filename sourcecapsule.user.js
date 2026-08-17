@@ -7035,13 +7035,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         const userCore = (userResult && userResult.core) || {};
         const handle = String(userCore.screen_name || userLegacy.screen_name || '');
         const displayName = String(userCore.name || userLegacy.name || '');
-        const previewText = String((legacy && (legacy.full_text || legacy.text)) || '')
+        // GraphQL delivers reply bodies with &, <, > HTML-encoded, exactly like
+        // syndication does. Live archive Markdown showed "-&gt;" inside real replies.
+        const previewText = decodeBasicEntities((legacy && (legacy.full_text || legacy.text)) || '')
           .replace(/\s+/g, ' ')
           .trim();
         // A long reply arrives as a truncated `full_text` plus the real body in
         // `note_tweet`. The note always wins; otherwise the archive would store an
         // ellipsis where the reply's actual content should be.
-        const noteText = String(replyNoteTextFromResult(value) || '')
+        const noteText = decodeBasicEntities(replyNoteTextFromResult(value) || '')
           .replace(/\s+/g, ' ')
           .trim();
         const text = noteText || previewText;
@@ -9378,7 +9380,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const rootPost = archive.rootPost || {};
     const rootUrl = rootPost.url || `https://x.com/i/web/status/${archive.rootStatusId}`;
     const lines = [
-      `# Replies to ${rootPost.handle ? `@${rootPost.handle}` : 'post'} ${archive.rootStatusId}`,
+      // handleFromSourceUrl already returns "@name", so prepending another @ printed
+      // "Replies to @@aleabitoreddit" in the live archive. Normalize either shape.
+      `# Replies to ${rootPost.handle ? `@${String(rootPost.handle).replace(/^@+/, '')}` : 'post'} ${archive.rootStatusId}`,
       '',
       `Source: ${rootUrl}`,
       `Replies archived: ${archive.replyCount}`,
@@ -9494,7 +9498,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       async (id) => {
         try {
           const payload = await fetchFn(id);
-          const text = String((payload && (payload.text || payload.full_text)) || '')
+          const text = decodeBasicEntities((payload && (payload.text || payload.full_text)) || '')
             .replace(/\s+/g, ' ')
             .trim();
           if (!text && !(payload && payload.mediaDetails)) return;

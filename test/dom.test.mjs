@@ -4141,6 +4141,42 @@ await checkAsync('the root post alone does not count as replies having rendered'
   }
 });
 
+// Both found by reading the Markdown/CSV actually downloaded from the live archive
+// on 2026-08-17 (72 real replies to 2086304269943419276).
+check('reply text is stored decoded, not HTML-encoded', () => {
+  const rootStatusId = '2000000000000000000';
+  // Verbatim shape of a real reply that rendered as "Space company -&gt; Drones".
+  const body = JSON.stringify({
+    rest_id: '2000000000000000301',
+    core: {
+      user_results: { result: { core: { screen_name: 'matt', name: 'Matthew' } } },
+    },
+    legacy: {
+      conversation_id_str: rootStatusId,
+      full_text: 'Space company -&gt; Drones &amp; microgravity &lt;pharma&gt;',
+    },
+  });
+  const [record] = engine.searchTimelineReplyRecordsFromCapturedBody(body);
+  assert.equal(record.text, 'Space company -> Drones & microgravity <pharma>');
+});
+
+check('the archive title carries exactly one @', () => {
+  // handleFromSourceUrl returns "@name"; the DOM/record path stores a bare "name".
+  ['@aleabitoreddit', 'aleabitoreddit'].forEach((handle) => {
+    const markdown = engine.renderReplyArchiveMarkdown(
+      engine.buildReplyArchive({
+        rootStatusId: '2000000000000000000',
+        rootPost: { handle, url: 'https://x.com/aleabitoreddit/status/2000000000000000000' },
+        records: [{ id: '2000000000000000101', handle: 'replier', text: 'A reply.' }],
+      })
+    );
+    assert.ok(
+      markdown.startsWith('# Replies to @aleabitoreddit '),
+      `expected a single @ for input ${handle}, got: ${markdown.split('\n')[0]}`
+    );
+  });
+});
+
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);
   process.exit(1);
