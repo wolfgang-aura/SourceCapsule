@@ -9078,17 +9078,18 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * would fail as a silent QuotaExceededError. IndexedDB is the primary; localStorage is
    * a last-resort fallback, and either way a write failure is RETURNED, never swallowed.
    */
-  function indexedDbReplyArchiveBackend() {
+  function indexedDbReplyArchiveBackend(factory) {
     const idb =
+      factory ||
       (typeof indexedDB !== 'undefined' && indexedDB) ||
       (typeof window !== 'undefined' && window.indexedDB) ||
       null;
     if (!idb) return null;
-    const open = () =>
+    const openAt = (version) =>
       new Promise((resolve, reject) => {
         let request;
         try {
-          request = idb.open(REPLY_ARCHIVE_DB, 1);
+          request = version ? idb.open(REPLY_ARCHIVE_DB, version) : idb.open(REPLY_ARCHIVE_DB);
         } catch (error) {
           reject(error);
           return;
@@ -9102,6 +9103,21 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         request.onsuccess = () => resolve(request.result);
         request.onerror = () => reject(request.error || new Error('indexedDB open failed'));
       });
+    /**
+     * The `sourcecapsule` database is SHARED - the library root folder handle already
+     * lives in it under `handles`, created at version 1. Opening at a hard-coded
+     * version 1 therefore never fires onupgradeneeded on an existing install, the
+     * `reply-archive` store is never created, and every write dies with NotFoundError.
+     * So: open at whatever version exists, and only if our store is missing reopen at
+     * version+1 to add it (an upgrade preserves the stores already there).
+     */
+    const open = async () => {
+      const db = await openAt();
+      if (db.objectStoreNames.contains(REPLY_ARCHIVE_TABLE)) return db;
+      const nextVersion = (Number(db.version) || 1) + 1;
+      db.close();
+      return openAt(nextVersion);
+    };
     const run = (mode, fn) =>
       open().then(
         (db) =>
@@ -11252,6 +11268,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       renderReplyArchiveMarkdown,
       replyArchiveCsv,
       replyMediaLinksFromLegacy,
+      indexedDbReplyArchiveBackend,
       loadReplyArchiveForPost,
       enrichReplyArchiveViaSyndication,
       downloadReplyArchive,
