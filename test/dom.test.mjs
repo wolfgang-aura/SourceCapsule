@@ -3421,6 +3421,281 @@ check('extension controller accepts the replyContext preference', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Reply ARCHIVE (not the inventory auditor).
+//
+// The deliverable is the replies themselves: full text, author, timestamp,
+// hierarchy, and media LINKS (never downloaded bytes — a 1,000-reply thread
+// would be gigabytes). These checks exist because an earlier iteration
+// persisted only reply IDs and silently discarded the text; every assertion
+// below is about content SURVIVING storage, re-runs, and cross-surface merges.
+// ---------------------------------------------------------------------------
+
+check('DOM reply record carries text, author, timestamp, and media links', () => {
+  const replyDom = new JSDOM(
+    `<!doctype html><html><body>
+      <article data-testid="tweet">
+        <div data-testid="User-Name"><a href="/replier"><span>Reply Person</span></a><a href="/replier"><span>@replier</span></a></div>
+        <div data-testid="tweetText">Reply body that must survive.</div>
+        <div data-testid="tweetPhoto"><img src="https://pbs.twimg.com/media/AAA?format=jpg&name=small"></div>
+        <div data-testid="videoPlayer"><video poster="https://pbs.twimg.com/ext_tw_video_thumb/BBB/img/CCC.jpg"></video></div>
+        <a href="/replier/status/2000000000000000042"><time datetime="2026-08-11T09:30:00.000Z">Aug 11</time></a>
+      </article>
+    </body></html>`,
+    { url: 'https://x.com/search?q=conversation_id%3A2000000000000000000&f=live' }
+  );
+  const priorWindow = global.window;
+  global.window = replyDom.window;
+  global.document = replyDom.window.document;
+  global.Node = replyDom.window.Node;
+  global.location = replyDom.window.location;
+  try {
+    const record = engine.replyProbeTweetRecord(
+      replyDom.window.document.querySelector('article[data-testid="tweet"]')
+    );
+    assert.equal(record.id, '2000000000000000042');
+    assert.equal(record.handle, 'replier');
+    assert.equal(record.displayName, 'Reply Person');
+    assert.equal(record.text, 'Reply body that must survive.');
+    assert.equal(record.createdAt, '2026-08-11T09:30:00.000Z');
+    // Media is captured as LINKS ONLY, at full resolution where X exposes it.
+    const kinds = record.mediaLinks.map((media) => media.type).sort();
+    assert.deepEqual(kinds, ['image', 'video-poster']);
+    assert.match(
+      record.mediaLinks.find((media) => media.type === 'image').url,
+      /name=(orig|large)/
+    );
+  } finally {
+    global.window = priorWindow;
+    global.document = priorWindow.document;
+    global.Node = priorWindow.Node;
+    global.location = priorWindow.location;
+  }
+});
+
+check('captured GraphQL replies carry full text, parent id, and media links', () => {
+  const rootStatusId = '2000000000000000000';
+  const body = JSON.stringify({
+    data: {
+      threaded_conversation_with_injections_v2: {
+        instructions: [
+          {
+            entries: [
+              {
+                content: {
+                  itemContent: {
+                    tweet_results: {
+                      result: {
+                        __typename: 'Tweet',
+                        rest_id: '2000000000000000101',
+                        core: {
+                          user_results: {
+                            result: { legacy: { screen_name: 'deepreplier', name: 'Deep Replier' } },
+                          },
+                        },
+                        note_tweet: {
+                          note_tweet_results: {
+                            result: { text: 'A very long reply that X only delivers in note form.' },
+                          },
+                        },
+                        legacy: {
+                          conversation_id_str: rootStatusId,
+                          created_at: 'Tue Aug 11 09:30:00 +0000 2026',
+                          in_reply_to_status_id_str: '2000000000000000042',
+                          full_text: 'A very long reply that X only deliver…',
+                          extended_entities: {
+                            media: [
+                              {
+                                type: 'photo',
+                                media_url_https: 'https://pbs.twimg.com/media/DDD.jpg',
+                                expanded_url: 'https://x.com/deepreplier/status/2000000000000000101/photo/1',
+                              },
+                              {
+                                type: 'video',
+                                media_url_https: 'https://pbs.twimg.com/ext_tw_video_thumb/EEE.jpg',
+                                video_info: {
+                                  variants: [
+                                    { bitrate: 832000, content_type: 'video/mp4', url: 'https://video.twimg.com/low.mp4' },
+                                    { bitrate: 2176000, content_type: 'video/mp4', url: 'https://video.twimg.com/high.mp4' },
+                                  ],
+                                },
+                              },
+                            ],
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+  const [record] = engine
+    .searchTimelineReplyRecordsFromCapturedBody(body)
+    .filter((entry) => entry.id === '2000000000000000101');
+  assert.ok(record, 'expected the reply to be harvested from the GraphQL body');
+  assert.equal(record.conversationId, rootStatusId);
+  assert.equal(record.parentId, '2000000000000000042');
+  assert.equal(record.displayName, 'Deep Replier');
+  assert.equal(record.createdAt, '2026-08-11T09:30:00.000Z');
+  // note_tweet is the authoritative full text; the truncated legacy preview must lose.
+  assert.equal(record.text, 'A very long reply that X only delivers in note form.');
+  assert.equal(record.truncated, false);
+  const video = record.mediaLinks.find((media) => media.type === 'video');
+  assert.equal(video.url, 'https://video.twimg.com/high.mp4', 'highest bitrate variant wins');
+  assert.equal(video.poster, 'https://pbs.twimg.com/ext_tw_video_thumb/EEE.jpg');
+  assert.ok(record.mediaLinks.some((media) => media.type === 'image'));
+});
+
+check('archive merge never loses reply text across surfaces or repeated runs', () => {
+  const withText = {
+    id: '2000000000000000101',
+    handle: 'replier',
+    displayName: 'Reply Person',
+    text: 'The only copy of this sentence.',
+    createdAt: '2026-08-11T09:30:00.000Z',
+    parentId: '2000000000000000000',
+    mediaLinks: [{ type: 'image', url: 'https://pbs.twimg.com/media/AAA?format=jpg&name=orig' }],
+    provenance: 'dom-observed',
+    discoveredSurfaces: ['latest'],
+  };
+  // A later surface re-sights the same reply but X renders it collapsed/empty.
+  const withoutText = {
+    id: '2000000000000000101',
+    handle: 'replier',
+    text: '',
+    mediaLinks: [],
+    provenance: 'network-confirmed',
+    discoveredSurfaces: ['top'],
+  };
+  const merged = engine.mergeReplyArchiveRecords([withText], [withoutText]);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].text, 'The only copy of this sentence.', 'text must not be blanked');
+  assert.equal(merged[0].createdAt, '2026-08-11T09:30:00.000Z');
+  assert.equal(merged[0].parentId, '2000000000000000000');
+  assert.equal(merged[0].mediaLinks.length, 1, 'media links must not be blanked');
+  assert.deepEqual(merged[0].discoveredSurfaces, ['latest', 'top']);
+  assert.equal(merged[0].provenance, 'network-confirmed+dom');
+
+  // Idempotence: replaying the identical merge must not duplicate or degrade.
+  const replayed = engine.mergeReplyArchiveRecords(merged, [withoutText, withText]);
+  assert.equal(replayed.length, 1);
+  assert.equal(replayed[0].text, 'The only copy of this sentence.');
+  assert.equal(replayed[0].mediaLinks.length, 1);
+
+  // A longer text for the same id wins (truncated preview -> full note text).
+  const fuller = engine.mergeReplyArchiveRecords(merged, [
+    { id: '2000000000000000101', text: 'The only copy of this sentence. Now with the rest of it.' },
+  ]);
+  assert.match(fuller[0].text, /Now with the rest of it\.$/);
+});
+
+await checkAsync('reply archive store round-trips full content and reports write failures', async () => {
+  const memory = new Map();
+  const store = engine.createReplyArchiveStore({
+    async get(key) {
+      return memory.get(key) || null;
+    },
+    async set(key, value) {
+      memory.set(key, value);
+    },
+    name: 'memory',
+  });
+  const rootStatusId = '2000000000000000000';
+  await store.save(rootStatusId, [
+    {
+      id: '2000000000000000101',
+      handle: 'replier',
+      text: 'Round-tripped reply text.',
+      mediaLinks: [{ type: 'image', url: 'https://pbs.twimg.com/media/AAA?format=jpg&name=orig' }],
+      discoveredSurfaces: ['latest'],
+    },
+  ]);
+  await store.save(rootStatusId, [
+    { id: '2000000000000000102', handle: 'other', text: 'Second run reply.', discoveredSurfaces: ['top'] },
+  ]);
+  const loaded = await store.load(rootStatusId);
+  assert.equal(loaded.records.length, 2, 'a second run must merge, not replace');
+  const first = loaded.records.find((record) => record.id === '2000000000000000101');
+  assert.equal(first.text, 'Round-tripped reply text.');
+  assert.equal(first.mediaLinks.length, 1);
+  assert.equal(loaded.storageError, '');
+
+  // Silent-failure guard: a failing backend must surface, not swallow.
+  const broken = engine.createReplyArchiveStore({
+    async get() {
+      return null;
+    },
+    async set() {
+      throw new Error('QuotaExceededError');
+    },
+    name: 'broken',
+  });
+  const saved = await broken.save(rootStatusId, [{ id: '2000000000000000103', text: 'x' }]);
+  assert.equal(saved.ok, false);
+  assert.match(saved.storageError, /QuotaExceeded/);
+});
+
+check('reply archive exports the actual replies, threaded, with media links', () => {
+  const archive = engine.buildReplyArchive({
+    rootStatusId: '2000000000000000000',
+    rootPost: { handle: 'author', url: 'https://x.com/author/status/2000000000000000000' },
+    records: [
+      {
+        id: '2000000000000000101',
+        handle: 'replier',
+        displayName: 'Reply Person',
+        url: 'https://x.com/replier/status/2000000000000000101',
+        text: 'Top level reply text.',
+        createdAt: '2026-08-11T09:30:00.000Z',
+        parentId: '2000000000000000000',
+        mediaLinks: [{ type: 'image', url: 'https://pbs.twimg.com/media/AAA?format=jpg&name=orig' }],
+        discoveredSurfaces: ['latest'],
+        provenance: 'dom-observed',
+      },
+      {
+        id: '2000000000000000102',
+        handle: 'nested',
+        url: 'https://x.com/nested/status/2000000000000000102',
+        text: 'Nested answer, comma, "quoted".',
+        createdAt: '2026-08-11T10:00:00.000Z',
+        parentId: '2000000000000000101',
+        mediaLinks: [],
+        discoveredSurfaces: ['top'],
+        provenance: 'network-confirmed',
+      },
+    ],
+    gapReport: { knownGaps: [], knownConversationIds: 2, domObservedUnion: 2, surfaces: ['latest', 'top'] },
+  });
+  assert.equal(archive.replyCount, 2);
+
+  const markdown = engine.renderReplyArchiveMarkdown(archive);
+  assert.match(markdown, /Top level reply text\./);
+  assert.match(markdown, /Nested answer/);
+  assert.match(markdown, /pbs\.twimg\.com\/media\/AAA/);
+  assert.match(markdown, /@replier/);
+  assert.match(markdown, /2026-08-11/);
+  // Hierarchy: the nested reply must render indented beneath its parent.
+  assert.ok(
+    markdown.indexOf('Top level reply text.') < markdown.indexOf('Nested answer'),
+    'parent must precede child'
+  );
+  assert.match(markdown, /^\s+.*Nested answer/m, 'child reply must be indented');
+  // The audit stays, demoted to a receipt.
+  assert.match(markdown, /best effort/i);
+
+  const csv = engine.replyArchiveCsv(archive);
+  assert.match(csv, /reply_id/);
+  assert.match(csv, /parent_id/);
+  assert.match(csv, /media_links/);
+  // Full text, not a 500-char preview column.
+  assert.match(csv, /"Nested answer, comma, ""quoted""\."/);
+});
+
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);
   process.exit(1);
