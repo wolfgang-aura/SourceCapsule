@@ -4218,6 +4218,61 @@ await checkAsync(
   }
 );
 
+await checkAsync(
+  'a hidden tab is reported, never mistaken for an exhausted conversation',
+  async () => {
+    // Live 2026-08-17: a 752-reply conversation rendered exactly one article (the root)
+    // for an entire run because the Brave window sat behind a save dialog. X does not
+    // render replies into a hidden tab, so the probe scrolled an empty page and reported
+    // zero DOM coverage as if the conversation were exhausted.
+    const rootStatusId = '2000000000000000000';
+    const dom = new JSDOM(
+      `<!doctype html><html><body><div data-testid="primaryColumn"></div></body></html>`,
+      { url: `https://x.com/author/status/${rootStatusId}` }
+    );
+    Object.defineProperty(dom.window.document, 'hidden', { value: true, configurable: true });
+    Object.defineProperty(dom.window.document, 'visibilityState', {
+      value: 'hidden',
+      configurable: true,
+    });
+    const priorWindow = global.window;
+    const priorHistory = global.history;
+    global.window = dom.window;
+    global.document = dom.window.document;
+    global.Node = dom.window.Node;
+    global.location = dom.window.location;
+    global.localStorage = dom.window.localStorage;
+    global.history = dom.window.history;
+    dom.window.document.documentElement.scrollTo = () => {};
+    try {
+      const result = await engine.runReplyProbe(
+        { rootStatusId, surface: 'relevant', expectedDisplayedReplies: 752 },
+        {
+          maxMs: 4000,
+          topResetMs: 2000,
+          idleMs: 0,
+          tickMs: 50,
+          emptyGraceMs: 0,
+          recoverGaps: false,
+        }
+      );
+      assert.ok(result.hiddenMs > 0, 'time spent hidden must be recorded');
+      assert.notEqual(
+        result.stopReason,
+        'no-results',
+        'a hidden tab must never be reported as an empty conversation'
+      );
+    } finally {
+      global.window = priorWindow;
+      global.document = priorWindow.document;
+      global.Node = priorWindow.Node;
+      global.location = priorWindow.location;
+      global.localStorage = priorWindow.localStorage;
+      global.history = priorHistory;
+    }
+  }
+);
+
 check('the receipt never lists a reply whose body is in the same file', () => {
   // Live 2026-08-17: recovery filled all 7 "known but uncaptured" replies, yet the
   // downloaded Markdown still listed those 7 as uncaptured - the gap report is built
