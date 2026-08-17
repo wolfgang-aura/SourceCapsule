@@ -3866,6 +3866,108 @@ await checkAsync('syndication recovers replies X confirmed but never rendered', 
   assert.equal(outcome.attempted, 2);
 });
 
+// Regression: found on live X, invisible to every fixture test above.
+//
+// The `sourcecapsule` IndexedDB is SHARED — the library root folder handle already
+// lives in it under `handles`, created at version 1. The first implementation opened
+// at a hard-coded version 1, so on any existing install onupgradeneeded never fired,
+// the `reply-archive` store was never created, and every single archive write failed
+// with NotFoundError. jsdom has no IndexedDB, so the suite silently exercised the
+// localStorage fallback instead. Hence this hand-rolled fake.
+function fakeIndexedDbFactory(initialStores = ['handles'], initialVersion = 1) {
+  const state = {
+    version: initialVersion,
+    stores: new Map(initialStores.map((n) => [n, new Map()])),
+  };
+  const makeDb = () => ({
+    get version() {
+      return state.version;
+    },
+    objectStoreNames: {
+      contains: (name) => state.stores.has(name),
+    },
+    createObjectStore(name) {
+      if (!state.stores.has(name)) state.stores.set(name, new Map());
+    },
+    close() {},
+    transaction(names) {
+      const list = Array.isArray(names) ? names : [names];
+      list.forEach((name) => {
+        if (!state.stores.has(name)) {
+          const error = new Error(`One of the specified object stores was not found.`);
+          error.name = 'NotFoundError';
+          throw error;
+        }
+      });
+      const tx = { error: null, oncomplete: null, onabort: null, onerror: null };
+      tx.objectStore = (name) => {
+        const map = state.stores.get(name);
+        return {
+          get(key) {
+            const request = { result: map.get(key) };
+            queueMicrotask(() => tx.oncomplete && tx.oncomplete());
+            return request;
+          },
+          put(value, key) {
+            map.set(key, value);
+            const request = { result: key };
+            queueMicrotask(() => tx.oncomplete && tx.oncomplete());
+            return request;
+          },
+        };
+      };
+      return tx;
+    },
+  });
+  return {
+    state,
+    open(_name, version) {
+      const request = { onupgradeneeded: null, onsuccess: null, onerror: null, result: null };
+      queueMicrotask(() => {
+        if (version && version > state.version) {
+          state.version = version;
+          request.result = makeDb();
+          if (request.onupgradeneeded) request.onupgradeneeded();
+        } else {
+          request.result = makeDb();
+        }
+        if (request.onsuccess) request.onsuccess();
+      });
+      return request;
+    },
+  };
+}
+
+await checkAsync(
+  'archive IndexedDB store is created alongside the existing handles store',
+  async () => {
+    const factory = fakeIndexedDbFactory(['handles'], 1);
+    const backend = engine.indexedDbReplyArchiveBackend(factory);
+    assert.ok(backend, 'backend must be built from the injected factory');
+    const store = engine.createReplyArchiveStore(backend);
+    const saved = await store.save('2000000000000000000', [
+      { id: '2000000000000000101', handle: 'replier', text: 'Survives a shared database.' },
+    ]);
+    assert.equal(saved.storageError, '', 'writing must not fail on an existing v1 database');
+    assert.equal(saved.ok, true);
+    assert.equal(saved.backend, 'indexeddb');
+    // The pre-existing library-root store must survive the version bump.
+    assert.equal(factory.state.stores.has('handles'), true);
+    assert.equal(factory.state.stores.has('reply-archive'), true);
+    assert.equal(factory.state.version, 2, 'store creation requires a version bump');
+
+    const loaded = await store.load('2000000000000000000');
+    assert.equal(loaded.storageError, '');
+    assert.equal(loaded.records.length, 1);
+    assert.equal(loaded.records[0].text, 'Survives a shared database.');
+
+    // Once the store exists, no further version bump should happen.
+    await store.save('2000000000000000000', [{ id: '2000000000000000102', text: 'Second write.' }]);
+    assert.equal(factory.state.version, 2);
+    assert.equal((await store.load('2000000000000000000')).records.length, 2);
+  }
+);
+
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);
   process.exit(1);
