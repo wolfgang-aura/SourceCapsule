@@ -3,6 +3,11 @@
 X (Twitter) Article/post → one self-contained, offline `.html` file (all media + quoted
 tweets inlined). Shipped as a **Tampermonkey/Violentmonkey userscript**.
 
+Before any operational work (releases, the share Worker, hosted anything), read
+`SOURCE_OF_TRUTH.md` — it declares which environment, branch, and artifact version is
+authoritative. If it doesn't exist yet, create it from the current facts and confirm
+them with the owner.
+
 ## Stack & layout
 
 - **Plain JavaScript, zero-build.** The shipped artifact is `sourcecapsule.user.js` — the
@@ -93,6 +98,38 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
 - `npm run build:extension` generates an experimental MV3 package in
   `dist/sourcecapsule-extension/` using the same userscript source plus a thin GM compatibility
   layer.
+
+## Reply archive (experimental, branch work)
+
+Separate from post export: capture the **replies** to a post — full text, author,
+timestamp, parent id, and media **links** — not just an inventory of reply ids.
+
+- **Menu** (focused posts): `Capture replies (experimental) · Latest / Top / Relevant`
+  runs a scroll pass over that X surface; `Download reply archive (Markdown + CSV)`
+  writes the deliverables.
+- **Sources, in order of authority**: passive GraphQL bodies (full `note_tweet` text,
+  `in_reply_to_status_id_str`, `extended_entities` media) > DOM scrape > per-id
+  syndication for gaps. `networkCapturePatterns().body` **must** keep matching
+  `conversation_id_str` — a page of plain text replies matches none of the
+  media/note/quote terms, and dropping those bodies silently starves the archive.
+  Keep `extension-src/page-bridge.js` aligned.
+- **The merge invariant**: `mergeReplyArchiveRecords` lets content only accumulate. A
+  populated field is never overwritten by an empty one and the **longer text wins**, so
+  a truncated timeline preview can never clobber full note text and a reply that
+  vanishes from a later surface keeps what was already captured. Do not "simplify" this
+  into a plain object spread — that is exactly the bug that made the earlier iteration
+  an id inventory.
+- **Storage is IndexedDB** (`createReplyArchiveStore`), with a localStorage fallback. A
+  ~1,000-reply archive with full text overruns localStorage's ~5 MB origin quota, and
+  that failure is silent, so every write returns an explicit `storageError` that the
+  probe surfaces as its own sticky error toast.
+- **Media is links only, on purpose.** Downloading media for thousands of replies is out
+  of scope; the archive records image/video/poster URLs and lets the reader follow them.
+- **Gap recovery** (`enrichReplyArchiveViaSyndication`) runs *after* the first archive
+  write, capped at 250 ids / concurrency 3. A 404 is authoritative and becomes an honest
+  tombstone; other failures are returned in `errors`, never swallowed.
+- Coverage is **best effort** and the Markdown receipt says so, listing known-but-
+  uncaptured reply ids. X's public reply counter is a reference, never a denominator.
 
 ## Gotchas
 

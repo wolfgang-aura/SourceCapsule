@@ -135,6 +135,65 @@ const quoteCapture = await quoteCaptureResult;
 assert.equal(quoteCapture.body, quoteOnlyBody);
 assert.match(quoteCapture.body, /quoted_status_id_str/);
 assert.equal(engine.networkCapturePatterns().body.test(quoteOnlyBody), true);
+// A page of PLAIN TEXT replies carries no media, note, or quote markers. Before
+// `conversation_id_str` joined the filter these bodies were dropped before the reply
+// archive ever saw them, which is invisible from the outside — hence this regression.
+const plainReplyBody = JSON.stringify({
+  rest_id: '300',
+  core: { user_results: { result: { legacy: { screen_name: 'plain_replier' } } } },
+  legacy: { conversation_id_str: '100', full_text: 'Just words, no media at all.' },
+});
+assert.equal(engine.networkCapturePatterns().body.test(plainReplyBody), true);
+assert.equal(
+  /video_info|variants|video\.twimg\.com|amplify_video|ext_tw_video|tweet_video|note_tweet|quoted_status/i.test(
+    plainReplyBody
+  ),
+  false,
+  'fixture must not accidentally match the pre-existing filter terms'
+);
+const bridgeSource = fs.readFileSync(path.join(root, 'extension-src', 'page-bridge.js'), 'utf8');
+assert.match(
+  bridgeSource,
+  /conversation_id_str/,
+  'extension bridge body filter must stay aligned with networkCapturePatterns()'
+);
+assert.equal(
+  engine.networkCapturePatterns().url.test('https://x.com/i/api/graphql/test/SearchTimeline'),
+  true
+);
+const searchBridgeDom = new JSDOM('<!doctype html><title>Search bridge test</title>', {
+  url: 'https://x.com/search?q=conversation_id%3A100&f=live',
+  runScripts: 'outside-only',
+});
+const plainSearchBody = JSON.stringify({
+  rest_id: '101',
+  legacy: { conversation_id_str: '100', full_text: 'No media, note, or quote fields' },
+});
+searchBridgeDom.window.fetch = async (url) => ({
+  url,
+  headers: { get: () => 'application/json' },
+  clone: () => ({ text: async () => plainSearchBody }),
+});
+searchBridgeDom.window.eval(
+  fs.readFileSync(path.join(root, 'extension-src', 'page-bridge.js'), 'utf8')
+);
+const searchCaptureResult = new Promise((resolve) => {
+  searchBridgeDom.window.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'response') resolve(event.data);
+  });
+});
+await searchBridgeDom.window.fetch('https://x.com/i/api/graphql/test/SearchTimeline');
+const searchCapture = await searchCaptureResult;
+assert.equal(searchCapture.body, plainSearchBody);
+const detailCaptureResult = new Promise((resolve) => {
+  searchBridgeDom.window.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'response' && /TweetDetail/.test(event.data.url || ''))
+      resolve(event.data);
+  });
+});
+await searchBridgeDom.window.fetch('https://x.com/i/api/graphql/test/TweetDetail');
+const detailCapture = await detailCaptureResult;
+assert.equal(detailCapture.body, plainSearchBody);
 const bridgeResult = new Promise((resolve) => {
   bridgeDom.window.addEventListener('message', (event) => {
     if (event.data && event.data.source === 'SourceCapsule:folder-picker') resolve(event.data);
@@ -168,7 +227,6 @@ const expectedFiles = [
 ];
 assert.deepEqual(fs.readdirSync(out).sort(), expectedFiles);
 assert.equal(manifest.version, pkg.version);
-assert.equal(pkg.version, '1.4.1');
 assert.ok(
   manifest.content_scripts.some(
     (entry) => entry.world === 'MAIN' && entry.js.includes('page-bridge.js')
@@ -181,8 +239,19 @@ const packagedText = expectedFiles
 assert.doesNotMatch(JSON.stringify(manifest.host_permissions), /localhost|127\.0\.0\.1/);
 assert.doesNotMatch(packagedText, /share\.sourcecapsule\.app/);
 assert.match(packagedText, /sourcecapsule-share\.wolfgang-aura\.workers\.dev/);
+// Version parity, enforced against the userscript header rather than a literal.
+// The header is the master version (see SOURCE_OF_TRUTH.md), and there are FIVE places
+// that must agree - the header, the in-script VERSION constant, package.json,
+// manifest.json, and the newest CHANGELOG heading. A hard-coded expectation here meant
+// every release had to hand-edit this test, and a missed copy elsewhere still shipped:
+// userscript managers compare @version, so a bump that misses the header reaches nobody.
 const userscript = fs.readFileSync(path.join(root, 'sourcecapsule.user.js'), 'utf8');
-assert.match(userscript, /@version\s+1\.4\.1/);
-assert.match(userscript, /const VERSION = '1\.4\.1'/);
+const headerVersion = (userscript.match(/@version\s+(\d+\.\d+\.\d+)/) || [])[1];
+assert.ok(headerVersion, 'userscript header declares a semver @version');
+assert.equal(pkg.version, headerVersion, 'package.json matches the userscript header');
+assert.match(userscript, new RegExp(`const VERSION = '${headerVersion.replace(/\./g, '\\.')}'`));
+const changelog = fs.readFileSync(path.join(root, 'CHANGELOG.md'), 'utf8');
+const newestRelease = (changelog.match(/^## \[(\d+\.\d+\.\d+)\]/m) || [])[1];
+assert.equal(newestRelease, headerVersion, 'newest CHANGELOG entry matches the shipped version');
 
 console.log('\nAll MV3 extension checks passed.');

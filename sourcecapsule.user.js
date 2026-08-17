@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SourceCapsule - Save X/Twitter Threads & Articles as Markdown for LLMs + Offline HTML
 // @namespace    https://github.com/wolfgang-aura/SourceCapsule
-// @version      1.4.1
+// @version      1.5.0
 // @description  One click saves an X (Twitter) thread, Article, or post as clean Markdown for LLM context (Claude, ChatGPT) plus a self-contained offline HTML archive - images, video, and quoted posts embedded, with honest completeness reporting. Local-first, with optional expiring AI readable links.
 // @author       wolfgang-aura
 // @license      MIT
@@ -207,7 +207,7 @@
   };
 
   const APP = 'SourceCapsule';
-  const VERSION = '1.4.1';
+  const VERSION = '1.5.0';
 
   // ===========================================================================
   // Small utilities
@@ -6632,6 +6632,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   // { quotedId, quotedHandle }. Survives SPA navigations, capped like note tweets.
   const capturedQuotedRefs = new Map();
   const CAPTURED_QUOTED_REFS_MAX = 600;
+  // Reply ids passively inventoried from SearchTimeline responses X fetched for its own
+  // Latest-search UI. These let the reply probe distinguish a DOM miss from a reply whose
+  // identity X never delivered at all. Keyed by `<conversationId>:<statusId>`.
+  const capturedSearchTimelineReplies = new Map();
+  const CAPTURED_SEARCH_TIMELINE_REPLIES_MAX = 5000;
   const networkCaptureDiagnostics = {
     installed: false,
     mode: 'not-installed',
@@ -6644,6 +6649,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     candidates: 0,
     noteTweets: 0,
     quotedRefs: 0,
+    searchTimelineReplies: 0,
     truncatedResponses: 0,
     lastTruncatedUrl: '',
     errors: [],
@@ -6943,6 +6949,164 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return capturedQuotedRefs.get(String(parentStatusId || '')) || null;
   }
 
+  /** Full long-form ("note") text hanging off a GraphQL tweet result, if X sent one. */
+  function replyNoteTextFromResult(result) {
+    const note = result && result.note_tweet;
+    if (!note || typeof note !== 'object') return '';
+    const inner = (note.note_tweet_results && note.note_tweet_results.result) || note;
+    return String((inner && (inner.text || inner.full_text)) || '');
+  }
+
+  /**
+   * Media LINKS for a reply out of a GraphQL `legacy` block. Unlike the DOM path this
+   * can name the actual MP4, so a video reply keeps both a playable source and a poster.
+   * Still links only - the archive never downloads reply media bytes.
+   */
+  function replyMediaLinksFromLegacy(legacy) {
+    const media =
+      (legacy && legacy.extended_entities && legacy.extended_entities.media) ||
+      (legacy && legacy.entities && legacy.entities.media) ||
+      [];
+    if (!Array.isArray(media)) return [];
+    const links = [];
+    const seen = new Set();
+    media.forEach((item) => {
+      if (!item || typeof item !== 'object') return;
+      const poster = safeUrl(item.media_url_https || item.media_url || '');
+      const type = String(item.type || 'photo');
+      if (type === 'photo') {
+        const url = poster && highResImageUrl(poster);
+        if (url && !seen.has(url)) {
+          seen.add(url);
+          links.push({ type: 'image', url, permalink: safeUrl(item.expanded_url || '') || '' });
+        }
+        return;
+      }
+      // Bitrate-sorted variants: the highest-bitrate MP4 is the archival one.
+      const variants = (item.video_info && item.video_info.variants) || [];
+      const best = (Array.isArray(variants) ? variants : [])
+        .filter((variant) => variant && /mp4/i.test(String(variant.content_type || '')))
+        .sort((a, b) => (Number(b.bitrate) || 0) - (Number(a.bitrate) || 0))[0];
+      const url = safeUrl((best && best.url) || '') || poster;
+      if (!url || seen.has(url)) return;
+      seen.add(url);
+      links.push({
+        type: type === 'animated_gif' ? 'gif' : 'video',
+        url,
+        poster: poster || '',
+      });
+    });
+    return links;
+  }
+
+  function searchTimelineReplyRecordsFromCapturedBody(body) {
+    const raw = String(body || '').trim();
+    if (!raw || (raw[0] !== '{' && raw[0] !== '[') || !/conversation_id_str/.test(raw)) {
+      return [];
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+    const records = new Map();
+    const seen = new Set();
+    const visit = (value) => {
+      if (!value || typeof value !== 'object' || seen.has(value)) return;
+      seen.add(value);
+      if (Array.isArray(value)) {
+        value.forEach(visit);
+        return;
+      }
+      const legacy = value.legacy && typeof value.legacy === 'object' ? value.legacy : null;
+      const id = String(value.rest_id || (legacy && legacy.id_str) || '');
+      const conversationId = String((legacy && legacy.conversation_id_str) || '');
+      if (/^\d+$/.test(id) && /^\d+$/.test(conversationId)) {
+        const userResult =
+          value.core &&
+          value.core.user_results &&
+          value.core.user_results.result &&
+          (value.core.user_results.result.user || value.core.user_results.result);
+        const userLegacy = (userResult && userResult.legacy) || {};
+        // X moved screen_name/name out of the user's `legacy` block and into
+        // `user_results.result.core`. Live capture returned empty handles for every
+        // reply until this fallback existed; check both, newest shape first.
+        const userCore = (userResult && userResult.core) || {};
+        const handle = String(userCore.screen_name || userLegacy.screen_name || '');
+        const displayName = String(userCore.name || userLegacy.name || '');
+        // GraphQL delivers reply bodies with &, <, > HTML-encoded, exactly like
+        // syndication does. Live archive Markdown showed "-&gt;" inside real replies.
+        const previewText = decodeBasicEntities((legacy && (legacy.full_text || legacy.text)) || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        // A long reply arrives as a truncated `full_text` plus the real body in
+        // `note_tweet`. The note always wins; otherwise the archive would store an
+        // ellipsis where the reply's actual content should be.
+        const noteText = decodeBasicEntities(replyNoteTextFromResult(value) || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        const text = noteText || previewText;
+        const unavailable = /Tombstone|Unavailable/i.test(String(value.__typename || ''));
+        const existing = records.get(id);
+        if (
+          !existing ||
+          (!existing.handle && handle) ||
+          String(existing.text || '').length < text.length
+        ) {
+          records.set(id, {
+            ...(existing || {}),
+            id,
+            conversationId,
+            handle,
+            displayName: displayName || (existing && existing.displayName) || '',
+            url: handle
+              ? `https://x.com/${handle}/status/${id}`
+              : `https://x.com/i/web/status/${id}`,
+            text: text.slice(0, REPLY_ARCHIVE_TEXT_MAX),
+            truncated: !noteText && /[…]$/.test(previewText),
+            createdAt: safeIsoTime((legacy && legacy.created_at) || ''),
+            parentId: String((legacy && legacy.in_reply_to_status_id_str) || ''),
+            mediaLinks: replyMediaLinksFromLegacy(legacy),
+            unavailable,
+            unavailableReason: unavailable ? String(value.__typename || 'unavailable') : '',
+          });
+        }
+      }
+      Object.values(value).forEach(visit);
+    };
+    visit(parsed);
+    return Array.from(records.values());
+  }
+
+  function rememberCapturedSearchTimelineReply(record) {
+    if (!record || !/^\d+$/.test(record.id) || !/^\d+$/.test(record.conversationId)) return;
+    const key = `${record.conversationId}:${record.id}`;
+    const existing = capturedSearchTimelineReplies.get(key) || {};
+    if (
+      !existing.id &&
+      capturedSearchTimelineReplies.size >= CAPTURED_SEARCH_TIMELINE_REPLIES_MAX
+    ) {
+      capturedSearchTimelineReplies.delete(capturedSearchTimelineReplies.keys().next().value);
+    }
+    capturedSearchTimelineReplies.set(key, {
+      ...existing,
+      ...record,
+      handle: record.handle || existing.handle || '',
+      url: record.url || existing.url || '',
+      text: record.text || existing.text || '',
+      seenAt: new Date().toISOString(),
+    });
+    networkCaptureDiagnostics.searchTimelineReplies = capturedSearchTimelineReplies.size;
+  }
+
+  function getCapturedSearchTimelineReplies(conversationId) {
+    const root = String(conversationId || '');
+    return Array.from(capturedSearchTimelineReplies.values()).filter(
+      (record) => record.conversationId === root
+    );
+  }
+
   /** Full note text -> paragraph blocks (escaped, t.co urls linkified, \n-split). */
   function noteTweetParagraphBlocks(note) {
     let html = escapeHtml(decodeBasicEntities(String(note.text || '').trim()));
@@ -7069,6 +7233,13 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (quotedRefs.length) {
       quotedRefs.forEach(rememberCapturedQuotedRef);
       log('captured quoted-post refs for', quotedRefs.length, 'parent(s) from', payload.url || '');
+    }
+    if (/SearchTimeline|TweetDetail|TweetResult/i.test(payload.url || '')) {
+      const replies = searchTimelineReplyRecordsFromCapturedBody(payload.body || '');
+      replies.forEach(rememberCapturedSearchTimelineReply);
+      if (replies.length) {
+        log('inventoried conversation ids for', replies.length, 'network-delivered post(s)');
+      }
     }
     return candidates;
   }
@@ -8215,34 +8386,36 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return model;
   }
 
-  // The export choices offered by every Export control, grouped: save variants,
-  // then share/clipboard, then loose file downloads. The primary trigger button
-  // already quick-saves, so the menu holds only the variants - and the single
-  // "HTML + Markdown" download covers the removed HTML-only/Markdown-only modes
-  // (the engine still supports the 'html' and 'md' keys).
+  // The export choices offered by every Export control. The menu is deliberately
+  // short: a ten-item drop-down made the common actions hard to find, so only the
+  // ones worth a click of their own are listed.
+  //
+  // Removed from the MENU, not from the engine: 'library-share' was just "save,
+  // then share" - two items that are already here - and 'both' (the HTML + Markdown
+  // ZIP) is a fallback for non-Chromium, which "Save to library" already falls back
+  // to on its own. runExport still honours 'library-share', 'both', 'html' and 'md',
+  // so the extension popup and any saved automation keep working.
   const EXPORT_TYPES = [
     { key: 'library', label: 'Save to library' },
     { key: 'library-note', label: 'Save with note / tags' },
     { divider: true },
     { key: 'copy', label: 'Copy clean Markdown' },
     { key: 'share', label: 'Create AI readable link' },
-    { key: 'library-share', label: 'Save locally + create AI link' },
-    { divider: true },
-    { key: 'both', label: 'Download ZIP (HTML + Markdown)' },
   ];
   const POST_EXPORT_TYPES = [
     { key: 'library-note', label: 'Save with note / tags' },
-    { divider: true },
     { key: 'copy', label: 'Copy Markdown' },
     { key: 'share', label: 'Create AI readable link' },
-    { key: 'library-share', label: 'Save locally + create AI link' },
-    { divider: true },
-    { key: 'both', label: 'Download ZIP (HTML + Markdown)' },
   ];
+  // Which X surface the probe scrolls is an implementation detail of how X paginates
+  // replies, not a choice a reader should have to make - and picking only one gives
+  // up the coverage the others contribute. One item runs all three and merges.
   const THREAD_EXPORT_TYPES = [
     { key: 'library-thread', label: 'Save full thread' },
-    { divider: true },
     ...POST_EXPORT_TYPES,
+    { divider: true },
+    { key: 'reply-probe', label: 'Capture replies (experimental)' },
+    { key: 'reply-archive-download', label: 'Download reply archive' },
   ];
 
   function exportTypeNeedsCaptureOptions(exportType) {
@@ -8254,6 +8427,1757 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       exportType: exportType === 'library-thread' ? 'library' : exportType,
       includeThread: exportType === 'library-thread',
     };
+  }
+
+  // Per-reply text cap. Generous enough for long-form replies, bounded so one abusive
+  // reply cannot blow the archive's storage budget on its own.
+  const REPLY_ARCHIVE_TEXT_MAX = 12000;
+  const REPLY_PROBE_PENDING_KEY = 'sourcecapsule:reply-probe:pending';
+  const REPLY_PROBE_LAST_KEY = 'sourcecapsule:reply-probe:last';
+  const REPLY_PROBE_HISTORY_KEY = 'sourcecapsule:reply-probe:history';
+  const REPLY_PROBE_HISTORY_ROOT_MAX = 10;
+
+  function replyProbeSearchUrl(statusId, surface = 'latest') {
+    const id = String(statusId || '');
+    if (!/^\d+$/.test(id)) return '';
+    const query = encodeURIComponent(`conversation_id:${id}`);
+    const mode = surface === 'top' ? '' : '&f=live';
+    return `${location.origin}/search?q=${query}&src=typed_query${mode}`;
+  }
+
+  function displayedReplyCount(tweetEl) {
+    const button = Array.from((tweetEl && tweetEl.querySelectorAll('button')) || []).find((item) =>
+      /\brepl(?:y|ies)\b/i.test(item.getAttribute('aria-label') || '')
+    );
+    const label = button && button.getAttribute('aria-label');
+    const match = String(label || '').match(/([\d,]+)\s+repl(?:y|ies)/i);
+    return match ? Number(match[1].replace(/,/g, '')) || 0 : 0;
+  }
+
+  /**
+   * Display name out of a User-Name block, without the trailing @handle.
+   * `authorFromNameBlock` relies on X's newline-separated `innerText`, which jsdom (and
+   * some userscript hosts reading `textContent`) never produce - so "Reply Person@replier"
+   * would leak into the archive as the author's name. Strip from the first @token.
+   */
+  function replyDisplayNameFromTweet(tweetEl) {
+    const nameBlock = pick(tweetEl, CONFIG.selectors.userName, { quiet: true });
+    if (!nameBlock) return '';
+    const line =
+      String(nameBlock.innerText || nameBlock.textContent || '')
+        .split('\n')
+        .map((part) => part.trim())
+        .filter(Boolean)[0] || '';
+    const handleMatch = line.match(/@[A-Za-z0-9_]+/);
+    return (handleMatch ? line.slice(0, handleMatch.index) : line).replace(/[·•]\s*$/, '').trim();
+  }
+
+  /**
+   * Media LINKS for one reply. Deliberately links, never bytes: a 1,000-reply archive
+   * that inlined media would be gigabytes, so the archive records where the media lives
+   * and lets the reader follow it. Videos contribute their poster still only - the DOM
+   * never exposes an MP4 URL (that lives in the GraphQL payload; see the network path).
+   */
+  function replyMediaLinksFromTweet(tweetEl) {
+    const links = [];
+    const seen = new Set();
+    const add = (type, url, extra = {}) => {
+      const safe = safeUrl(url);
+      if (!safe || seen.has(safe)) return;
+      seen.add(safe);
+      links.push({ type, url: safe, ...extra });
+    };
+    pickAll(tweetEl, CONFIG.selectors.tweetPhoto).forEach((img) => {
+      if (img && img.src) add('image', highResImageUrl(img.src));
+    });
+    pickAll(tweetEl, CONFIG.selectors.videoPlayer).forEach((player) => {
+      const video = player.querySelector('video[poster]') || player.querySelector('video');
+      const poster = video && video.getAttribute('poster');
+      if (poster) add('video-poster', poster);
+    });
+    return links;
+  }
+
+  function replyProbeTweetRecord(tweetEl) {
+    if (!tweetEl) return null;
+    // Promoted posts in timelines commonly have status/analytics links but no timestamp.
+    // Requiring X's canonical time link prevents ads from inflating the probe count.
+    const time = tweetEl.querySelector('a[href*="/status/"] time');
+    const anchor = time && time.closest('a');
+    const id = anchor && statusIdFromUrl(anchor.getAttribute('href') || anchor.href);
+    if (!id) return null;
+    let pathname = '';
+    try {
+      pathname = new URL(anchor.href, location.origin).pathname;
+    } catch {
+      pathname = anchor.getAttribute('href') || '';
+    }
+    const handleMatch = pathname.match(/^\/([^/]+)\/status\/\d+/);
+    const textEl = pick(tweetEl, CONFIG.selectors.tweetText, { quiet: true });
+    const text = String((textEl && textEl.textContent) || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const datetime = String(time.getAttribute('datetime') || '');
+    const seenAt = new Date().toISOString();
+    return {
+      id,
+      handle: handleMatch ? handleMatch[1] : '',
+      displayName: replyDisplayNameFromTweet(tweetEl),
+      url: normalizeStatusUrl(anchor.href),
+      text: text.slice(0, REPLY_ARCHIVE_TEXT_MAX),
+      // X truncates long replies in the timeline DOM; the GraphQL note text wins later.
+      truncated: /[…]$/.test(text) || text.length > REPLY_ARCHIVE_TEXT_MAX,
+      createdAt: datetime,
+      mediaLinks: replyMediaLinksFromTweet(tweetEl),
+      seenAt,
+      firstSeenAt: seenAt,
+      lastSeenAt: seenAt,
+    };
+  }
+
+  function captureVisibleReplyProbeTweets(records, rootStatusId, options = {}) {
+    let added = 0;
+    const column =
+      options.column || pick(document, CONFIG.selectors.primaryColumn, { quiet: true });
+    const tweetEls = topLevelTweetEls(column || document).sort(compareDocumentOrder);
+    for (const tweetEl of tweetEls) {
+      if (options.surface === 'relevant' && column && hasThreadBoundaryBefore(tweetEl, column)) {
+        break;
+      }
+      const record = replyProbeTweetRecord(tweetEl);
+      if (!record || record.id === String(rootStatusId || '') || records.has(record.id)) continue;
+      record.provenance = 'dom-observed';
+      record.discoveredSurface = options.surface || replyProbeSurfaceFromUrl(location.href);
+      record.discoveredSurfaces = [record.discoveredSurface];
+      records.set(record.id, record);
+      added += 1;
+    }
+    return added;
+  }
+
+  /**
+   * Should the probe keep waiting instead of concluding "no-results"?
+   *
+   * Counted in REPLIES, never in tweets. The first version counted every rendered
+   * tweet, which is 0 only on a search surface: on a focused post ("Relevant") the
+   * root post always renders, so the count was 1 from the first tick and the grace
+   * window could never apply to the surface that needs it most. Run live against a
+   * ~1,000-reply conversation, that ended the probe after 13 seconds with zero DOM
+   * replies captured.
+   */
+  function replyProbeStillWarmingUp(visibleReplies, elapsedMs, emptyGraceMs) {
+    return Number(visibleReplies) === 0 && Number(elapsedMs) < Number(emptyGraceMs);
+  }
+
+  /**
+   * Empty placeholder records for every reply id the audit knows about but the
+   * archive has no body for.
+   *
+   * This is the difference between an id inventory and an archive. Measured live on
+   * 2026-08-17: the audit held 1,094 ids (1,087 of them seen in the DOM, with handle
+   * and permalink) while the archive held 79 bodies - because those ids were observed
+   * in runs where the archive was broken or did not exist yet. The ids survived; the
+   * content did not. Seeding them lets the syndication round fetch the bodies, which
+   * is the only path from "we saw 1,087 replies" to "we have 1,087 replies".
+   *
+   * Prefers the full inventory and falls back to knownGaps for older audit payloads.
+   */
+  function replyArchiveGapSeeds(gapReport, rootStatusId, existingRecords = [], surface = '') {
+    const root = String(rootStatusId || '');
+    const withBody = new Set(
+      (existingRecords || [])
+        .filter((record) => record && String(record.text || '').trim())
+        .map((record) => String(record.id))
+    );
+    const alreadySeeded = new Set(
+      (existingRecords || []).map((record) => String(record && record.id))
+    );
+    const source =
+      (gapReport && gapReport.inventory && gapReport.inventory.length && gapReport.inventory) ||
+      (gapReport && gapReport.knownGaps) ||
+      [];
+    const seen = new Set();
+    return source
+      .map((entry) => (entry && typeof entry === 'object' ? entry : { id: entry }))
+      .filter((entry) => {
+        const id = String(entry.id || entry.replyId || '');
+        if (!/^\d+$/.test(id) || id === root) return false;
+        if (withBody.has(id) || alreadySeeded.has(id) || seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      })
+      .map((entry) => {
+        const id = String(entry.id || entry.replyId);
+        return {
+          id,
+          conversationId: root,
+          // Keep whatever the audit already knows; recovery overwrites with the real body.
+          handle: String(entry.handle || ''),
+          url: String(entry.url || '') || `https://x.com/i/web/status/${id}`,
+          text: '',
+          provenance: entry.provenance || 'network-confirmed',
+          discoveredSurfaces: entry.discoveredSurfaces || (surface ? [surface] : []),
+        };
+      });
+  }
+
+  function replyProbeConversationBoundaryVisible(root = document) {
+    const selector = CONFIG.selectors.threadBoundaryHeading.join(',');
+    return Array.from((root && root.querySelectorAll(selector)) || []).some((heading) =>
+      THREAD_BOUNDARY_TEXT.test(String(heading.textContent || '').replace(/\s+/g, ' '))
+    );
+  }
+
+  function readReplyProbePending() {
+    try {
+      const value = JSON.parse(sessionStorage.getItem(REPLY_PROBE_PENDING_KEY) || 'null');
+      if (!value || !/^\d+$/.test(String(value.rootStatusId || ''))) return null;
+      return value;
+    } catch {
+      return null;
+    }
+  }
+
+  function readReplyProbeHistory() {
+    try {
+      const value = JSON.parse(localStorage.getItem(REPLY_PROBE_HISTORY_KEY) || '[]');
+      return Array.isArray(value) ? value : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function replyProbeSurfaceFromUrl(url) {
+    try {
+      const parsed = new URL(String(url || ''), location.origin);
+      if (/\/status\/\d+/.test(parsed.pathname)) return 'relevant';
+      return parsed.searchParams.get('f') === 'live' ? 'latest' : 'top';
+    } catch {
+      return 'latest';
+    }
+  }
+
+  function compactReplyProbeHistoryEntry(result) {
+    const surface = result.surface || replyProbeSurfaceFromUrl(result.sourceUrl);
+    const compactRecord = (record, provenance) => {
+      const discoveredSurfaces = Array.from(
+        new Set(
+          [
+            ...(Array.isArray(record.discoveredSurfaces) ? record.discoveredSurfaces : []),
+            record.discoveredSurface,
+            surface,
+          ].filter(Boolean)
+        )
+      ).sort();
+      return {
+        id: String(record.id || ''),
+        handle: String(record.handle || ''),
+        url: String(record.url || ''),
+        provenance: String(record.provenance || provenance),
+        discoveredSurface: discoveredSurfaces[0] || surface,
+        discoveredSurfaces,
+      };
+    };
+    return {
+      contractVersion: 2,
+      rootStatusId: result.rootStatusId,
+      surface,
+      runCount: 1,
+      expectedDisplayedReplies: result.expectedDisplayedReplies,
+      uniquePostsCaptured: result.uniquePostsCaptured,
+      knownReplyIds: result.gapReport ? result.gapReport.knownReplyIds : 0,
+      knownGapCount: result.gapReport ? result.gapReport.knownGaps.length : 0,
+      unidentifiedResidual: result.gapReport ? result.gapReport.unidentifiedResidual : 0,
+      startedAt: result.startedAt,
+      finishedAt: result.finishedAt,
+      elapsedMs: result.elapsedMs,
+      stopReason: result.stopReason,
+      sourceUrl: result.sourceUrl,
+      records: (result.records || []).map((record) => compactRecord(record, 'dom-observed')),
+      networkRecords: (result.networkRecords || []).map((record) =>
+        compactRecord(record, 'network-confirmed')
+      ),
+    };
+  }
+
+  function mergeReplyProbeRecordLists(existing = [], incoming = []) {
+    const byId = new Map();
+    [...existing, ...incoming].forEach((record) => {
+      const id = String((record && record.id) || '');
+      if (!/^\d+$/.test(id)) return;
+      const prior = byId.get(id) || {};
+      const discoveredSurfaces = Array.from(
+        new Set(
+          [
+            ...(Array.isArray(prior.discoveredSurfaces) ? prior.discoveredSurfaces : []),
+            prior.discoveredSurface,
+            ...(Array.isArray(record.discoveredSurfaces) ? record.discoveredSurfaces : []),
+            record.discoveredSurface,
+          ].filter(Boolean)
+        )
+      ).sort();
+      byId.set(id, {
+        ...prior,
+        ...record,
+        id,
+        handle: record.handle || prior.handle || '',
+        url: record.url || prior.url || '',
+        provenance: record.provenance || prior.provenance || '',
+        discoveredSurface: discoveredSurfaces[0] || '',
+        discoveredSurfaces,
+      });
+    });
+    return Array.from(byId.values()).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  }
+
+  function mergeReplyProbeHistory(history, incoming) {
+    const byKey = new Map();
+    [...(history || []), incoming].filter(Boolean).forEach((entry) => {
+      const rootStatusId = String(entry.rootStatusId || '');
+      const surface = entry.surface || replyProbeSurfaceFromUrl(entry.sourceUrl);
+      if (!/^\d+$/.test(rootStatusId)) return;
+      const key = `${rootStatusId}:${surface}`;
+      const prior = byKey.get(key);
+      if (!prior) {
+        byKey.set(key, {
+          ...entry,
+          contractVersion: 2,
+          rootStatusId,
+          surface,
+          runCount: Math.max(1, Number(entry.runCount) || 1),
+          records: mergeReplyProbeRecordLists([], entry.records),
+          networkRecords: mergeReplyProbeRecordLists([], entry.networkRecords),
+        });
+        return;
+      }
+      const records = mergeReplyProbeRecordLists(prior.records, entry.records);
+      const networkRecords = mergeReplyProbeRecordLists(prior.networkRecords, entry.networkRecords);
+      byKey.set(key, {
+        ...prior,
+        ...entry,
+        contractVersion: 2,
+        rootStatusId,
+        surface,
+        runCount: (Number(prior.runCount) || 1) + (Number(entry.runCount) || 1),
+        startedAt:
+          [prior.startedAt, entry.startedAt].filter(Boolean).sort()[0] || entry.startedAt || '',
+        finishedAt:
+          [prior.finishedAt, entry.finishedAt].filter(Boolean).sort().pop() ||
+          entry.finishedAt ||
+          '',
+        records,
+        networkRecords,
+        uniquePostsCaptured: records.length,
+        knownReplyIds: new Set([
+          ...records.map((record) => record.id),
+          ...networkRecords.map((record) => record.id),
+        ]).size,
+      });
+    });
+    const merged = Array.from(byKey.values()).sort((a, b) =>
+      String(b.finishedAt || '').localeCompare(String(a.finishedAt || ''))
+    );
+    const retainedRoots = [];
+    merged.forEach((entry) => {
+      if (!retainedRoots.includes(entry.rootStatusId)) retainedRoots.push(entry.rootStatusId);
+    });
+    const allowedRoots = new Set(retainedRoots.slice(0, REPLY_PROBE_HISTORY_ROOT_MAX));
+    return merged.filter((entry) => allowedRoots.has(entry.rootStatusId));
+  }
+
+  function writeReplyProbeResult(result) {
+    try {
+      localStorage.setItem(REPLY_PROBE_LAST_KEY, JSON.stringify(result));
+      const history = readReplyProbeHistory();
+      localStorage.setItem(
+        REPLY_PROBE_HISTORY_KEY,
+        JSON.stringify(mergeReplyProbeHistory(history, compactReplyProbeHistoryEntry(result)))
+      );
+    } catch (error) {
+      result.storageError = String((error && error.message) || error || 'storage failed');
+    }
+  }
+
+  function buildReplyGapReport({
+    rootStatusId,
+    expectedDisplayedReplies = 0,
+    domRecords = new Map(),
+    networkRecords = [],
+    history = [],
+    surface = 'latest',
+  }) {
+    const root = String(rootStatusId || '');
+    const completeById = new Map();
+    const mergeRecord = (prior = {}, record = {}, fallbackSurface = surface) => {
+      const discoveredSurfaces = Array.from(
+        new Set(
+          [
+            ...(Array.isArray(prior.discoveredSurfaces) ? prior.discoveredSurfaces : []),
+            prior.discoveredSurface,
+            ...(Array.isArray(record.discoveredSurfaces) ? record.discoveredSurfaces : []),
+            record.discoveredSurface,
+            fallbackSurface,
+          ].filter(Boolean)
+        )
+      ).sort();
+      return {
+        ...prior,
+        ...record,
+        handle: record.handle || prior.handle || '',
+        url: record.url || prior.url || '',
+        discoveredSurface: discoveredSurfaces[0] || fallbackSurface,
+        discoveredSurfaces,
+      };
+    };
+    if (domRecords instanceof Map) {
+      domRecords.forEach((record, id) =>
+        completeById.set(String(id), mergeRecord(completeById.get(String(id)), record, surface))
+      );
+    }
+    const surfaces = new Set([surface]);
+    (history || []).forEach((entry) => {
+      if (!entry || String(entry.rootStatusId || '') !== root) return;
+      const entrySurface = entry.surface || replyProbeSurfaceFromUrl(entry.sourceUrl);
+      surfaces.add(entrySurface);
+      (entry.records || []).forEach((record) => {
+        if (record && /^\d+$/.test(String(record.id || ''))) {
+          const id = String(record.id);
+          completeById.set(id, mergeRecord(completeById.get(id), record, entrySurface));
+        }
+      });
+    });
+    const completeIds = new Set(completeById.keys());
+    completeIds.delete(root);
+    const networkById = new Map();
+    const addNetworkRecord = (record, discoveredSurface = surface) => {
+      if (
+        !record ||
+        record.id === root ||
+        (record.conversationId && String(record.conversationId) !== root) ||
+        !/^\d+$/.test(String(record.id || ''))
+      )
+        return;
+      const id = String(record.id);
+      const existing = networkById.get(id) || {};
+      const handle = record.handle || existing.handle || '';
+      networkById.set(
+        id,
+        mergeRecord(
+          existing,
+          {
+            ...existing,
+            ...record,
+            id,
+            conversationId: root,
+            handle,
+            url:
+              record.url ||
+              existing.url ||
+              (handle
+                ? `https://x.com/${handle}/status/${id}`
+                : `https://x.com/i/web/status/${id}`),
+            discoveredSurface: record.discoveredSurface || discoveredSurface,
+          },
+          discoveredSurface
+        )
+      );
+    };
+    (networkRecords || []).forEach((record) => addNetworkRecord(record, surface));
+    (history || []).forEach((entry) => {
+      if (!entry || String(entry.rootStatusId || '') !== root) return;
+      const entrySurface = entry.surface || replyProbeSurfaceFromUrl(entry.sourceUrl);
+      (entry.networkRecords || []).forEach((record) => addNetworkRecord(record, entrySurface));
+    });
+    const knownIds = new Set([...completeIds, ...networkById.keys()]);
+    const inventory = Array.from(knownIds)
+      .map((id) => {
+        const domRecord = completeById.get(id);
+        const networkRecord = networkById.get(id);
+        const record = mergeRecord(domRecord, networkRecord, surface);
+        const captureStatus = domRecord ? 'captured' : 'network-only';
+        const provenance = domRecord
+          ? networkRecord
+            ? 'network-confirmed+dom'
+            : 'dom-only'
+          : 'network-confirmed';
+        return {
+          ...record,
+          id,
+          conversationId: root,
+          captureStatus,
+          provenance,
+          reason: domRecord
+            ? 'seen-in-dom'
+            : record.unavailable
+              ? record.unavailableReason || 'unavailable'
+              : record.text
+                ? 'not-seen-in-dom'
+                : 'missing-text',
+        };
+      })
+      .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+    const knownGaps = inventory.filter((record) => record.captureStatus === 'network-only');
+    const expected = Math.max(0, Number(expectedDisplayedReplies) || 0);
+    return {
+      contractVersion: 2,
+      rootStatusId: root,
+      surface,
+      surfaces: Array.from(surfaces).sort(),
+      expectedDisplayedReplies: expected,
+      publicReplyCountReference: expected,
+      publicReplyCountComparable: false,
+      completeDomRecords: completeIds.size,
+      domObservedUnion: completeIds.size,
+      networkReplyIds: networkById.size,
+      knownReplyIds: knownIds.size,
+      knownConversationIds: knownIds.size,
+      inventory,
+      knownGaps,
+      unidentifiedResidual: null,
+    };
+  }
+
+  function csvCell(value) {
+    const text = String(value == null ? '' : value);
+    return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  }
+
+  function replyGapReportCsv(report) {
+    const columns = [
+      'record_type',
+      'reply_id',
+      'url',
+      'handle',
+      'provenance',
+      'surfaces',
+      'capture_status',
+      'reason',
+      'conversation_id',
+      'text_preview',
+    ];
+    const summary = [
+      'summary',
+      '',
+      '',
+      '',
+      '',
+      '',
+      'summary',
+      `surfaces=${(report.surfaces || []).join('+')}; x_public_reply_count_reference=${report.publicReplyCountReference || 0}; not_completeness_denominator=true; best_effort=true; cannot_detect=deleted+private+never-delivered; dom_observed_union=${report.domObservedUnion}; known_conversation_ids=${report.knownConversationIds}; network_only_gaps=${report.knownGaps.length}`,
+      report.rootStatusId,
+      '',
+    ];
+    const rows = (report.inventory || report.knownGaps || []).map((record) => [
+      record.captureStatus === 'network-only' ? 'known-gap' : 'captured',
+      record.id,
+      record.url,
+      record.handle,
+      record.provenance,
+      (record.discoveredSurfaces || [record.discoveredSurface]).filter(Boolean).join('+'),
+      record.captureStatus,
+      record.reason,
+      record.conversationId,
+      String(record.text || '').slice(0, 500),
+    ]);
+    return `\ufeff${[columns, summary, ...rows]
+      .map((row) => row.map(csvCell).join(','))
+      .join('\r\n')}\r\n`;
+  }
+
+  function downloadReplyGapReport(result) {
+    const report = result && result.gapReport;
+    if (!report) return false;
+    const filename = `sourcecapsule-reply-gaps-${report.rootStatusId || 'unknown'}.csv`;
+    downloadBlob(
+      filename,
+      new Blob([replyGapReportCsv(report)], { type: 'text/csv;charset=utf-8' })
+    );
+    return true;
+  }
+
+  function buildStoredReplyAudit(
+    rootStatusId,
+    publicReplyCountReference = 0,
+    networkRecords = getCapturedSearchTimelineReplies(rootStatusId),
+    history = readReplyProbeHistory()
+  ) {
+    const gapReport = buildReplyGapReport({
+      rootStatusId,
+      expectedDisplayedReplies: publicReplyCountReference,
+      domRecords: new Map(),
+      networkRecords,
+      history,
+      surface: 'relevant',
+    });
+    return {
+      contractVersion: 2,
+      rootStatusId: String(rootStatusId || ''),
+      surface: 'combined',
+      expectedDisplayedReplies: Number(publicReplyCountReference) || 0,
+      gapReport,
+    };
+  }
+
+  // NOTE: the standalone "download reply audit CSV" action was removed when the archive
+  // shipped - the audit is now the receipt section inside the archive's Markdown, and
+  // the gap rows are listed there by id. `buildStoredReplyAudit` stays as the shared
+  // report builder (and remains covered by tests).
+
+  // -------------------------------------------------------------------------
+  // Reply ARCHIVE.
+  //
+  // The auditor above answers "which reply IDs exist?". This answers the thing
+  // that actually ships: "what did they SAY?". Every reply keeps its full text,
+  // author, timestamp, parent, and media links, merged across every surface and
+  // every re-run so content can only ever accumulate - never be overwritten by a
+  // later, thinner sighting of the same reply.
+  // -------------------------------------------------------------------------
+
+  const REPLY_ARCHIVE_KEY_PREFIX = 'sourcecapsule:reply-archive:';
+  const REPLY_ARCHIVE_DB = 'sourcecapsule';
+  const REPLY_ARCHIVE_TABLE = 'reply-archive';
+
+  /**
+   * The identity of the underlying asset, not of the URL string that happens to name it.
+   *
+   * X serves one image under several interchangeable URLs: with and without a file
+   * extension before the query (`/media/<id>?format=jpg` vs `/media/<id>.jpg?format=jpg`)
+   * and at different `name=` renditions. The DOM and GraphQL layers each prefer a
+   * different form, so keying on the raw string recorded every image both layers saw
+   * twice - measured live at 311 image links covering 162 distinct images.
+   *
+   * Only the known twimg shapes are canonicalised; any other URL keeps its full string,
+   * because dropping a query from an arbitrary host could merge genuinely distinct media.
+   */
+  function replyArchiveMediaIdentity(url) {
+    const raw = String(url || '');
+    const image = raw.match(/^https?:\/\/pbs\.twimg\.com\/([^?#]+?)(?:\.[A-Za-z0-9]+)?(?:[?#]|$)/);
+    if (image) return `pbs:${image[1]}`;
+    const video = raw.match(/^https?:\/\/video\.twimg\.com\/([^?#]+)/);
+    if (video) return `video:${video[1]}`;
+    return raw;
+  }
+
+  function replyArchiveMediaKey(media) {
+    return `${media.type || ''}|${replyArchiveMediaIdentity(media.url)}`;
+  }
+
+  /** Prefer the full-size rendition when two URLs name the same asset. */
+  function richerMediaUrl(existing, incoming) {
+    if (!existing) return incoming;
+    if (!incoming) return existing;
+    const orig = (url) => /[?&]name=orig(?:&|$)/.test(String(url));
+    if (orig(incoming) && !orig(existing)) return incoming;
+    return existing;
+  }
+
+  function mergeReplyMediaLinks(prior = [], incoming = []) {
+    const byKey = new Map();
+    [...(Array.isArray(prior) ? prior : []), ...(Array.isArray(incoming) ? incoming : [])].forEach(
+      (media) => {
+        if (!media || !media.url) return;
+        const key = replyArchiveMediaKey(media);
+        const existing = byKey.get(key) || {};
+        byKey.set(key, {
+          ...existing,
+          ...media,
+          url: richerMediaUrl(existing.url, media.url),
+          poster: media.poster || existing.poster || '',
+          permalink: media.permalink || existing.permalink || '',
+        });
+      }
+    );
+    return Array.from(byKey.values());
+  }
+
+  /** Union the provenance atoms of two sightings without inventing a new vocabulary. */
+  function mergeReplyProvenance(...values) {
+    const atoms = values
+      .filter(Boolean)
+      .flatMap((value) => String(value).split('+'))
+      .filter(Boolean);
+    const hasDom = atoms.some((atom) => /dom/i.test(atom));
+    const hasNetwork = atoms.some((atom) => /network/i.test(atom));
+    const hasSyndication = atoms.some((atom) => /syndication/i.test(atom));
+    const parts = [];
+    if (hasNetwork) parts.push('network-confirmed');
+    if (hasDom) parts.push(parts.length ? 'dom' : 'dom-observed');
+    if (hasSyndication) parts.push('syndication');
+    return parts.join('+') || atoms[0] || '';
+  }
+
+  /**
+   * Merge reply records by id. The invariant that matters: a field that already holds
+   * content is NEVER replaced by an empty one, and the LONGER text always wins (a
+   * truncated timeline preview must lose to the full note text). This is the exact
+   * defect that made the previous iteration an ID inventory instead of an archive.
+   */
+  function mergeReplyArchiveRecords(existing = [], incoming = []) {
+    const byId = new Map();
+    [...(existing || []), ...(incoming || [])].forEach((record) => {
+      if (!record) return;
+      const id = String(record.id || '');
+      if (!/^\d+$/.test(id)) return;
+      const prior = byId.get(id) || {};
+      const priorText = String(prior.text || '');
+      const nextText = String(record.text || '');
+      const text = nextText.length > priorText.length ? nextText : priorText;
+      const surfaces = Array.from(
+        new Set(
+          [
+            ...(Array.isArray(prior.discoveredSurfaces) ? prior.discoveredSurfaces : []),
+            prior.discoveredSurface,
+            ...(Array.isArray(record.discoveredSurfaces) ? record.discoveredSurfaces : []),
+            record.discoveredSurface,
+          ].filter(Boolean)
+        )
+      ).sort();
+      const seenTimes = [
+        prior.firstSeenAt,
+        prior.lastSeenAt,
+        prior.seenAt,
+        record.firstSeenAt,
+        record.lastSeenAt,
+        record.seenAt,
+      ]
+        .filter(Boolean)
+        .sort();
+      byId.set(id, {
+        ...prior,
+        ...record,
+        id,
+        handle: record.handle || prior.handle || '',
+        displayName: record.displayName || prior.displayName || '',
+        url:
+          record.url ||
+          prior.url ||
+          (record.handle || prior.handle
+            ? `https://x.com/${record.handle || prior.handle}/status/${id}`
+            : `https://x.com/i/web/status/${id}`),
+        text,
+        // Truncation is only still true if the winning text is itself the truncated one.
+        truncated: text === nextText ? Boolean(record.truncated) : Boolean(prior.truncated),
+        createdAt: record.createdAt || prior.createdAt || '',
+        parentId: record.parentId || prior.parentId || '',
+        conversationId: record.conversationId || prior.conversationId || '',
+        mediaLinks: mergeReplyMediaLinks(prior.mediaLinks, record.mediaLinks),
+        unavailable: Boolean(record.unavailable || prior.unavailable),
+        unavailableReason: record.unavailableReason || prior.unavailableReason || '',
+        provenance: mergeReplyProvenance(prior.provenance, record.provenance),
+        discoveredSurface: surfaces[0] || '',
+        discoveredSurfaces: surfaces,
+        firstSeenAt: seenTimes[0] || '',
+        lastSeenAt: seenTimes[seenTimes.length - 1] || '',
+      });
+    });
+    return Array.from(byId.values()).sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  }
+
+  /**
+   * IndexedDB-backed archive storage. Measured before choosing: a 1,000-reply
+   * conversation runs to a few MB once full text and media links are kept, and the
+   * history holds several roots - which overruns localStorage's ~5 MB origin quota and
+   * would fail as a silent QuotaExceededError. IndexedDB is the primary; localStorage is
+   * a last-resort fallback, and either way a write failure is RETURNED, never swallowed.
+   */
+  function indexedDbReplyArchiveBackend(factory) {
+    const idb =
+      factory ||
+      (typeof indexedDB !== 'undefined' && indexedDB) ||
+      (typeof window !== 'undefined' && window.indexedDB) ||
+      null;
+    if (!idb) return null;
+    const openAt = (version) =>
+      new Promise((resolve, reject) => {
+        let request;
+        try {
+          request = version ? idb.open(REPLY_ARCHIVE_DB, version) : idb.open(REPLY_ARCHIVE_DB);
+        } catch (error) {
+          reject(error);
+          return;
+        }
+        request.onupgradeneeded = () => {
+          const db = request.result;
+          if (!db.objectStoreNames.contains(REPLY_ARCHIVE_TABLE)) {
+            db.createObjectStore(REPLY_ARCHIVE_TABLE);
+          }
+        };
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error || new Error('indexedDB open failed'));
+      });
+    /**
+     * The `sourcecapsule` database is SHARED - the library root folder handle already
+     * lives in it under `handles`, created at version 1. Opening at a hard-coded
+     * version 1 therefore never fires onupgradeneeded on an existing install, the
+     * `reply-archive` store is never created, and every write dies with NotFoundError.
+     * So: open at whatever version exists, and only if our store is missing reopen at
+     * version+1 to add it (an upgrade preserves the stores already there).
+     */
+    const open = async () => {
+      const db = await openAt();
+      if (db.objectStoreNames.contains(REPLY_ARCHIVE_TABLE)) return db;
+      const nextVersion = (Number(db.version) || 1) + 1;
+      db.close();
+      return openAt(nextVersion);
+    };
+    const run = (mode, fn) =>
+      open().then(
+        (db) =>
+          new Promise((resolve, reject) => {
+            const tx = db.transaction(REPLY_ARCHIVE_TABLE, mode);
+            const request = fn(tx.objectStore(REPLY_ARCHIVE_TABLE));
+            tx.oncomplete = () => {
+              db.close();
+              resolve(request ? request.result : undefined);
+            };
+            tx.onabort = () => {
+              db.close();
+              reject(tx.error || new Error('indexedDB transaction aborted'));
+            };
+            tx.onerror = () => {
+              db.close();
+              reject(tx.error || new Error('indexedDB transaction failed'));
+            };
+          })
+      );
+    return {
+      name: 'indexeddb',
+      get: (key) => run('readonly', (store) => store.get(key)),
+      set: (key, value) => run('readwrite', (store) => store.put(value, key)).then(() => undefined),
+    };
+  }
+
+  function localStorageReplyArchiveBackend() {
+    return {
+      name: 'localstorage',
+      async get(key) {
+        return localStorage.getItem(key);
+      },
+      async set(key, value) {
+        localStorage.setItem(key, JSON.stringify(value));
+      },
+    };
+  }
+
+  function defaultReplyArchiveBackend() {
+    return indexedDbReplyArchiveBackend() || localStorageReplyArchiveBackend();
+  }
+
+  function createReplyArchiveStore(adapter) {
+    const backend = adapter || defaultReplyArchiveBackend();
+    const keyFor = (rootStatusId) => `${REPLY_ARCHIVE_KEY_PREFIX}${String(rootStatusId || '')}`;
+    const errorText = (error) => String((error && error.message) || error || 'storage failed');
+    const store = {
+      name: backend.name || 'unknown',
+      async load(rootStatusId) {
+        const root = String(rootStatusId || '');
+        try {
+          const raw = await backend.get(keyFor(root));
+          const value = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          const records = Array.isArray(value && value.records) ? value.records : [];
+          return {
+            rootStatusId: root,
+            backend: store.name,
+            updatedAt: String((value && value.updatedAt) || ''),
+            records: mergeReplyArchiveRecords([], records),
+            storageError: '',
+          };
+        } catch (error) {
+          return {
+            rootStatusId: root,
+            backend: store.name,
+            updatedAt: '',
+            records: [],
+            storageError: errorText(error),
+          };
+        }
+      },
+      async save(rootStatusId, records) {
+        const root = String(rootStatusId || '');
+        const prior = await store.load(root);
+        const merged = mergeReplyArchiveRecords(prior.records, records || []);
+        const payload = {
+          contractVersion: 3,
+          rootStatusId: root,
+          updatedAt: new Date().toISOString(),
+          records: merged,
+        };
+        try {
+          await backend.set(keyFor(root), payload);
+          return {
+            ok: true,
+            backend: store.name,
+            records: merged,
+            replyCount: merged.length,
+            approxBytes: JSON.stringify(payload).length,
+            storageError: prior.storageError || '',
+            updatedAt: payload.updatedAt,
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            backend: store.name,
+            records: merged,
+            replyCount: merged.length,
+            approxBytes: JSON.stringify(payload).length,
+            storageError: errorText(error),
+            updatedAt: '',
+          };
+        }
+      },
+    };
+    return store;
+  }
+
+  let replyArchiveStore = null;
+  function getReplyArchiveStore() {
+    if (!replyArchiveStore) replyArchiveStore = createReplyArchiveStore();
+    return replyArchiveStore;
+  }
+
+  function buildReplyArchive({
+    rootStatusId,
+    rootPost = null,
+    records = [],
+    gapReport = null,
+    updatedAt = '',
+    backend = '',
+    storageError = '',
+  }) {
+    // Defence in depth: archives written before the root post was filtered on input
+    // still hold it, and it must never be rendered as one of its own replies.
+    const merged = mergeReplyArchiveRecords([], records).filter(
+      (record) => String(record.id) !== String(rootStatusId || '')
+    );
+    const surfaces = Array.from(
+      new Set(merged.flatMap((record) => record.discoveredSurfaces || []))
+    ).sort();
+    return {
+      contractVersion: 3,
+      rootStatusId: String(rootStatusId || ''),
+      rootPost: rootPost || null,
+      generatedAt: new Date().toISOString(),
+      updatedAt: String(updatedAt || ''),
+      backend: String(backend || ''),
+      storageError: String(storageError || ''),
+      surfaces,
+      records: merged,
+      replyCount: merged.length,
+      withTextCount: merged.filter((record) => String(record.text || '').trim()).length,
+      truncatedCount: merged.filter((record) => record.truncated).length,
+      mediaLinkCount: merged.reduce(
+        (total, record) => total + ((record.mediaLinks || []).length || 0),
+        0
+      ),
+      gapReport: gapReport || null,
+    };
+  }
+
+  /**
+   * Order replies as a conversation tree. Any reply whose parent is not itself in the
+   * archive is treated as top-level, so a partially-captured conversation still renders
+   * every reply it holds rather than hiding orphans.
+   */
+  function replyArchiveTree(archive) {
+    const records = (archive && archive.records) || [];
+    const byId = new Map(records.map((record) => [String(record.id), record]));
+    const children = new Map();
+    const roots = [];
+    records.forEach((record) => {
+      const parentId = String(record.parentId || '');
+      if (parentId && parentId !== String(record.id) && byId.has(parentId)) {
+        if (!children.has(parentId)) children.set(parentId, []);
+        children.get(parentId).push(record);
+      } else {
+        roots.push(record);
+      }
+    });
+    // Undated replies (usually tombstones) sort LAST, not first — an empty string would
+    // otherwise float removed content to the top of the conversation.
+    const byTime = (a, b) => {
+      const at = String(a.createdAt || '');
+      const bt = String(b.createdAt || '');
+      if (Boolean(at) !== Boolean(bt)) return at ? -1 : 1;
+      return at.localeCompare(bt) || String(a.id).localeCompare(String(b.id));
+    };
+    const out = [];
+    const visited = new Set();
+    const walk = (record, depth) => {
+      const id = String(record.id);
+      // Guard against a malformed parent cycle turning the render into a hang.
+      if (visited.has(id)) return;
+      visited.add(id);
+      out.push({ record, depth });
+      (children.get(id) || []).sort(byTime).forEach((child) => walk(child, depth + 1));
+    };
+    roots.sort(byTime).forEach((record) => walk(record, 0));
+    // Anything trapped in a cycle still belongs in the archive.
+    records
+      .filter((record) => !visited.has(String(record.id)))
+      .forEach((record) => {
+        visited.add(String(record.id));
+        out.push({ record, depth: 0 });
+      });
+    return out;
+  }
+
+  function replyArchiveReceiptLines(archive) {
+    const gapReport = archive.gapReport || {};
+    // The gap report is computed BEFORE the recovery round, so once recovery works the
+    // raw list names replies whose bodies are in this very file. Listing a captured
+    // reply as uncaptured is the archive lying about itself - keep only the ids that
+    // genuinely still have no text.
+    const bodyless = new Set(
+      (archive.records || [])
+        .filter((record) => !String((record && record.text) || '').trim())
+        .map((record) => String(record.id))
+    );
+    const knownGaps = (gapReport.knownGaps || []).filter((gap) =>
+      bodyless.has(String(gap && gap.id))
+    );
+    const gaps = knownGaps.length;
+    return [
+      '## Capture receipt',
+      '',
+      `- Replies archived with content: ${archive.withTextCount} of ${archive.replyCount}`,
+      `- Media links recorded: ${archive.mediaLinkCount} (links only — reply media is not downloaded)`,
+      `- Still truncated by X: ${archive.truncatedCount}`,
+      `- Surfaces merged: ${(archive.surfaces.length ? archive.surfaces : ['none']).join(', ')}`,
+      `- Conversation IDs known: ${gapReport.knownConversationIds || archive.replyCount}`,
+      `- Known but uncaptured (network-only) replies: ${gaps}`,
+      // `null` marks an omitted line; '' is a real blank line Markdown needs.
+      archive.storageError ? `- **Storage error:** ${archive.storageError}` : null,
+      archive.updatedAt ? `- Archive last written: ${archive.updatedAt}` : null,
+      '',
+      'This capture is **best effort**. X does not publish a complete reply list, and' +
+        ' deleted, private, blocked, and never-delivered replies are undetectable. The' +
+        ' X reply counter is a reference only, not a completeness denominator.',
+      '',
+      // Name the gaps rather than only counting them: these are replies X confirmed
+      // exist but never handed over, and the reader is entitled to know which.
+      ...(gaps
+        ? [
+            `### Known but uncaptured replies (${gaps})`,
+            '',
+            ...knownGaps.map(
+              (gap) =>
+                `- ${gap.id}${gap.handle ? ` · @${gap.handle}` : ''} · ${gap.reason || 'not-seen'} · <${gap.url || ''}>`
+            ),
+            '',
+          ]
+        : []),
+    ].filter((line) => line !== null);
+  }
+
+  function renderReplyArchiveMarkdown(archive) {
+    const rootPost = archive.rootPost || {};
+    const rootUrl = rootPost.url || `https://x.com/i/web/status/${archive.rootStatusId}`;
+    const lines = [
+      // handleFromSourceUrl already returns "@name", so prepending another @ printed
+      // "Replies to @@aleabitoreddit" in the live archive. Normalize either shape.
+      `# Replies to ${rootPost.handle ? `@${String(rootPost.handle).replace(/^@+/, '')}` : 'post'} ${archive.rootStatusId}`,
+      '',
+      `Source: ${rootUrl}`,
+      `Replies archived: ${archive.replyCount}`,
+      `Generated: ${archive.generatedAt}`,
+      '',
+      ...replyArchiveReceiptLines(archive),
+      '## Replies',
+      '',
+    ];
+    const tree = replyArchiveTree(archive);
+    if (!tree.length) lines.push('_No replies captured for this post yet._', '');
+    tree.forEach(({ record, depth }) => {
+      const pad = '  '.repeat(depth);
+      const who = [record.displayName, record.handle ? `@${record.handle}` : '']
+        .filter(Boolean)
+        .join(' ');
+      const when = record.createdAt || 'unknown time';
+      lines.push(`${pad}- **${who || 'Unknown author'}** · ${when} · <${record.url || ''}>`);
+      // Decode on the way OUT as well as on the way in: records captured before the
+      // capture-side fix are already in the store, and the merge invariant will never
+      // overwrite them, so a live archive still holds "-&gt;" in real reply bodies.
+      const text = decodeBasicEntities(record.text || '').trim();
+      if (text) {
+        text.split('\n').forEach((line) => lines.push(`${pad}  ${line}`));
+        if (record.truncated) lines.push(`${pad}  _(X delivered only a truncated preview.)_`);
+      } else if (record.unavailable) {
+        lines.push(`${pad}  _(Unavailable on X: ${record.unavailableReason || 'removed'}.)_`);
+      } else {
+        lines.push(`${pad}  _(No text content was ever delivered for this reply.)_`);
+      }
+      (record.mediaLinks || []).forEach((media) => {
+        const poster = media.poster ? ` (poster: ${media.poster})` : '';
+        lines.push(`${pad}  - ${media.type}: ${media.url}${poster}`);
+      });
+      lines.push('');
+    });
+    return lines.join('\n');
+  }
+
+  function replyArchiveCsv(archive) {
+    const columns = [
+      'reply_id',
+      'parent_id',
+      'conversation_id',
+      'handle',
+      'display_name',
+      'created_at',
+      'url',
+      'text',
+      'truncated',
+      'media_count',
+      'media_links',
+      'surfaces',
+      'provenance',
+      'unavailable',
+    ];
+    const rows = replyArchiveTree(archive).map(({ record }) => [
+      record.id,
+      record.parentId || '',
+      record.conversationId || archive.rootStatusId,
+      record.handle || '',
+      record.displayName || '',
+      record.createdAt || '',
+      record.url || '',
+      // Full text on purpose: this file IS the archive, not a preview of one.
+      decodeBasicEntities(record.text || ''),
+      record.truncated ? 'true' : 'false',
+      (record.mediaLinks || []).length,
+      (record.mediaLinks || [])
+        .map(
+          (media) => `${media.type}:${media.url}${media.poster ? ` (poster: ${media.poster})` : ''}`
+        )
+        .join(' | '),
+      (record.discoveredSurfaces || []).join('+'),
+      record.provenance || '',
+      record.unavailable ? record.unavailableReason || 'true' : 'false',
+    ]);
+    return `\ufeff${[columns, ...rows].map((row) => row.map(csvCell).join(',')).join('\r\n')}\r\n`;
+  }
+
+  // Bound the recovery round: this is the only part of the archive that makes network
+  // calls. The old bound of 250 was set before we knew the audit routinely holds ~1,100
+  // ids for a 1,000-reply conversation - it silently capped coverage at a quarter of
+  // what was recoverable. The cap now sits above a full conversation so the limiting
+  // factor is what X will actually serve, not an arbitrary number; the run stays paced
+  // by the concurrency limit and reports progress while it works.
+  const REPLY_ARCHIVE_SYNDICATION_MAX = 2000;
+  const REPLY_ARCHIVE_SYNDICATION_CONCURRENCY = 3;
+
+  /**
+   * Fill in replies X CONFIRMED exist (they arrived in a GraphQL payload) but never
+   * rendered, so no layer ever saw their text. Each is re-fetched by id through the
+   * same syndication endpoint the quote-card layer already uses. A 404 is
+   * authoritative - the reply is deleted or protected - and is recorded as an honest
+   * tombstone rather than retried or hidden.
+   */
+  async function enrichReplyArchiveViaSyndication(
+    records,
+    fetchFn = fetchTweetSyndication,
+    options = {}
+  ) {
+    const limit = Number(options.max) || REPLY_ARCHIVE_SYNDICATION_MAX;
+    const all = Array.isArray(records) ? records : [];
+    const pending = all
+      .filter(
+        (record) =>
+          record &&
+          /^\d+$/.test(String(record.id || '')) &&
+          !String(record.text || '').trim() &&
+          !record.unavailable
+      )
+      .slice(0, limit);
+    const patches = [];
+    let recovered = 0;
+    let unavailable = 0;
+    let attempted = 0;
+    const errors = [];
+    // Recovering a full conversation is minutes of work, so it must never look hung:
+    // report every completion to the caller, which surfaces it as a live toast.
+    const onProgress = typeof options.onProgress === 'function' ? options.onProgress : null;
+    const tick = () => {
+      attempted += 1;
+      if (onProgress) onProgress({ attempted, total: pending.length, recovered, unavailable });
+    };
+    await runWithConcurrency(
+      pending.map((record) => String(record.id)),
+      Number(options.concurrency) || REPLY_ARCHIVE_SYNDICATION_CONCURRENCY,
+      async (id) => {
+        try {
+          const payload = await fetchFn(id);
+          const text = decodeBasicEntities((payload && (payload.text || payload.full_text)) || '')
+            .replace(/\s+/g, ' ')
+            .trim();
+          if (!text && !(payload && payload.mediaDetails)) return;
+          const user = (payload && payload.user) || {};
+          const handle = String(user.screen_name || '');
+          patches.push({
+            id,
+            handle,
+            displayName: String(user.name || ''),
+            url: handle
+              ? `https://x.com/${handle}/status/${id}`
+              : `https://x.com/i/web/status/${id}`,
+            text: text.slice(0, REPLY_ARCHIVE_TEXT_MAX),
+            truncated: false,
+            createdAt: safeIsoTime(payload.created_at || ''),
+            parentId: String(payload.in_reply_to_status_id_str || ''),
+            mediaLinks: replyMediaLinksFromLegacy({
+              extended_entities: {
+                media:
+                  payload.mediaDetails ||
+                  (payload.photos || []).map((photo) => ({ type: 'photo', ...photo })),
+              },
+            }),
+            provenance: 'syndication',
+          });
+          recovered += 1;
+        } catch (error) {
+          if (error && error.status === 404) {
+            patches.push({
+              id,
+              unavailable: true,
+              unavailableReason: 'syndication 404 (deleted, protected, or suspended)',
+              provenance: 'syndication',
+            });
+            unavailable += 1;
+            return;
+          }
+          errors.push(`${id}: ${(error && error.message) || error}`);
+        } finally {
+          tick();
+        }
+      }
+    );
+    return {
+      records: mergeReplyArchiveRecords(all, patches),
+      attempted: pending.length,
+      recovered,
+      unavailable,
+      // Deliberately surfaced, not swallowed: a silent recovery failure would look
+      // identical to "X simply never delivered this reply".
+      errors,
+      skippedOverLimit: Math.max(
+        0,
+        all.filter((record) => record && !String(record.text || '').trim() && !record.unavailable)
+          .length - pending.length
+      ),
+    };
+  }
+
+  /**
+   * Load the stored archive for a root post and hand back both deliverables. Kept
+   * separate from the download so tests (and the menu) can inspect it without a Blob.
+   */
+  async function loadReplyArchiveForPost(rootStatusId, publicReplyCountReference = 0) {
+    const stored = await getReplyArchiveStore().load(rootStatusId);
+    // The network layer may hold replies from THIS page load that no probe has run over
+    // yet; fold them in so the download is never staler than what the browser has seen.
+    const liveNetworkRecords = getCapturedSearchTimelineReplies(rootStatusId).map((record) => ({
+      ...record,
+      provenance: 'network-confirmed',
+    }));
+    const records = mergeReplyArchiveRecords(stored.records, liveNetworkRecords);
+    const gapReport = buildReplyGapReport({
+      rootStatusId,
+      expectedDisplayedReplies: publicReplyCountReference,
+      domRecords: new Map(),
+      networkRecords: liveNetworkRecords,
+      history: readReplyProbeHistory(),
+      surface: 'relevant',
+    });
+    return buildReplyArchive({
+      rootStatusId,
+      rootPost: { handle: handleFromSourceUrl(location.href) || '', url: location.href },
+      records,
+      gapReport,
+      updatedAt: stored.updatedAt,
+      backend: stored.backend,
+      storageError: stored.storageError,
+    });
+  }
+
+  async function downloadReplyArchive(tweetEl) {
+    const rootStatusId = tweetStatusId(tweetEl) || currentStatusId();
+    if (!rootStatusId) {
+      showToast('Open the original X post before downloading its reply archive.', { error: true });
+      return false;
+    }
+    let archive;
+    try {
+      archive = await loadReplyArchiveForPost(rootStatusId, displayedReplyCount(tweetEl));
+    } catch (error) {
+      showToast(`Reply archive could not be read: ${error.message}`, { error: true, sticky: true });
+      return false;
+    }
+    if (!archive.replyCount) {
+      showToast(
+        'No replies are archived for this post yet. Run “Capture replies (experimental)” first.',
+        { error: true, sticky: true }
+      );
+      return false;
+    }
+    const base = `sourcecapsule-replies-${archive.rootStatusId}`;
+    downloadBlob(
+      `${base}.md`,
+      new Blob([renderReplyArchiveMarkdown(archive)], { type: 'text/markdown;charset=utf-8' })
+    );
+    downloadBlob(
+      `${base}.csv`,
+      new Blob([replyArchiveCsv(archive)], { type: 'text/csv;charset=utf-8' })
+    );
+    showToast(
+      `Reply archive: ${archive.withTextCount} of ${archive.replyCount} replies have text; ` +
+        `${archive.mediaLinkCount} media links; ${archive.truncatedCount} still truncated by X. ` +
+        `Markdown + CSV downloaded.${archive.storageError ? ` Storage warning: ${archive.storageError}` : ''}`,
+      { sticky: true, error: Boolean(archive.storageError) }
+    );
+    return true;
+  }
+
+  function replyProbeMaxMs(surface) {
+    if (surface === 'relevant') return 90000;
+    if (surface === 'top') return 120000;
+    return 240000;
+  }
+
+  function runPendingReplyProbe(pending) {
+    setTimeout(() => {
+      runReplyProbe(pending, { maxMs: replyProbeMaxMs(pending.surface) }).catch((error) => {
+        writeReplyProbeResult({
+          contractVersion: 2,
+          rootStatusId: pending.rootStatusId,
+          surface: pending.surface || 'latest',
+          expectedDisplayedReplies: pending.expectedDisplayedReplies || 0,
+          uniquePostsCaptured: 0,
+          finishedAt: new Date().toISOString(),
+          stopReason: 'error',
+          error: String((error && error.message) || error || 'unknown error'),
+          records: [],
+          networkRecords: [],
+        });
+        showToast(`Reply probe failed: ${error.message}`, { error: true, sticky: true });
+      });
+    }, 1200);
+  }
+
+  const REPLY_PROBE_SURFACES = ['latest', 'top', 'relevant'];
+
+  function replyProbeSurfaceLabel(surface) {
+    if (surface === 'top') return 'Top';
+    if (surface === 'relevant') return 'Relevant';
+    return 'Latest';
+  }
+
+  /**
+   * Hand control to the next surface in the pass.
+   *
+   * "relevant" is probed in place on the post page while the other two are X search
+   * pages, so advancing is a navigation in every case - which is why the queue has to
+   * live in sessionStorage rather than in a closure. Returns false when the pass is
+   * over, so the caller can report the final result instead of chaining.
+   */
+  function nextReplyProbePass(pending) {
+    const queue = Array.isArray(pending && pending.queue) ? pending.queue.filter(Boolean) : [];
+    if (!queue.length) return null;
+    const [surface, ...rest] = queue;
+    if (!REPLY_PROBE_SURFACES.includes(surface)) return null;
+    return {
+      ...pending,
+      surface,
+      queue: rest,
+      passIndex: Number(pending.passIndex || 1) + 1,
+    };
+  }
+
+  function advanceReplyProbe(pending) {
+    const next = nextReplyProbePass(pending);
+    if (!next) return false;
+    const surface = next.surface;
+    const url =
+      surface === 'relevant'
+        ? next.returnUrl || location.href
+        : replyProbeSearchUrl(next.rootStatusId, surface);
+    if (!url) return false;
+    try {
+      sessionStorage.setItem(REPLY_PROBE_PENDING_KEY, JSON.stringify(next));
+    } catch {
+      // Cannot carry the queue across the navigation; stop cleanly rather than
+      // silently restarting the surface we just finished.
+      return false;
+    }
+    showToast(
+      `Reply capture ${next.passIndex}/${next.passTotal}: opening X ${replyProbeSurfaceLabel(surface)}...`,
+      { sticky: true }
+    );
+    location.href = url;
+    return true;
+  }
+
+  function startReplyProbe(tweetEl, surface = 'all') {
+    const rootStatusId = tweetStatusId(tweetEl) || currentStatusId();
+    // A single menu item asks for the most complete capture, which means every surface.
+    // An explicit single surface is still honoured - the extension popup and the tests
+    // drive one at a time.
+    const requested = surface === 'all' ? REPLY_PROBE_SURFACES.slice() : [surface];
+    const surfaces = requested.filter((name) => REPLY_PROBE_SURFACES.includes(name));
+    const [first, ...queue] = surfaces.length ? surfaces : ['latest'];
+    const url = first === 'relevant' ? location.href : replyProbeSearchUrl(rootStatusId, first);
+    if (!url) {
+      showToast('Reply probe could not determine the root post id.', { error: true, sticky: true });
+      return;
+    }
+    const pending = {
+      rootStatusId,
+      surface: first,
+      queue,
+      passIndex: 1,
+      passTotal: queue.length + 1,
+      expectedDisplayedReplies: displayedReplyCount(tweetEl),
+      returnUrl: location.href,
+      requestedAt: new Date().toISOString(),
+    };
+    try {
+      sessionStorage.setItem(REPLY_PROBE_PENDING_KEY, JSON.stringify(pending));
+    } catch (error) {
+      showToast(`Reply probe could not start: ${error.message}`, { error: true, sticky: true });
+      return;
+    }
+    const progress = pending.passTotal > 1 ? `${pending.passIndex}/${pending.passTotal}: ` : '';
+    if (first === 'relevant') {
+      showToast(`Reply capture ${progress}probing X Relevant conversation in place...`, {
+        sticky: true,
+      });
+      runPendingReplyProbe(pending);
+    } else {
+      showToast(`Reply capture ${progress}opening X ${replyProbeSurfaceLabel(first)} search...`, {
+        sticky: true,
+      });
+      location.href = url;
+    }
+  }
+
+  async function runReplyProbe(pending, options = {}) {
+    // Large conversations can take several minutes because the probe intentionally lets X's
+    // own UI pace pagination. Four minutes is still bounded, but avoids reporting a false
+    // coverage ceiling when a ~1,000-reply search is simply one or two pages from exhaustion.
+    const surface = pending.surface || replyProbeSurfaceFromUrl(location.href);
+    const maxMs = Number(options.maxMs) || replyProbeMaxMs(surface);
+    const idleMs = Number(options.idleMs) || 12000;
+    const tickMs = Number(options.tickMs) || 450;
+    // How long to keep waiting when the page has rendered no REPLIES yet.
+    const emptyGraceMs = Math.min(Number(options.emptyGraceMs) || 45000, maxMs);
+    const records = new Map();
+    const scroller = document.scrollingElement || document.documentElement;
+    const startedAt = Date.now();
+    let lastNewAt = startedAt;
+    let lastHeight = 0;
+    let scrolls = 0;
+    let stopReason = 'timeout';
+    let maxVisibleTweets = 0;
+    let maxVisibleReplies = 0;
+    let challenge = '';
+    let hiddenMs = 0;
+    let hiddenWarned = false;
+
+    if (!scroller) {
+      stopReason = 'no-scroller';
+    } else {
+      try {
+        history.scrollRestoration = 'manual';
+      } catch {
+        // Older userscript hosts may not expose scrollRestoration.
+      }
+      // X can apply its own SPA scroll restoration several times after first paint. Pin
+      // the search at the top until it remains there for six consecutive observations;
+      // otherwise fail explicitly instead of silently probing only the old tail segment.
+      let stableTopChecks = 0;
+      const topResetDeadline = Date.now() + (Number(options.topResetMs) || 8000);
+      while (Date.now() < topResetDeadline && stableTopChecks < 6) {
+        scroller.scrollTo(0, 0);
+        await sleep(250);
+        stableTopChecks = scroller.scrollTop <= 10 ? stableTopChecks + 1 : 0;
+      }
+      if (scroller.scrollTop > 10 || stableTopChecks < 6) {
+        stopReason = 'scroll-reset-failed';
+      }
+      if (stopReason === 'scroll-reset-failed') {
+        showToast('Reply probe stopped: X kept restoring the prior search position.', {
+          error: true,
+          sticky: true,
+        });
+      } else {
+        while (Date.now() - startedAt < maxMs) {
+          const added = captureVisibleReplyProbeTweets(records, pending.rootStatusId, { surface });
+          if (added) lastNewAt = Date.now();
+          const visibleTweets = topLevelTweetEls(document);
+          maxVisibleTweets = Math.max(maxVisibleTweets, visibleTweets.length);
+          maxVisibleReplies = Math.max(
+            maxVisibleReplies,
+            visibleTweets.filter(
+              (tweetEl) => String(tweetStatusId(tweetEl) || '') !== String(pending.rootStatusId)
+            ).length
+          );
+          // A hidden tab can starve the DOM pass: X sometimes renders no replies at all
+          // into a background tab, and a probe that scrolls an empty page reports a
+          // coverage ceiling that is really a window-focus artifact.
+          //
+          // The trigger is that starvation, NOT hiddenness by itself. Measured live:
+          // this tab reports visibilityState "hidden" while X happily renders replies
+          // into it, so pausing on the flag alone stalls a run that is working. Pause
+          // only while hidden AND nothing has rendered; keep hiddenMs either way so a
+          // thin result can still be explained afterwards.
+          // "hidden" is tested explicitly rather than `document.hidden`, which is also
+          // true while prerendering.
+          const hidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+          if (hidden) hiddenMs += Math.max(500, tickMs);
+          if (hidden && maxVisibleReplies === 0) {
+            if (!hiddenWarned) {
+              hiddenWarned = true;
+              showToast(
+                'Reply capture stalled: this tab is hidden and X has rendered no replies. ' +
+                  'Bring the tab to the front to continue.',
+                { error: true, sticky: true }
+              );
+            }
+            lastNewAt = Date.now();
+            await sleep(Math.max(500, tickMs));
+            continue;
+          }
+          const pageText = String((document.body && document.body.innerText) || '');
+          challenge = [
+            'Rate limit exceeded',
+            'Something went wrong. Try reloading.',
+            'Log in to X',
+          ].find((message) => pageText.includes(message));
+          if (challenge) {
+            stopReason = 'x-challenge';
+            break;
+          }
+          if (surface === 'relevant' && replyProbeConversationBoundaryVisible()) {
+            stopReason = 'conversation-boundary';
+            break;
+          }
+
+          const elapsed = Math.round((Date.now() - startedAt) / 1000);
+          showToast(`Reply probe: ${records.size} unique posts · ${elapsed}s · scroll ${scrolls}`, {
+            sticky: true,
+          });
+
+          const height = scroller.scrollHeight;
+          const viewport = window.innerHeight || 800;
+          const nearBottom =
+            scroller.scrollTop + viewport >= height - Math.max(300, viewport * 0.4);
+          if (nearBottom && height === lastHeight && Date.now() - lastNewAt >= idleMs) {
+            // Observed live: X had not rendered a single reply yet when the idle
+            // window elapsed, so a healthy 1,000-reply conversation was reported as
+            // "no-results" after 12s. An idle page that has never shown a REPLY has
+            // not finished loading - keep waiting for the grace window before
+            // concluding the conversation is empty.
+            if (replyProbeStillWarmingUp(maxVisibleReplies, Date.now() - startedAt, emptyGraceMs)) {
+              await sleep(Math.max(500, tickMs));
+              continue;
+            }
+            stopReason = records.size ? 'pagination-idle' : 'no-results';
+            break;
+          }
+          lastHeight = height;
+          scroller.scrollTo(
+            0,
+            Math.min(scroller.scrollTop + Math.max(500, viewport * 0.85), height)
+          );
+          scrolls += 1;
+          await sleep(nearBottom ? Math.max(900, tickMs) : tickMs);
+        }
+        captureVisibleReplyProbeTweets(records, pending.rootStatusId, { surface });
+      }
+    }
+
+    const networkRecords = getCapturedSearchTimelineReplies(pending.rootStatusId);
+    const gapReport = buildReplyGapReport({
+      rootStatusId: pending.rootStatusId,
+      expectedDisplayedReplies: pending.expectedDisplayedReplies,
+      domRecords: records,
+      networkRecords,
+      history: readReplyProbeHistory(),
+      surface,
+    });
+    const result = {
+      contractVersion: 2,
+      rootStatusId: String(pending.rootStatusId),
+      surface,
+      expectedDisplayedReplies: Number(pending.expectedDisplayedReplies) || 0,
+      uniquePostsCaptured: records.size,
+      startedAt: new Date(startedAt).toISOString(),
+      finishedAt: new Date().toISOString(),
+      elapsedMs: Date.now() - startedAt,
+      stopReason,
+      challenge: challenge || '',
+      scrolls,
+      maxVisibleTweets,
+      maxVisibleReplies,
+      hiddenMs,
+      sourceUrl: location.href,
+      returnUrl: pending.returnUrl || '',
+      records: Array.from(records.values()),
+      networkRecords,
+      gapReport,
+      unionCompletePosts: gapReport.completeDomRecords,
+    };
+    // The archive is the deliverable: persist the reply CONTENT from both layers,
+    // merged into whatever previous surfaces already stored. This is deliberately
+    // separate from writeReplyProbeResult (an audit trail that keeps IDs only).
+    // The root post itself arrives in the GraphQL payload with its own conversation
+    // id; it is the thing being replied to, not a reply, so it must not be archived.
+    const archiveInput = [
+      ...Array.from(records.values()).map((record) => ({
+        ...record,
+        conversationId: String(pending.rootStatusId),
+        provenance: record.provenance || 'dom-observed',
+        discoveredSurfaces: [surface],
+      })),
+      ...networkRecords.map((record) => ({
+        ...record,
+        provenance: 'network-confirmed',
+        discoveredSurfaces: [surface],
+      })),
+    ].filter((record) => String(record.id) !== String(pending.rootStatusId));
+    let saved = await getReplyArchiveStore().save(pending.rootStatusId, archiveInput);
+    // Every id the audit knows but the archive has no body for gets seeded here, so the
+    // recovery round below can fetch it. Without this the archive only ever held what
+    // THIS run happened to see, while the audit remembered a thousand ids from earlier
+    // runs - measured live as 79 bodies against 1,094 known ids.
+    if (options.recoverGaps !== false) {
+      const seeds = replyArchiveGapSeeds(gapReport, pending.rootStatusId, saved.records, surface);
+      if (seeds.length) {
+        saved = await getReplyArchiveStore().save(pending.rootStatusId, seeds);
+        result.gapsSeeded = seeds.length;
+      }
+    }
+    // Save FIRST, then attempt recovery: if syndication is blocked or the tab is closed
+    // mid-round, everything the scroll pass collected is already durable.
+    if (options.recoverGaps !== false && saved.records.some((record) => !record.text)) {
+      try {
+        const recovery = await enrichReplyArchiveViaSyndication(saved.records, undefined, {
+          onProgress: ({ attempted, total, recovered }) => {
+            // Every 10th completion: often enough to prove liveness, rare enough not
+            // to thrash the DOM on a thousand-reply recovery.
+            if (attempted % 10 && attempted !== total) return;
+            showToast(`Recovering reply bodies: ${attempted}/${total} · ${recovered} recovered`, {
+              sticky: true,
+            });
+          },
+        });
+        result.gapsRecovered = recovery.recovered;
+        result.gapsUnavailable = recovery.unavailable;
+        result.gapRecoveryErrors = recovery.errors;
+        result.gapsSkippedOverLimit = recovery.skippedOverLimit;
+        if (recovery.recovered || recovery.unavailable) {
+          saved = await getReplyArchiveStore().save(pending.rootStatusId, recovery.records);
+        }
+      } catch (error) {
+        result.gapRecoveryError = String((error && error.message) || error);
+      }
+    }
+    result.archivedReplies = saved.replyCount;
+    result.archiveBackend = saved.backend;
+    result.archiveBytes = saved.approxBytes;
+    result.archiveStorageError = saved.ok ? '' : saved.storageError;
+    if (!saved.ok) {
+      // Storage is the one step here that can fail invisibly and lose everything the
+      // run just collected, so it gets its own loud, sticky message.
+      showToast(`Reply archive could NOT be saved (${saved.backend}): ${saved.storageError}`, {
+        error: true,
+        sticky: true,
+      });
+    }
+    // Persist the audit trail only AFTER the archive outcome is known - writing it
+    // earlier stored a result whose archive fields were all undefined, which made the
+    // saved diagnostics useless for telling a failed write from a skipped one.
+    writeReplyProbeResult(result);
+    let reportDownloaded = false;
+    if (options.downloadGapReport === true) {
+      try {
+        reportDownloaded = downloadReplyGapReport(result);
+      } catch (error) {
+        result.downloadError = String((error && error.message) || error || 'download failed');
+      }
+    }
+    // Chain BEFORE clearing the pending key: advanceReplyProbe overwrites it with the
+    // next surface, and clearing afterwards would delete the queue it just wrote.
+    // The archive for this surface is already saved above, so a pass interrupted here
+    // (closed tab, navigation) keeps everything captured so far.
+    if (options.chainSurfaces !== false && advanceReplyProbe(pending)) {
+      log('reply probe surface finished, advancing', {
+        surface,
+        captured: records.size,
+        remaining: pending.queue,
+      });
+      return result;
+    }
+    try {
+      sessionStorage.removeItem(REPLY_PROBE_PENDING_KEY);
+    } catch {
+      // A completed result is already persisted; a stale pending key is harmless.
+    }
+    const publicCount = result.expectedDisplayedReplies
+      ? ` X public reply-count reference: ${result.expectedDisplayedReplies} (not a completeness denominator).`
+      : '';
+    const gapSummary = ` Union inventory: ${gapReport.domObservedUnion} DOM-observed; ${gapReport.knownConversationIds} conversation IDs known. Network-only gaps: ${gapReport.knownGaps.length}. Best effort: deleted, private, and never-delivered replies remain unknowable.`;
+    const downloadSummary = reportDownloaded
+      ? ' CSV downloaded.'
+      : ' Use “Download reply archive” on the original post when finished.';
+    const recoverySummary = result.gapsRecovered
+      ? ` Syndication recovered ${result.gapsRecovered} reply bodies X never rendered${result.gapsUnavailable ? `; ${result.gapsUnavailable} confirmed deleted/protected` : ''}.`
+      : '';
+    const archiveSummary = result.archiveStorageError
+      ? ` ARCHIVE NOT SAVED: ${result.archiveStorageError}.`
+      : ` Archive now holds ${result.archivedReplies} replies with content (${result.archiveBackend}).${recoverySummary}`;
+    // A run that spent most of its time hidden did not measure this conversation's
+    // coverage - it measured the tab being in the background. Say which one happened.
+    const hiddenSummary =
+      hiddenMs > 0 && !records.size
+        ? ` WARNING: this tab was hidden for ${Math.round(hiddenMs / 1000)}s and the DOM pass captured nothing; that is a window-focus artifact, not a coverage ceiling. Re-run with the tab in front.`
+        : hiddenMs > 0
+          ? ` Note: this tab was hidden for ${Math.round(hiddenMs / 1000)}s of the run, but replies still rendered.`
+          : '';
+    // Name the whole pass, not just its last leg: after a three-surface run the final
+    // toast is the only report the reader sees, and "on relevant" alone would read as
+    // if the other two never happened.
+    const passSummary =
+      Number(pending.passTotal || 1) > 1
+        ? `${records.size} DOM-observed on ${surface} (surface ${pending.passIndex || 1} of ${pending.passTotal}; the archive total below spans all of them)`
+        : `${records.size} DOM-observed on ${surface}`;
+    showToast(
+      `Reply probe finished: ${passSummary}. Stop: ${stopReason}.${publicCount}${gapSummary}${archiveSummary}${downloadSummary}${hiddenSummary} Result saved locally.`,
+      {
+        error:
+          (hiddenMs > 0 && !records.size) ||
+          !['pagination-idle', 'conversation-boundary'].includes(stopReason),
+        sticky: true,
+      }
+    );
+    log('reply probe result', result);
+    return result;
+  }
+
+  function maybeResumeReplyProbe() {
+    const pending = readReplyProbePending();
+    if (!pending) return;
+    // "relevant" is probed on the post page itself, not on an X search page. When a
+    // multi-surface pass advances to it, the browser lands back on the post, where the
+    // conversation_id query below can never match - so it needs its own resume gate.
+    if (pending.surface === 'relevant') {
+      if (String(currentStatusId() || '') !== String(pending.rootStatusId)) return;
+      runPendingReplyProbe(pending);
+      return;
+    }
+    const query = new URLSearchParams(location.search).get('q') || '';
+    if (query !== `conversation_id:${pending.rootStatusId}`) return;
+    const live = new URLSearchParams(location.search).get('f') === 'live';
+    if ((pending.surface === 'top' && live) || (pending.surface !== 'top' && !live)) return;
+    runPendingReplyProbe(pending);
   }
 
   function hasOwnTweetText(tweetEl) {
@@ -9157,6 +11081,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           });
         },
         onPick: (exportType, trigger) => {
+          // 'reply-probe' now means "the most complete capture", i.e. every surface.
+          // The per-surface keys are kept as entry points for the extension popup and
+          // for anyone diagnosing one surface in isolation; they are just not menu items.
+          if (exportType === 'reply-probe') return startReplyProbe(tweetEl, 'all');
+          if (exportType === 'reply-probe-latest') return startReplyProbe(tweetEl, 'latest');
+          if (exportType === 'reply-probe-top') return startReplyProbe(tweetEl, 'top');
+          if (exportType === 'reply-probe-relevant') return startReplyProbe(tweetEl, 'relevant');
+          if (exportType === 'reply-archive-download') return downloadReplyArchive(tweetEl);
           const request = postExportRequest(exportType);
           return runExport(request.exportType, {
             targetTweetEl: tweetEl,
@@ -9234,9 +11166,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       // Keep this aligned with both MAIN-world bridge implementations. Quote
       // refs are useful even when the post contains no video or long-form text;
       // filtering those ordinary GraphQL responses out here defeats the
-      // capturedQuotedRefs recovery layer entirely.
-      body: /video_info|variants|video\.twimg\.com|amplify_video|ext_tw_video|tweet_video|note_tweet|quoted_status/i,
-      url: /\/graphql\/|\/i\/api\/|TweetDetail|TweetResult|Article|UserTweets|HomeTimeline/i,
+      // capturedQuotedRefs recovery layer entirely. `conversation_id_str` is
+      // likewise mandatory: an ordinary page of text-only replies matches none
+      // of the media/note/quote terms, so without it the reply archive would
+      // silently never see the SearchTimeline/TweetDetail bodies it is built on.
+      body: /video_info|variants|video\.twimg\.com|amplify_video|ext_tw_video|tweet_video|note_tweet|quoted_status|conversation_id_str/i,
+      url: /\/graphql\/|\/i\/api\/|TweetDetail|TweetResult|Article|UserTweets|HomeTimeline|SearchTimeline/i,
       contentType: /json|javascript|text/i,
     };
   }
@@ -9250,7 +11185,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       try {
         if (!body) return;
         const text = String(body);
-        if (!patterns.body.test(text)) return;
+        if (!patterns.body.test(text) && !/SearchTimeline|TweetDetail/i.test(url || '')) return;
         handleNetworkCapturePayload({
           source: `${APP}:network-capture`,
           type: 'response',
@@ -9366,11 +11301,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const MAX_MESSAGES = 200;
       let sent = 0;
       const bodyPattern = new RegExp(
-        'video_info|variants|video\\.twimg\\.com|amplify_video|ext_tw_video|tweet_video|note_tweet|quoted_status',
+        'video_info|variants|video\\.twimg\\.com|amplify_video|ext_tw_video|tweet_video|note_tweet|quoted_status|conversation_id_str',
         'i'
       );
       const urlPattern = new RegExp(
-        '/graphql/|/i/api/|TweetDetail|TweetResult|Article|UserTweets|HomeTimeline',
+        '/graphql/|/i/api/|TweetDetail|TweetResult|Article|UserTweets|HomeTimeline|SearchTimeline',
         'i'
       );
       const interestingBody = (text) => bodyPattern.test(text || '');
@@ -9381,7 +11316,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         try {
           if (sent >= MAX_MESSAGES || !body) return;
           const text = String(body);
-          if (!interestingBody(text)) return;
+          if (!interestingBody(text) && !/SearchTimeline|TweetDetail/i.test(url || '')) return;
           sent += 1;
           window.postMessage(
             {
@@ -9574,6 +11509,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     registerSettingsMenu();
     registerExtensionController();
     ensureButton();
+    maybeResumeReplyProbe();
     log(`${APP} v${VERSION} ready`);
   }
 
@@ -9625,6 +11561,37 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       THREAD_EXPORT_TYPES,
       exportTypeNeedsCaptureOptions,
       postExportRequest,
+      replyProbeSearchUrl,
+      displayedReplyCount,
+      replyProbeTweetRecord,
+      captureVisibleReplyProbeTweets,
+      replyProbeConversationBoundaryVisible,
+      replyProbeStillWarmingUp,
+      nextReplyProbePass,
+      REPLY_PROBE_SURFACES,
+      replyArchiveGapSeeds,
+      searchTimelineReplyRecordsFromCapturedBody,
+      getCapturedSearchTimelineReplies,
+      buildReplyGapReport,
+      replyGapReportCsv,
+      buildStoredReplyAudit,
+      mergeReplyArchiveRecords,
+      mergeReplyMediaLinks,
+      mergeReplyProvenance,
+      createReplyArchiveStore,
+      buildReplyArchive,
+      replyArchiveTree,
+      renderReplyArchiveMarkdown,
+      replyArchiveCsv,
+      replyMediaLinksFromLegacy,
+      indexedDbReplyArchiveBackend,
+      loadReplyArchiveForPost,
+      enrichReplyArchiveViaSyndication,
+      downloadReplyArchive,
+      getReplyArchiveStore,
+      readReplyProbeHistory,
+      writeReplyProbeResult,
+      runReplyProbe,
       postControlCaptureMode,
       timelineArticlePreviewReason,
       showShareResult,
