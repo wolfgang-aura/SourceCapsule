@@ -8386,6 +8386,73 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return model;
   }
 
+  // On-page UI strings — kept in sync with popup.js STRINGS (zh subset).
+  const PAGE_STRINGS = {
+    en: {
+      saveToLibrary: 'Save to library',
+      saveWithNote: 'Save with note / tags',
+      copyMarkdown: 'Copy clean Markdown',
+      copyMarkdownShort: 'Copy Markdown',
+      createAiLink: 'Create AI readable link',
+      saveFullThread: 'Save full thread',
+      captureReplies: 'Capture replies (experimental)',
+      downloadReplyArchive: 'Download reply archive',
+      saveArticle: 'Save article',
+      saveThread: 'Save thread',
+      savePost: 'Save post',
+      openPostFirst: 'Open post first',
+      exporting: 'Exporting...',
+    },
+    zh: {
+      saveToLibrary: '保存到资料库',
+      saveWithNote: '附注保存 / 添加标签',
+      copyMarkdown: '复制 Markdown',
+      copyMarkdownShort: '复制 Markdown',
+      createAiLink: '创建 AI 可读链接',
+      saveFullThread: '保存完整话题串',
+      captureReplies: '捕获回复（实验性）',
+      downloadReplyArchive: '下载回复存档',
+      saveArticle: '保存文章',
+      saveThread: '保存话题串',
+      savePost: '保存帖子',
+      openPostFirst: '请先打开帖子',
+      exporting: '正在导出…',
+    },
+  };
+  let pageLang = 'en';
+  function pt(key) {
+    return (PAGE_STRINGS[pageLang] || PAGE_STRINGS.en)[key] || key;
+  }
+  function refreshAllPageLabels() {
+    document.querySelectorAll('.xa-ctl-item[data-i18n-key]').forEach((el) => {
+      const label = pt(el.dataset.i18nKey);
+      if (label) el.textContent = label;
+    });
+    document.querySelectorAll('.xa-ctl-trigger[data-i18n-key]').forEach((el) => {
+      if (!el.disabled) el.textContent = pt(el.dataset.i18nKey);
+    });
+  }
+  async function initPageLanguage() {
+    try {
+      if (
+        globalThis.__SOURCECAPSULE_EXTENSION__ &&
+        typeof chrome !== 'undefined' &&
+        chrome.storage
+      ) {
+        const result = await chrome.storage.local.get('uiLang');
+        pageLang = result.uiLang || 'en';
+        chrome.storage.onChanged.addListener((changes, area) => {
+          if (area === 'local' && changes.uiLang) {
+            pageLang = changes.uiLang.newValue || 'en';
+            refreshAllPageLabels();
+          }
+        });
+      }
+    } catch {
+      pageLang = 'en';
+    }
+  }
+
   // The export choices offered by every Export control. The menu is deliberately
   // short: a ten-item drop-down made the common actions hard to find, so only the
   // ones worth a click of their own are listed.
@@ -8396,26 +8463,26 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   // to on its own. runExport still honours 'library-share', 'both', 'html' and 'md',
   // so the extension popup and any saved automation keep working.
   const EXPORT_TYPES = [
-    { key: 'library', label: 'Save to library' },
-    { key: 'library-note', label: 'Save with note / tags' },
+    { key: 'library', i18nKey: 'saveToLibrary' },
+    { key: 'library-note', i18nKey: 'saveWithNote' },
     { divider: true },
-    { key: 'copy', label: 'Copy clean Markdown' },
-    { key: 'share', label: 'Create AI readable link' },
+    { key: 'copy', i18nKey: 'copyMarkdown' },
+    { key: 'share', i18nKey: 'createAiLink' },
   ];
   const POST_EXPORT_TYPES = [
-    { key: 'library-note', label: 'Save with note / tags' },
-    { key: 'copy', label: 'Copy Markdown' },
-    { key: 'share', label: 'Create AI readable link' },
+    { key: 'library-note', i18nKey: 'saveWithNote' },
+    { key: 'copy', i18nKey: 'copyMarkdownShort' },
+    { key: 'share', i18nKey: 'createAiLink' },
   ];
   // Which X surface the probe scrolls is an implementation detail of how X paginates
   // replies, not a choice a reader should have to make - and picking only one gives
   // up the coverage the others contribute. One item runs all three and merges.
   const THREAD_EXPORT_TYPES = [
-    { key: 'library-thread', label: 'Save full thread' },
+    { key: 'library-thread', i18nKey: 'saveFullThread' },
     ...POST_EXPORT_TYPES,
     { divider: true },
-    { key: 'reply-probe', label: 'Capture replies (experimental)' },
-    { key: 'reply-archive-download', label: 'Download reply archive' },
+    { key: 'reply-probe', i18nKey: 'captureReplies' },
+    { key: 'reply-archive-download', i18nKey: 'downloadReplyArchive' },
   ];
 
   function exportTypeNeedsCaptureOptions(exportType) {
@@ -10236,12 +10303,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     // every same-author reply BEFORE building the model - so this is safe even when
     // the current DOM shows only the focused post.
     const menuItems = isFocusedPost ? THREAD_EXPORT_TYPES : POST_EXPORT_TYPES;
+    const triggerI18nKey = openFirstReason ? 'openPostFirst' : isThread ? 'saveThread' : 'savePost';
     return {
       isThread,
       includeThread: isThread,
       requiresOpenPost: !!openFirstReason,
       openFirstReason,
-      label: openFirstReason ? 'Open post first' : isThread ? 'Save thread' : 'Save post',
+      label: pt(triggerI18nKey),
+      i18nKey: triggerI18nKey,
       title: openFirstReason
         ? 'Open this post before exporting so SourceCapsule can capture the full article/thread content'
         : isThread
@@ -10292,6 +10361,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 
   function createExportControl({
     triggerLabel,
+    triggerI18nKey,
     triggerTitle,
     className,
     onPick,
@@ -10304,7 +10374,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const trigger = document.createElement('button');
     trigger.type = 'button';
     trigger.className = 'xa-ctl-trigger';
-    trigger.textContent = triggerLabel;
+    trigger.textContent = triggerI18nKey ? pt(triggerI18nKey) : triggerLabel;
+    if (triggerI18nKey) trigger.dataset.i18nKey = triggerI18nKey;
     trigger.title = triggerTitle;
     const options = document.createElement('button');
     options.type = 'button';
@@ -10398,12 +10469,13 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         menu.appendChild(sep);
         return;
       }
-      const { key, label } = entry;
+      const { key, i18nKey, label } = entry;
       const item = document.createElement('button');
       item.type = 'button';
       item.className = 'xa-ctl-item';
       item.setAttribute('role', 'menuitem');
-      item.textContent = label;
+      item.textContent = i18nKey ? pt(i18nKey) : label;
+      if (i18nKey) item.dataset.i18nKey = i18nKey;
       item.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -10658,7 +10730,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const setBusy = (busy) => {
       if (!trigger) return;
       trigger.disabled = busy;
-      trigger.textContent = busy ? 'Exporting...' : restoreLabel;
+      trigger.textContent = busy ? pt('exporting') : restoreLabel;
       const options =
         trigger.parentElement && trigger.parentElement.querySelector('.xa-ctl-options');
       if (options) options.disabled = busy;
@@ -11012,13 +11084,17 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       // it's mid-export). Export itself re-checks the type at click time, so content is correct
       // regardless; this just keeps the label honest.
       const trig = existing.querySelector('.xa-ctl-trigger');
-      const label = type === 'article' ? 'Save article' : 'Save thread';
-      if (trig && !trig.disabled && trig.textContent !== label) trig.textContent = label;
+      const i18nKey = type === 'article' ? 'saveArticle' : 'saveThread';
+      const label = pt(i18nKey);
+      if (trig && !trig.disabled && trig.textContent !== label) {
+        trig.textContent = label;
+        trig.dataset.i18nKey = i18nKey;
+      }
       return;
     }
     ensureStyle();
     const { wrap } = createExportControl({
-      triggerLabel: type === 'article' ? 'Save article' : 'Save thread',
+      triggerI18nKey: type === 'article' ? 'saveArticle' : 'saveThread',
       triggerTitle: `Quick-save this ${type === 'article' ? 'article' : 'full thread'} to your SourceCapsule library (drag to move)`,
       className: 'xa-ctl xa-ctl-floating',
       menuItems: EXPORT_TYPES,
@@ -11062,6 +11138,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           const trigger = existing.querySelector('.xa-ctl-trigger');
           if (trigger && !trigger.disabled) {
             trigger.textContent = mode.label;
+            if (mode.i18nKey) trigger.dataset.i18nKey = mode.i18nKey;
             trigger.title = mode.title;
           }
           return;
@@ -11069,6 +11146,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       }
       const { wrap } = createExportControl({
         triggerLabel: mode.label,
+        triggerI18nKey: mode.i18nKey,
         triggerTitle: mode.title,
         className: `xa-ctl ${CONFIG.postControlClass}`,
         menuItems: mode.menuItems,
@@ -11128,7 +11206,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const caret = column.querySelector('[data-testid="caret"]'); // topmost = article header
     if (!caret || !caret.parentElement) return;
     const { wrap } = createExportControl({
-      triggerLabel: 'Save article',
+      triggerI18nKey: 'saveArticle',
       triggerTitle: `Quick-save this article to your SourceCapsule library`,
       className: `xa-ctl ${CONFIG.postControlClass}`,
       onQuick: (trigger) => runExport('library', { trigger }),
@@ -11516,10 +11594,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   // Browser bootstrap (guarded so the pure engine can be required from Node).
   if (typeof document !== 'undefined') {
     installNetworkCaptureBridge();
+    const doInit = () => initPageLanguage().then(init).catch(init);
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', init);
+      document.addEventListener('DOMContentLoaded', doInit);
     } else {
-      init();
+      doInit();
     }
   }
 
