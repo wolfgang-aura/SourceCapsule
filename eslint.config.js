@@ -9,6 +9,7 @@ module.exports = [
     ignores: [
       'node_modules/**',
       'dist/**',
+      'SourceCapsule/**',
       'share-worker/.wrangler/**',
       '*.export.html',
       'exports/**',

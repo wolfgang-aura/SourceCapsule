@@ -133,7 +133,10 @@ async function initLanguage() {
       applyLanguage(next);
       try {
         await chrome.storage.local.set({ uiLang: next });
-      } catch {}
+      } catch (e) {
+        // storage write failure is non-fatal; toggle already applied in memory
+        void e;
+      }
     });
   }
 }
