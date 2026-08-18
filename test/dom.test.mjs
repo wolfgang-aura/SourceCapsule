@@ -450,7 +450,7 @@ check(
     const focusedMode = engine.postControlCaptureMode(focused, column);
     assert.equal(focusedMode.isThread, true);
     assert.equal(focusedMode.includeThread, true);
-    assert.equal(focusedMode.label, 'Save thread');
+    assert.equal(focusedMode.i18nKey, 'saveThread');
     // Manual checklist T02 requires the drop-down's first item to be "Save full
     // thread" on every focused post - assert order, not just presence.
     assert.equal(focusedMode.menuItems[0].key, 'library-thread');
@@ -458,15 +458,15 @@ check(
     const focusedKeys = focusedMode.menuItems.filter((item) => !item.divider).map((i) => i.key);
     assert.ok(!focusedKeys.some((key) => /^reply-probe-/.test(key)), 'no per-surface menu items');
     const probe = focusedMode.menuItems.find((item) => item.key === 'reply-probe');
-    assert.match(probe.label, /experimental/i);
+    assert.equal(probe.i18nKey, 'captureReplies');
     const archive = focusedMode.menuItems.find((item) => item.key === 'reply-archive-download');
-    assert.match(archive.label, /Download reply archive/);
+    assert.equal(archive.i18nKey, 'downloadReplyArchive');
     // Capture and download stay adjacent and last: they are one workflow.
     assert.deepEqual(focusedKeys.slice(-2), ['reply-probe', 'reply-archive-download']);
     const continuationMode = engine.postControlCaptureMode(continuation, column);
     assert.equal(continuationMode.isThread, false);
     assert.equal(continuationMode.includeThread, false);
-    assert.equal(continuationMode.label, 'Save post');
+    assert.equal(continuationMode.i18nKey, 'savePost');
     assert.ok(!continuationMode.menuItems.some((item) => item.key === 'library-thread'));
   }
 );

@@ -36,7 +36,7 @@ assert.ok(
 );
 assert.ok(
   engine.THREAD_EXPORT_TYPES.some(
-    (item) => item.key === 'library-thread' && item.label === 'Save full thread'
+    (item) => item.key === 'library-thread' && item.i18nKey === 'saveFullThread'
   ),
   'thread menu keeps full-thread capture explicit'
 );
