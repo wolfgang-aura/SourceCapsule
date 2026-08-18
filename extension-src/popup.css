@@ -111,19 +111,32 @@ h1 {
   font-weight: 700;
 }
 
-.lang-toggle {
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 650;
+.lang-switch {
+  display: flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg);
   cursor: pointer;
-  transition: 120ms ease;
+  transition: border-color 120ms ease;
 }
 
-.lang-toggle:hover {
-  color: var(--accent);
+.lang-switch:hover {
+  border-color: var(--accent);
+}
+
+.lang-option {
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  transition:
+    background 120ms ease,
+    color 120ms ease,
+    box-shadow 120ms ease;
 }
 
 .status-card {

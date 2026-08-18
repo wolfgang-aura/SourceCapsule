@@ -101,7 +101,21 @@ function applyLanguage(lang) {
     if (strings[key] !== undefined) el.textContent = strings[key];
   });
   const btn = document.getElementById('lang-toggle');
-  if (btn) btn.textContent = lang === 'zh' ? '中文' : 'EN';
+  if (btn) {
+    btn.setAttribute('aria-checked', lang === 'zh' ? 'true' : 'false');
+    const enSpan = btn.querySelector('.lang-en');
+    const zhSpan = btn.querySelector('.lang-zh');
+    const activeSpan = lang === 'zh' ? zhSpan : enSpan;
+    const inactiveSpan = lang === 'zh' ? enSpan : zhSpan;
+    if (activeSpan && inactiveSpan) {
+      activeSpan.style.background = 'var(--surface)';
+      activeSpan.style.color = 'var(--accent)';
+      activeSpan.style.boxShadow = '0 1px 3px rgb(15 20 25 / 12%)';
+      inactiveSpan.style.background = '';
+      inactiveSpan.style.color = '';
+      inactiveSpan.style.boxShadow = '';
+    }
+  }
   if (rerenderStatus) rerenderStatus();
 }
 
@@ -221,13 +235,21 @@ async function initPopup() {
   document.querySelector('#version').textContent = `v${chrome.runtime.getManifest().version}`;
   const tab = await activeTab();
   if (!tab || !isSupportedXUrl(tab.url || '')) {
-    showState('error', () => t('openXTitle'), () => t('openXDesc'));
+    showState(
+      'error',
+      () => t('openXTitle'),
+      () => t('openXDesc')
+    );
     openX.hidden = false;
     return;
   }
   const state = await sendToController(tab.id, 'get-state');
   if (!state || !state.ok) {
-    showState('error', () => t('refreshTitle'), () => t('refreshDesc'));
+    showState(
+      'error',
+      () => t('refreshTitle'),
+      () => t('refreshDesc')
+    );
     return;
   }
   const pageType = state.pageType;
