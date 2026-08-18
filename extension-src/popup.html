@@ -21,10 +21,14 @@
         <span class="status-dot" aria-hidden="true"></span>
         <div>
           <strong id="status-title" data-i18n="statusChecking">Checking this tab</strong>
-          <p id="status" role="status" data-i18n="statusConnecting">Connecting to SourceCapsule&hellip;</p>
+          <p id="status" role="status" data-i18n="statusConnecting">
+            Connecting to SourceCapsule&hellip;
+          </p>
         </div>
       </section>
-      <button id="open-x" class="primary-action" type="button" hidden data-i18n="openX">Open X</button>
+      <button id="open-x" class="primary-action" type="button" hidden data-i18n="openX">
+        Open X
+      </button>
 
       <form id="settings" hidden>
         <section class="settings-card" aria-labelledby="library-heading">
@@ -37,18 +41,30 @@
           <fieldset>
             <legend data-i18n="folderLayout">Folder layout</legend>
             <div class="segmented">
-              <label><input type="radio" name="layout" value="date" /><span data-i18n="layoutDate">By date</span></label>
-              <label><input type="radio" name="layout" value="flat" /><span data-i18n="layoutFlat">Flat</span></label>
+              <label
+                ><input type="radio" name="layout" value="date" /><span data-i18n="layoutDate"
+                  >By date</span
+                ></label
+              >
+              <label
+                ><input type="radio" name="layout" value="flat" /><span data-i18n="layoutFlat"
+                  >Flat</span
+                ></label
+              >
             </div>
           </fieldset>
           <fieldset>
             <legend data-i18n="savedFiles">Saved files</legend>
             <div class="segmented">
               <label
-                ><input type="radio" name="contents" value="full" /><span data-i18n="contentsFull">Full archive</span></label
+                ><input type="radio" name="contents" value="full" /><span data-i18n="contentsFull"
+                  >Full archive</span
+                ></label
               >
               <label
-                ><input type="radio" name="contents" value="lean" /><span data-i18n="contentsLean">Lean + media</span></label
+                ><input type="radio" name="contents" value="lean" /><span data-i18n="contentsLean"
+                  >Lean + media</span
+                ></label
               >
             </div>
           </fieldset>
@@ -56,10 +72,17 @@
             <span class="delivery-icon" aria-hidden="true"></span>
             <div>
               <strong id="delivery-title" data-i18n="deliveryTitle">Export folder</strong>
-              <p id="delivery-copy" data-i18n="deliveryCopy">Saved to the folder you choose on X.</p>
+              <p id="delivery-copy" data-i18n="deliveryCopy">
+                Saved to the folder you choose on X.
+              </p>
             </div>
           </div>
-          <button id="change-folder" class="secondary-action" type="button" data-i18n="changeFolder">
+          <button
+            id="change-folder"
+            class="secondary-action"
+            type="button"
+            data-i18n="changeFolder"
+          >
             Choose export folder
           </button>
           <p id="folder-help" class="inline-feedback" role="status" hidden></p>
@@ -74,7 +97,8 @@
           </div>
           <label class="switch-row">
             <span
-              ><strong data-i18n="strictExport">Strict export</strong><small data-i18n="strictExportDesc">Retry and warn before saving gaps</small></span
+              ><strong data-i18n="strictExport">Strict export</strong
+              ><small data-i18n="strictExportDesc">Retry and warn before saving gaps</small></span
             >
             <input id="strict-export" type="checkbox" role="switch" />
           </label>
@@ -88,7 +112,9 @@
           <label class="switch-row">
             <span
               ><strong data-i18n="floatingButton">Floating button</strong
-              ><small data-i18n="floatingButtonDesc">Show a draggable page-level shortcut</small></span
+              ><small data-i18n="floatingButtonDesc"
+                >Show a draggable page-level shortcut</small
+              ></span
             >
             <input id="floating-button" type="checkbox" role="switch" />
           </label>
@@ -111,7 +137,17 @@
           data-i18n="navPrivacy"
           >Privacy</a
         >
-        <button id="lang-toggle" class="lang-toggle" type="button" aria-label="Switch language">EN</button>
+        <button
+          id="lang-toggle"
+          class="lang-switch"
+          type="button"
+          role="switch"
+          aria-checked="false"
+          aria-label="Switch language / 切换语言"
+        >
+          <span class="lang-option lang-en">EN</span>
+          <span class="lang-option lang-zh">中文</span>
+        </button>
       </nav>
     </main>
     <script src="popup.js"></script>
