@@ -36,7 +36,7 @@ main {
 
 .brand {
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr auto auto;
   align-items: center;
   gap: 10px;
   margin-bottom: 15px;
@@ -109,6 +109,24 @@ h1 {
   color: var(--muted);
   font-size: 10px;
   font-weight: 700;
+}
+
+.lang-toggle {
+  align-self: start;
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: 120ms ease;
+}
+
+.lang-toggle:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .status-card {
