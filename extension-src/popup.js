@@ -90,6 +90,7 @@ const STRINGS = {
 };
 
 let currentLang = 'en';
+let rerenderStatus = null;
 
 function applyLanguage(lang) {
   currentLang = lang;
@@ -101,6 +102,7 @@ function applyLanguage(lang) {
   });
   const btn = document.getElementById('lang-toggle');
   if (btn) btn.textContent = lang === 'zh' ? '中文' : 'EN';
+  if (rerenderStatus) rerenderStatus();
 }
 
 async function initLanguage() {
@@ -140,12 +142,29 @@ async function activeTab() {
   return tab || null;
 }
 
+const INTERNAL_ERRORS = {
+  en: {
+    noActiveTab: 'No active tab is available.',
+    notAvailable: 'SourceCapsule is not available on this tab.',
+    popupError: 'SourceCapsule popup error:',
+  },
+  zh: {
+    noActiveTab: '没有可用的活动标签页。',
+    notAvailable: 'SourceCapsule 在此标签页上不可用。',
+    popupError: 'SourceCapsule 弹窗错误：',
+  },
+};
+
+function te(key) {
+  return (INTERNAL_ERRORS[currentLang] || INTERNAL_ERRORS.en)[key] || key;
+}
+
 async function sendToController(tabId, action, value) {
-  if (!Number.isInteger(tabId)) return { ok: false, error: 'No active tab is available.' };
+  if (!Number.isInteger(tabId)) return { ok: false, error: te('noActiveTab') };
   try {
     return await chrome.tabs.sendMessage(tabId, controllerMessage(action, value));
   } catch (error) {
-    return { ok: false, error: error.message || 'SourceCapsule is not available on this tab.' };
+    return { ok: false, error: error.message || te('notAvailable') };
   }
 }
 
@@ -177,10 +196,20 @@ async function initPopup() {
   const settings = document.querySelector('#settings');
   const openX = document.querySelector('#open-x');
   const saveFeedback = document.querySelector('#save-feedback');
-  const showState = (state, title, message) => {
+  let lastState = null;
+  const showState = (state, titleFn, messageFn) => {
+    lastState = { state, titleFn, messageFn };
     statusCard.dataset.state = state;
-    statusTitle.textContent = title;
-    status.textContent = message;
+    statusTitle.textContent = typeof titleFn === 'function' ? titleFn() : titleFn;
+    status.textContent = typeof messageFn === 'function' ? messageFn() : messageFn;
+  };
+  rerenderStatus = () => {
+    if (lastState) {
+      statusTitle.textContent =
+        typeof lastState.titleFn === 'function' ? lastState.titleFn() : lastState.titleFn;
+      status.textContent =
+        typeof lastState.messageFn === 'function' ? lastState.messageFn() : lastState.messageFn;
+    }
   };
   let feedbackTimer = null;
   const showFeedback = (message, error = false) => {
@@ -192,20 +221,20 @@ async function initPopup() {
   document.querySelector('#version').textContent = `v${chrome.runtime.getManifest().version}`;
   const tab = await activeTab();
   if (!tab || !isSupportedXUrl(tab.url || '')) {
-    showState('error', t('openXTitle'), t('openXDesc'));
+    showState('error', () => t('openXTitle'), () => t('openXDesc'));
     openX.hidden = false;
     return;
   }
   const state = await sendToController(tab.id, 'get-state');
   if (!state || !state.ok) {
-    showState('error', t('refreshTitle'), t('refreshDesc'));
+    showState('error', () => t('refreshTitle'), () => t('refreshDesc'));
     return;
   }
-  const context = pageContextLabel(state.pageType);
+  const pageType = state.pageType;
   showState(
     'ready',
-    `${context} ${t('ready')}`,
-    state.recoveryReady === false ? t('recoveryConnecting') : t('recoveryActive')
+    () => `${pageContextLabel(pageType)} ${t('ready')}`,
+    state.recoveryReady === false ? () => t('recoveryConnecting') : () => t('recoveryActive')
   );
   settings.hidden = false;
   setChecked('layout', state.prefs.layout);
@@ -265,7 +294,7 @@ if (typeof document !== 'undefined') {
     .addEventListener('click', () => chrome.tabs.create({ url: 'https://x.com/' }));
   initLanguage();
   initPopup().catch((error) => {
-    document.querySelector('#status').textContent = `SourceCapsule popup error: ${error.message}`;
+    document.querySelector('#status').textContent = `${te('popupError')} ${error.message}`;
   });
 }
 
