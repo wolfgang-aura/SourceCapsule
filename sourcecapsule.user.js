@@ -8410,7 +8410,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       copyMarkdownShort: '复制 Markdown',
       createAiLink: '创建 AI 可读链接',
       saveFullThread: '保存完整话题串',
-      captureReplies: '捕获回复（实验性）',
+      captureReplies: '捕获回复（实验性功能）',
       downloadReplyArchive: '下载回复存档',
       saveArticle: '保存文章',
       saveThread: '保存话题串',
