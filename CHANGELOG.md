@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-08-18
+
+### Added
+
+- **EN / 中文 language toggle** in the MV3 extension popup. A segmented pill switch in
+  the popup footer switches the popup UI and on-page export buttons between English and
+  Simplified Chinese. The choice persists across popup opens via `chrome.storage.local`.
+
 ## [1.5.0] - 2026-08-18
 
 ### Added
