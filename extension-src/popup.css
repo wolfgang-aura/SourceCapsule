@@ -111,6 +111,34 @@ h1 {
   font-weight: 700;
 }
 
+.lang-switch {
+  display: flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg);
+  cursor: pointer;
+  transition: border-color 120ms ease;
+}
+
+.lang-switch:hover {
+  border-color: var(--accent);
+}
+
+.lang-option {
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  transition:
+    background 120ms ease,
+    color 120ms ease,
+    box-shadow 120ms ease;
+}
+
 .status-card {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -379,6 +407,7 @@ button:disabled {
 
 nav {
   display: flex;
+  align-items: center;
   justify-content: center;
   gap: 18px;
   margin-top: 13px;

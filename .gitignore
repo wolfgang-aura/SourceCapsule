@@ -23,6 +23,7 @@ probe-results/
 sourcecapsule-extension*.zip
 
 # Local cross-session working notes (kept on-machine, not published)
+SOURCE_OF_TRUTH.md
 SESSION_HANDOFF.md
 KEEP_GOING_REPORT.md
 CLAUDE.md
@@ -34,3 +35,6 @@ docs/live-browser-test-report-*.md
 docs/mobile-capture-v1.md
 docs/v*-launch-*.md
 docs/v*-one-shot-implementation.md
+
+# Nested repo clones (created by agents for branch checkouts)
+SourceCapsule/
