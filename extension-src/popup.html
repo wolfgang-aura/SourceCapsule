@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" id="html-root">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -12,7 +12,7 @@
         <span class="brand-mark" aria-hidden="true"><span></span></span>
         <div class="brand-copy">
           <h1>SourceCapsule</h1>
-          <p>Archive X. Keep the source.</p>
+          <p data-i18n="tagline">Archive X. Keep the source.</p>
         </div>
         <span id="version"></span>
       </header>
@@ -20,46 +20,69 @@
       <section id="status-card" class="status-card" data-state="checking" aria-live="polite">
         <span class="status-dot" aria-hidden="true"></span>
         <div>
-          <strong id="status-title">Checking this tab</strong>
-          <p id="status" role="status">Connecting to SourceCapsule&hellip;</p>
+          <strong id="status-title" data-i18n="statusChecking">Checking this tab</strong>
+          <p id="status" role="status" data-i18n="statusConnecting">
+            Connecting to SourceCapsule&hellip;
+          </p>
         </div>
       </section>
-      <button id="open-x" class="primary-action" type="button" hidden>Open X</button>
+      <button id="open-x" class="primary-action" type="button" hidden data-i18n="openX">
+        Open X
+      </button>
 
       <form id="settings" hidden>
         <section class="settings-card" aria-labelledby="library-heading">
           <div class="section-heading">
             <div>
-              <h2 id="library-heading">Library</h2>
-              <p>Choose the folder structure and files saved per post.</p>
+              <h2 id="library-heading" data-i18n="libraryHeading">Library</h2>
+              <p data-i18n="libraryDesc">Choose the folder structure and files saved per post.</p>
             </div>
           </div>
           <fieldset>
-            <legend>Folder layout</legend>
+            <legend data-i18n="folderLayout">Folder layout</legend>
             <div class="segmented">
-              <label><input type="radio" name="layout" value="date" /><span>By date</span></label>
-              <label><input type="radio" name="layout" value="flat" /><span>Flat</span></label>
+              <label
+                ><input type="radio" name="layout" value="date" /><span data-i18n="layoutDate"
+                  >By date</span
+                ></label
+              >
+              <label
+                ><input type="radio" name="layout" value="flat" /><span data-i18n="layoutFlat"
+                  >Flat</span
+                ></label
+              >
             </div>
           </fieldset>
           <fieldset>
-            <legend>Saved files</legend>
+            <legend data-i18n="savedFiles">Saved files</legend>
             <div class="segmented">
               <label
-                ><input type="radio" name="contents" value="full" /><span>Full archive</span></label
+                ><input type="radio" name="contents" value="full" /><span data-i18n="contentsFull"
+                  >Full archive</span
+                ></label
               >
               <label
-                ><input type="radio" name="contents" value="lean" /><span>Lean + media</span></label
+                ><input type="radio" name="contents" value="lean" /><span data-i18n="contentsLean"
+                  >Lean + media</span
+                ></label
               >
             </div>
           </fieldset>
           <div class="delivery-row">
             <span class="delivery-icon" aria-hidden="true"></span>
             <div>
-              <strong id="delivery-title">Export folder</strong>
-              <p id="delivery-copy">Saved to the folder you choose on X.</p>
+              <strong id="delivery-title" data-i18n="deliveryTitle">Export folder</strong>
+              <p id="delivery-copy" data-i18n="deliveryCopy">
+                Saved to the folder you choose on X.
+              </p>
             </div>
           </div>
-          <button id="change-folder" class="secondary-action" type="button">
+          <button
+            id="change-folder"
+            class="secondary-action"
+            type="button"
+            data-i18n="changeFolder"
+          >
             Choose export folder
           </button>
           <p id="folder-help" class="inline-feedback" role="status" hidden></p>
@@ -68,27 +91,30 @@
         <section class="settings-card" aria-labelledby="capture-heading">
           <div class="section-heading">
             <div>
-              <h2 id="capture-heading">Capture</h2>
-              <p>Safer defaults for complete, useful archives.</p>
+              <h2 id="capture-heading" data-i18n="captureHeading">Capture</h2>
+              <p data-i18n="captureDesc">Safer defaults for complete, useful archives.</p>
             </div>
           </div>
           <label class="switch-row">
             <span
-              ><strong>Strict export</strong><small>Retry and warn before saving gaps</small></span
+              ><strong data-i18n="strictExport">Strict export</strong
+              ><small data-i18n="strictExportDesc">Retry and warn before saving gaps</small></span
             >
             <input id="strict-export" type="checkbox" role="switch" />
           </label>
           <label class="switch-row">
             <span
-              ><strong>Reply context</strong
-              ><small>Include the post this reply answers</small></span
+              ><strong data-i18n="replyContext">Reply context</strong
+              ><small data-i18n="replyContextDesc">Include the post this reply answers</small></span
             >
             <input id="reply-context" type="checkbox" role="switch" />
           </label>
           <label class="switch-row">
             <span
-              ><strong>Floating button</strong
-              ><small>Show a draggable page-level shortcut</small></span
+              ><strong data-i18n="floatingButton">Floating button</strong
+              ><small data-i18n="floatingButtonDesc"
+                >Show a draggable page-level shortcut</small
+              ></span
             >
             <input id="floating-button" type="checkbox" role="switch" />
           </label>
@@ -101,14 +127,27 @@
           href="https://github.com/wolfgang-aura/SourceCapsule#readme"
           target="_blank"
           rel="noopener noreferrer"
+          data-i18n="navHelp"
           >Help &amp; source</a
         >
         <a
           href="https://github.com/wolfgang-aura/SourceCapsule#privacy-and-security"
           target="_blank"
           rel="noopener noreferrer"
+          data-i18n="navPrivacy"
           >Privacy</a
         >
+        <button
+          id="lang-toggle"
+          class="lang-switch"
+          type="button"
+          role="switch"
+          aria-checked="false"
+          aria-label="Switch language / 切换语言"
+        >
+          <span class="lang-option lang-en">EN</span>
+          <span class="lang-option lang-zh">中文</span>
+        </button>
       </nav>
     </main>
     <script src="popup.js"></script>
