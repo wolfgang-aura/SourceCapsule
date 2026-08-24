@@ -181,6 +181,12 @@ cleanup. To try it:
 4. Confirm. The resulting URL is copied to your clipboard.
 5. Paste the URL into a new tab. Add `.md` to the capsule URL for the clean Markdown endpoint.
 
+When the link expires, the archived copy is deleted but the link does not go blank: it serves a
+short notice page pointing back to the original post on X, so whoever you sent it to can still
+find the source. The `.md` endpoint serves the same notice as Markdown. That pointer holds only
+the post's public permalink, title, and author handle — nothing about who made the link — and is
+removed 180 days after expiry, or immediately if you delete the link.
+
 Successful links are remembered in this browser under **SourceCapsule: Recent AI readable links**.
 Expired links remain visible but greyed out. When a link is created from a local-save receipt or the
 combined save-and-link flow, SourceCapsule also writes `AI_LINK.txt` beside the saved Markdown so the
@@ -282,6 +288,8 @@ and extension packaging. It does not replace manual testing against X's live DOM
 - Shared pages send `noindex` and restrictive security headers.
 - The service rejects unsupported file paths and caps each capsule at 25 MB.
 - A deletion token is created client-side and is not exposed in the public URL.
+- After expiry only a back-link to the original public post survives; deleting a link removes
+  that too.
 
 Do not share sensitive posts through a public deployment until authentication and abuse controls
 exist. “Unguessable” is useful access control for v1 testing, not a replacement for user accounts.
