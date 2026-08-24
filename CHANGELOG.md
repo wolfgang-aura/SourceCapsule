@@ -6,6 +6,32 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-08-24
+
+### Changed
+
+- **An expired AI readable link now points back to the original post.** Previously, when a
+  shared capsule reached its 1/7/30-day expiry, the Worker deleted everything and answered
+  with a bare `410 This SourceCapsule link has expired.` — a recipient had no way to tell
+  what the link had ever pointed at. The archived copy is still deleted on schedule, but a
+  small record of the post's public X permalink, title, and author handle survives, and the
+  expired URL now serves a notice page linking back to the original post. `/c/<id>.md`
+  serves the same notice as Markdown, so an agent following a dead link gets a usable
+  pointer instead of an error.
+
+  The record holds nothing about who created the link — only a URL that was already public
+  on X. It is removed 180 days after expiry, or immediately when the creator deletes the
+  link. Capsules created before this release have no stored permalink and expire exactly as
+  they did before.
+
+### Fixed
+
+- The daily cleanup job no longer reads every capsule object to check its expiry; it reads
+  the expiry from R2 list metadata instead, so sweep cost no longer grows with the number
+  of stored capsules.
+- `POST /api/capsules/<id>/finalize` now rejects an expired upload session, matching the
+  check already applied to file uploads.
+
 ## [1.5.1] - 2026-08-18
 
 ### Added

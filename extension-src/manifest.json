@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "SourceCapsule",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "Save complete X threads, Articles, and posts as offline archives, agent-ready Markdown, or expiring share links.",
   "permissions": ["activeTab", "storage"],
   "host_permissions": [

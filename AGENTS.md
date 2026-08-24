@@ -94,7 +94,14 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
   auto-detection at button-render time.
 - **Share with AI** uploads only after confirmation to the configured share Worker, with a default
   7-day expiry (1/30 days optional), a 25 MB cap, and no raw video. The Cloudflare Worker + R2
-  implementation lives in `share-worker/`.
+  implementation lives in `share-worker/`. The create call sends the post's canonical permalink so
+  that **expiry leaves a tombstone, not a dead end**: content is deleted at expiry but a ~300-byte
+  record survives and `/c/<id>`(`.md`) answers 410 with a page linking back to the original X post.
+  The Worker re-validates `sourceUrl` against a canonical `x.com/<handle>/status/<id>` pattern — it
+  must never emit a URL the client merely asserted, or the endpoint becomes an open redirect.
+  Tombstones are hard-deleted 180 days after expiry, or immediately on `DELETE`. The scheduled
+  sweep must keep reading `expiresAt` from `customMetadata` on the list page; reverting to a
+  per-capsule GET makes cleanup cost grow without bound as tombstones accumulate.
 - `npm run build:extension` generates an experimental MV3 package in
   `dist/sourcecapsule-extension/` using the same userscript source plus a thin GM compatibility
   layer.

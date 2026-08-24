@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
-import worker from '../share-worker/worker.mjs';
+import worker, { cleanupExpired } from '../share-worker/worker.mjs';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
 class MemoryR2 {
   constructor() {
     this.objects = new Map();
+    this.getCount = 0;
   }
 
   async put(key, value, options = {}) {
@@ -19,6 +20,7 @@ class MemoryR2 {
   }
 
   async get(key) {
+    this.getCount += 1;
     const item = this.objects.get(key);
     if (!item) return null;
     return {
@@ -38,11 +40,19 @@ class MemoryR2 {
     return item ? { customMetadata: item.customMetadata } : null;
   }
 
-  async list({ prefix = '' } = {}) {
+  async list({ prefix = '', include = [] } = {}) {
+    const wantCustom = include.includes('customMetadata');
     return {
       objects: Array.from(this.objects.keys())
         .filter((key) => key.startsWith(prefix))
-        .map((key) => ({ key, size: this.objects.get(key).bytes.byteLength })),
+        .map((key) => {
+          const item = this.objects.get(key);
+          const entry = { key, size: item.bytes.byteLength };
+          // R2 only returns customMetadata when it is explicitly requested; the double
+          // enforces that so the cleanup job cannot silently rely on it going missing.
+          if (wantCustom) entry.customMetadata = item.customMetadata;
+          return entry;
+        }),
       truncated: false,
     };
   }
@@ -216,5 +226,242 @@ const deleted = await worker.fetch(
 );
 assert.equal(deleted.status, 200);
 assert.equal((await worker.fetch(new Request(created.viewUrl), env, ctx)).status, 404);
+
+// --- Expired-capsule tombstone -------------------------------------------------
+// An expired share link used to be a dead end: the worker deleted everything and
+// answered with a bare 410. It now keeps a back-link to the original X post.
+
+const SOURCE = 'https://x.com/jack/status/20';
+
+async function publishCapsule(
+  store,
+  { sourceUrl = SOURCE, title = 'Hello world', handle = '@jack' } = {}
+) {
+  const response = await worker.fetch(
+    new Request('https://share.example/api/capsules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expiryDays: 7, sourceUrl, title, handle }),
+    }),
+    { CAPSULES: store },
+    ctx
+  );
+  const capsule = await response.json();
+  for (const [name, content, contentType] of [
+    ['content.html', '<!doctype html><title>Live</title>', 'text/html'],
+    ['content.md', '# Live', 'text/markdown'],
+    ['manifest.json', '{"ok":true}', 'application/json'],
+    ['media/image-001.jpg', new Uint8Array([1, 2, 3]), 'image/jpeg'],
+  ]) {
+    await worker.fetch(
+      new Request(`${capsule.uploadUrl}/${name}`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${capsule.uploadToken}`, 'Content-Type': contentType },
+        body: content,
+        duplex: 'half',
+      }),
+      { CAPSULES: store },
+      ctx
+    );
+  }
+  await worker.fetch(
+    new Request(capsule.finalizeUrl, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${capsule.uploadToken}` },
+    }),
+    { CAPSULES: store },
+    ctx
+  );
+  return capsule;
+}
+
+// Rewrite a stored capsule's expiry to a past date, the way the clock would.
+function forceExpiry(store, id, iso) {
+  const item = store.objects.get(`capsules/${id}/_meta.json`);
+  const meta = JSON.parse(new TextDecoder().decode(item.bytes));
+  meta.expiresAt = iso;
+  item.bytes = new TextEncoder().encode(JSON.stringify(meta));
+  item.customMetadata = { ...item.customMetadata, expiresAt: iso };
+}
+
+const past = new Date(Date.now() - 86400000).toISOString();
+
+{
+  // A hostile or unrecognised source URL is dropped, never stored or echoed back.
+  const store = new MemoryR2();
+  for (const badSource of [
+    'https://evil.example/jack/status/20',
+    'javascript:alert(1)',
+    'https://x.com.evil.example/jack/status/20',
+    'https://x.com/jack/status/20?utm=1',
+  ]) {
+    const response = await worker.fetch(
+      new Request('https://share.example/api/capsules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expiryDays: 7, sourceUrl: badSource }),
+      }),
+      { CAPSULES: store },
+      ctx
+    );
+    assert.equal(response.status, 201, `capsule still created for ${badSource}`);
+    assert.equal((await response.json()).sourceUrl, '', `sourceUrl rejected: ${badSource}`);
+  }
+  const good = await worker.fetch(
+    new Request('https://share.example/api/capsules', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        expiryDays: 7,
+        sourceUrl: 'https://twitter.com/jack/status/20/photo/1',
+      }),
+    }),
+    { CAPSULES: store },
+    ctx
+  );
+  assert.equal((await good.json()).sourceUrl, SOURCE, 'normalized to a canonical permalink');
+}
+
+{
+  // Serving an overdue capsule: content is deleted, the back-link survives.
+  const store = new MemoryR2();
+  const tombEnv = { CAPSULES: store };
+  const capsule = await publishCapsule(store, { title: 'Title <script>alert(1)</script>' });
+  forceExpiry(store, capsule.id, past);
+
+  const expired = await worker.fetch(new Request(capsule.viewUrl), tombEnv, ctx);
+  assert.equal(expired.status, 410);
+  assert.match(expired.headers.get('Content-Type'), /text\/html/);
+  const body = await expired.text();
+  assert.ok(body.includes(SOURCE), 'tombstone links back to the original post');
+  assert.ok(!body.includes('<script>alert(1)</script>'), 'title is HTML-escaped');
+  assert.equal(expired.headers.get('X-Robots-Tag'), 'noindex, nofollow, noarchive');
+
+  assert.equal(store.objects.has(`capsules/${capsule.id}/content.html`), false, 'HTML deleted');
+  assert.equal(
+    store.objects.has(`capsules/${capsule.id}/media/image-001.jpg`),
+    false,
+    'media deleted'
+  );
+  assert.equal(store.objects.has(`capsules/${capsule.id}/_meta.json`), true, 'tombstone kept');
+
+  // Every later request hits the tombstone path rather than the live path.
+  const again = await worker.fetch(new Request(capsule.viewUrl), tombEnv, ctx);
+  assert.equal(again.status, 410);
+  assert.ok((await again.text()).includes(SOURCE));
+
+  const head = await worker.fetch(new Request(capsule.viewUrl, { method: 'HEAD' }), tombEnv, ctx);
+  assert.equal(head.status, 410);
+  assert.ok(Number(head.headers.get('Content-Length')) > 0);
+  assert.equal((await head.arrayBuffer()).byteLength, 0, 'HEAD carries no body');
+
+  // The .md view stays machine-readable for the AI tools these links are made for.
+  const markdown = await worker.fetch(new Request(capsule.markdownUrl), tombEnv, ctx);
+  assert.equal(markdown.status, 410);
+  assert.match(markdown.headers.get('Content-Type'), /text\/markdown/);
+  assert.ok((await markdown.text()).includes(SOURCE));
+
+  // Re-uploading into an expired capsule stays impossible.
+  const reupload = await worker.fetch(
+    new Request(`${capsule.uploadUrl}/content.html`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${capsule.uploadToken}`, 'Content-Type': 'text/html' },
+      body: '<p>new</p>',
+      duplex: 'half',
+    }),
+    tombEnv,
+    ctx
+  );
+  assert.equal(reupload.status, 410);
+  const refinalize = await worker.fetch(
+    new Request(capsule.finalizeUrl, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${capsule.uploadToken}` },
+    }),
+    tombEnv,
+    ctx
+  );
+  assert.equal(refinalize.status, 410);
+
+  // The creator's delete token still hard-deletes the tombstone.
+  const deleted = await worker.fetch(
+    new Request(capsule.deleteUrl, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${capsule.deleteToken}` },
+    }),
+    tombEnv,
+    ctx
+  );
+  assert.equal(deleted.status, 200);
+  assert.equal(store.objects.has(`capsules/${capsule.id}/_meta.json`), false, 'tombstone removed');
+  assert.equal((await worker.fetch(new Request(capsule.viewUrl), tombEnv, ctx)).status, 404);
+}
+
+{
+  // No usable source URL means no tombstone: behaviour is exactly as before.
+  const store = new MemoryR2();
+  const tombEnv = { CAPSULES: store };
+  const capsule = await publishCapsule(store, { sourceUrl: '' });
+  forceExpiry(store, capsule.id, past);
+  const expired = await worker.fetch(new Request(capsule.viewUrl), tombEnv, ctx);
+  assert.equal(expired.status, 410);
+  assert.equal(await expired.text(), 'This SourceCapsule link has expired.');
+  assert.equal(store.objects.has(`capsules/${capsule.id}/_meta.json`), false, 'no tombstone kept');
+}
+
+{
+  // The scheduled sweep: expire overdue capsules, keep fresh tombstones, drop worn-out
+  // ones, and leave live capsules alone.
+  const store = new MemoryR2();
+  const tombEnv = { CAPSULES: store };
+  const live = await publishCapsule(store);
+  const overdue = await publishCapsule(store);
+  const stale = await publishCapsule(store);
+  forceExpiry(store, overdue.id, past);
+  forceExpiry(store, stale.id, new Date(Date.now() - 200 * 86400000).toISOString());
+
+  await cleanupExpired(tombEnv);
+  assert.equal(store.objects.has(`capsules/${live.id}/content.html`), true, 'live capsule intact');
+  assert.equal(
+    store.objects.has(`capsules/${overdue.id}/content.html`),
+    false,
+    'overdue content gone'
+  );
+  assert.equal(store.objects.has(`capsules/${overdue.id}/_meta.json`), true, 'overdue tombstoned');
+
+  // A tombstone older than the retention window is hard-deleted on the next sweep.
+  await cleanupExpired(tombEnv);
+  assert.equal(
+    store.objects.has(`capsules/${stale.id}/_meta.json`),
+    false,
+    'worn-out tombstone gone'
+  );
+
+  // An upload abandoned before finalize leaves nothing behind, tombstone included.
+  const abandoned = await (
+    await worker.fetch(
+      new Request('https://share.example/api/capsules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expiryDays: 1, sourceUrl: SOURCE, title: 'Abandoned' }),
+      }),
+      tombEnv,
+      ctx
+    )
+  ).json();
+  forceExpiry(store, abandoned.id, past);
+  await cleanupExpired(tombEnv);
+  assert.equal(
+    store.objects.has(`capsules/${abandoned.id}/_meta.json`),
+    false,
+    'abandoned upload leaves no tombstone'
+  );
+
+  // Cost guard: the sweep must not read every capsule. A live capsule and a fresh
+  // tombstone are both judged from the list page alone.
+  const readsBefore = store.getCount;
+  await cleanupExpired(tombEnv);
+  assert.equal(store.getCount, readsBefore, 'no per-capsule reads when nothing is due');
+}
 
 console.log('SourceCapsule share worker test passed.');

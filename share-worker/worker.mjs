@@ -1,5 +1,10 @@
 const MAX_CAPSULE_BYTES = 25 * 1024 * 1024;
 const VALID_EXPIRY_DAYS = new Set([1, 7, 30]);
+// How long an expired capsule keeps its tombstone (content is deleted at expiry;
+// only the back-link record survives). After this it is hard-deleted entirely.
+const TOMBSTONE_RETENTION_DAYS = 180;
+const SOURCE_URL_PATTERN =
+  /^https:\/\/(?:x|twitter)\.com\/([A-Za-z0-9_]{1,15})\/status\/([0-9]{1,20})(?:\/(?:photo|video)\/[0-9]{1,2})?\/?$/;
 
 function corsHeaders(request) {
   const origin = request.headers.get('Origin') || '*';
@@ -51,6 +56,32 @@ function validFilePath(path) {
   );
 }
 
+// Only a canonical public X post permalink is ever stored or emitted. Anything else is
+// dropped, so an expired capsule can never be used to redirect a reader somewhere else.
+function sanitizeSourceUrl(value) {
+  const raw = String(value || '').trim();
+  const match = SOURCE_URL_PATTERN.exec(raw);
+  return match ? `https://x.com/${match[1]}/status/${match[2]}` : '';
+}
+
+function sanitizeLabel(value, max = 200) {
+  return (
+    String(value || '')
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u001f\u007f]/g, ' ')
+      .trim()
+      .slice(0, max)
+  );
+}
+
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 function mimeFromPath(path) {
   const clean = String(path || '')
     .split('?')[0]
@@ -92,15 +123,22 @@ async function putMeta(env, meta, tokenHashValue, status) {
   delete publicMeta._custom;
   await env.CAPSULES.put(metaKey(meta.id), JSON.stringify(publicMeta), {
     httpMetadata: { contentType: 'application/json;charset=utf-8' },
-    customMetadata: { tokenHash: tokenHashValue, status },
+    // expiresAt is duplicated into customMetadata so the daily cleanup can read it
+    // straight off a list page. Without it the cron needs one GET per capsule, which
+    // grows without bound as tombstones accumulate.
+    customMetadata: {
+      tokenHash: tokenHashValue,
+      status,
+      expiresAt: String(meta.expiresAt || ''),
+    },
   });
 }
 
-async function deletePrefix(env, prefix) {
+async function deletePrefix(env, prefix, keepKey = '') {
   let cursor;
   do {
     const page = await env.CAPSULES.list({ prefix, cursor });
-    const keys = (page.objects || []).map((object) => object.key);
+    const keys = (page.objects || []).map((object) => object.key).filter((key) => key !== keepKey);
     if (keys.length) await env.CAPSULES.delete(keys);
     cursor = page.truncated ? page.cursor : undefined;
   } while (cursor);
@@ -125,6 +163,45 @@ function isExpired(meta) {
   return !meta || !meta.expiresAt || Date.parse(meta.expiresAt) <= Date.now();
 }
 
+function isTombstone(meta) {
+  return Boolean(meta && meta._custom && meta._custom.status === 'expired');
+}
+
+function tombstoneWornOut(meta, now = Date.now()) {
+  const expired = Date.parse((meta && meta.expiredAt) || (meta && meta.expiresAt));
+  if (!Number.isFinite(expired)) return true;
+  return now - expired > TOMBSTONE_RETENTION_DAYS * 86400000;
+}
+
+// Expiry deletes the capsule's content but keeps a small record pointing back at the
+// original X post, so a reader who opens a dead link is not left at a bare 410. A
+// capsule with no recorded source URL has nothing worth keeping and is fully deleted.
+async function expireCapsule(env, meta) {
+  const id = meta.id;
+  const prefix = `capsules/${id}/`;
+  const published = Boolean(meta._custom && meta._custom.status === 'published');
+  // An upload session abandoned before finalize was never a link anyone holds, so it
+  // leaves nothing behind.
+  if (!published || !sanitizeSourceUrl(meta.sourceUrl)) {
+    await deletePrefix(env, prefix);
+    return;
+  }
+  await deletePrefix(env, prefix, metaKey(id));
+  const tombstone = {
+    id,
+    createdAt: meta.createdAt,
+    expiresAt: meta.expiresAt,
+    expiredAt: meta.expiredAt || new Date().toISOString(),
+    expiryDays: meta.expiryDays,
+    sourceUrl: meta.sourceUrl,
+    title: meta.title || '',
+    handle: meta.handle || '',
+  };
+  // The delete token is retained so the creator's "Delete link" still hard-deletes the
+  // tombstone. Re-upload and re-finalize are blocked separately by the expiry checks.
+  await putMeta(env, tombstone, (meta._custom && meta._custom.tokenHash) || '', 'expired');
+}
+
 async function createCapsule(request, env) {
   let body;
   try {
@@ -141,7 +218,18 @@ async function createCapsule(request, env) {
   const createdAt = new Date().toISOString();
   const expiresAt = new Date(Date.now() + expiryDays * 86400000).toISOString();
   const origin = new URL(request.url).origin;
-  const meta = { id, createdAt, expiresAt, expiryDays };
+  // An unrecognised sourceUrl is dropped rather than rejected: the capsule itself is
+  // still worth publishing, it just expires without a back-link.
+  const sourceUrl = sanitizeSourceUrl(body.sourceUrl);
+  const meta = {
+    id,
+    createdAt,
+    expiresAt,
+    expiryDays,
+    sourceUrl,
+    title: sanitizeLabel(body.title),
+    handle: sanitizeLabel(body.handle, 40),
+  };
   await putMeta(env, meta, await tokenHash(uploadToken), 'uploading');
   return json(
     request,
@@ -155,6 +243,7 @@ async function createCapsule(request, env) {
       viewUrl: `${origin}/c/${id}`,
       markdownUrl: `${origin}/c/${id}.md`,
       expiresAt,
+      sourceUrl,
     },
     201
   );
@@ -187,6 +276,7 @@ async function uploadFile(request, env, id, path) {
 async function finalizeCapsule(request, env, id) {
   const auth = await authorized(request, env, id);
   if (!auth.ok) return json(request, { error: 'Publish authorization failed.' }, auth.status);
+  if (isExpired(auth.meta)) return json(request, { error: 'Upload session expired.' }, 410);
   for (const required of ['content.html', 'content.md', 'manifest.json']) {
     if (!(await env.CAPSULES.head(fileKey(id, required)))) {
       return json(request, { error: `Missing required file: ${required}` }, 409);
@@ -219,13 +309,97 @@ function publicPath(pathname, id) {
   return '';
 }
 
+function readableDate(value) {
+  const time = Date.parse(value);
+  if (!Number.isFinite(time)) return 'an earlier date';
+  return new Date(time).toISOString().slice(0, 10);
+}
+
+function tombstoneHtml(meta) {
+  const source = sanitizeSourceUrl(meta.sourceUrl);
+  const title = sanitizeLabel(meta.title) || 'An X post';
+  const handle = sanitizeLabel(meta.handle, 40);
+  const byline = handle ? ` by ${escapeHtml(handle)}` : '';
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<title>This SourceCapsule link has expired</title>
+<style>
+  :root { color-scheme: light dark; --bg:#ffffff; --fg:#15202b; --muted:#5b7083; --line:#e1e8ed; --accent:#1d9bf0; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#15202b; --fg:#f7f9f9; --muted:#8899a6; --line:#38444d; --accent:#1d9bf0; }
+  }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  main { max-width:34rem; margin:0 auto; padding:3rem 1.25rem; }
+  h1 { font-size:1.35rem; margin:0 0 .75rem; }
+  p { margin:0 0 1rem; color:var(--muted); }
+  .card { border:1px solid var(--line); border-radius:12px; padding:1.25rem; margin:1.5rem 0; }
+  .card p { color:var(--fg); margin:0 0 .5rem; font-weight:600; }
+  a.source { display:inline-block; color:var(--accent); word-break:break-all; }
+  footer { border-top:1px solid var(--line); padding-top:1rem; font-size:.85rem; color:var(--muted); }
+</style></head>
+<body><main>
+<h1>This SourceCapsule link has expired</h1>
+<p>The archived copy was deleted on ${escapeHtml(readableDate(meta.expiredAt || meta.expiresAt))}, as set when the link was created. The original post is still on X.</p>
+<div class="card">
+<p>${escapeHtml(title)}${byline}</p>
+<a class="source" href="${escapeHtml(source)}" rel="noopener noreferrer nofollow">${escapeHtml(source)}</a>
+</div>
+<footer>SourceCapsule keeps only this back-link after a shared capsule expires. No copy of the post remains on this server.</footer>
+</main></body></html>`;
+}
+
+function tombstoneMarkdown(meta) {
+  const source = sanitizeSourceUrl(meta.sourceUrl);
+  const title = sanitizeLabel(meta.title) || 'An X post';
+  const handle = sanitizeLabel(meta.handle, 40);
+  const lines = [
+    '# This SourceCapsule link has expired',
+    '',
+    `The archived copy was deleted on ${readableDate(meta.expiredAt || meta.expiresAt)}, as set when the link was created.`,
+    'No copy of the post remains on this server. The original post is still on X:',
+    '',
+    `- Post: ${title}`,
+  ];
+  if (handle) lines.push(`- Author: ${handle}`);
+  lines.push(`- Original: ${source}`, '');
+  return lines.join('\n');
+}
+
+function tombstoneResponse(request, meta, path) {
+  const markdown = path === 'content.md';
+  const body = markdown ? tombstoneMarkdown(meta) : tombstoneHtml(meta);
+  const headers = new Headers({
+    'Content-Type': markdown ? 'text/markdown;charset=utf-8' : 'text/html;charset=utf-8',
+    'Content-Length': String(new TextEncoder().encode(body).byteLength),
+    'Cache-Control': 'public, max-age=300',
+    'X-Robots-Tag': 'noindex, nofollow, noarchive',
+    'Referrer-Policy': 'no-referrer',
+    'X-Content-Type-Options': 'nosniff',
+  });
+  if (!markdown) {
+    headers.set(
+      'Content-Security-Policy',
+      "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"
+    );
+  }
+  return new Response(request.method === 'HEAD' ? null : body, { status: 410, headers });
+}
+
 async function serveCapsule(request, env, ctx, id, path) {
   const meta = await getMeta(env, id);
-  if (!meta || meta._custom.status !== 'published') {
+  if (!meta) return new Response('Capsule not found.', { status: 404 });
+  if (isTombstone(meta)) return tombstoneResponse(request, meta, path);
+  if (meta._custom.status !== 'published') {
     return new Response('Capsule not found.', { status: 404 });
   }
   if (isExpired(meta)) {
-    if (ctx && ctx.waitUntil) ctx.waitUntil(deletePrefix(env, `capsules/${id}/`));
+    // Serve the tombstone straight away; the content deletion it describes runs after
+    // the response, so the reader never waits on an R2 sweep.
+    const expired = { ...meta, expiredAt: new Date().toISOString() };
+    if (ctx && ctx.waitUntil) ctx.waitUntil(expireCapsule(env, expired));
+    if (sanitizeSourceUrl(meta.sourceUrl)) return tombstoneResponse(request, expired, path);
     return new Response('This SourceCapsule link has expired.', { status: 410 });
   }
   const object = await env.CAPSULES.get(fileKey(id, path));
@@ -303,16 +477,37 @@ async function handleRequest(request, env, ctx) {
 
 async function cleanupExpired(env) {
   let cursor;
+  const now = Date.now();
   do {
-    const page = await env.CAPSULES.list({ prefix: 'capsules/', cursor });
+    // include customMetadata so the common case (a live capsule, or a tombstone still
+    // within retention) costs no extra read at all - only the objects that actually
+    // need work are fetched.
+    const page = await env.CAPSULES.list({
+      prefix: 'capsules/',
+      cursor,
+      include: ['customMetadata'],
+    });
     const metaObjects = (page.objects || []).filter((object) => object.key.endsWith('/_meta.json'));
     for (const item of metaObjects) {
+      const custom = item.customMetadata || {};
+      if (custom.status === 'expired') {
+        // Second stage: a tombstone that has outlived its retention window is removed.
+        // Retention is measured from the capsule's original expiry, which is the moment
+        // its content was deleted.
+        if (tombstoneWornOut({ expiresAt: custom.expiresAt || '' }, now)) {
+          await deletePrefix(env, item.key.slice(0, -'_meta.json'.length));
+        }
+        continue;
+      }
+      // Old objects written before expiresAt was mirrored into customMetadata still
+      // need a read; anything not yet due is skipped without one.
+      if (custom.expiresAt && Date.parse(custom.expiresAt) > now) continue;
       const object = await env.CAPSULES.get(item.key);
       if (!object) continue;
       const meta = JSON.parse(await object.text());
+      meta._custom = object.customMetadata || {};
       if (isExpired(meta)) {
-        const prefix = item.key.slice(0, -'_meta.json'.length);
-        await deletePrefix(env, prefix);
+        await expireCapsule(env, { ...meta, expiredAt: new Date(now).toISOString() });
       }
     }
     cursor = page.truncated ? page.cursor : undefined;

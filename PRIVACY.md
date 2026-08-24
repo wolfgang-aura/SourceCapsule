@@ -1,6 +1,6 @@
 # SourceCapsule Privacy Policy
 
-Last updated: July 7, 2026
+Last updated: August 24, 2026
 
 SourceCapsule is a browser extension and userscript that lets a user save a selected X (formerly
 Twitter) post, thread, or Article as a local archive, agent-ready Markdown, or an optional
@@ -52,7 +52,9 @@ SourceCapsule uploads content only after the user chooses **Share with AI** or
 
 The uploaded package can contain rendered HTML, Markdown, a capture manifest, images, video poster
 frames, source URLs, author information, timestamps, and user-entered notes or tags. Raw video
-files are not uploaded. Each package is limited to 25 MB.
+files are not uploaded. Each package is limited to 25 MB. The post's public permalink, its title,
+and the author's public handle are also stored alongside the package so an expired link can still
+point back to the original post — see **Retention and deletion**.
 
 The sharing service is hosted using Cloudflare Workers and Cloudflare R2. Cloudflare therefore
 processes the uploaded package and ordinary network request information. The service uses the
@@ -65,10 +67,20 @@ unless they are comfortable with every recipient of the link being able to acces
 
 ## Retention and deletion
 
-The user selects a 1-day, 7-day, or 30-day expiry when creating a share link. The sharing service
-rejects access after expiry and automatically removes expired capsule objects during scheduled
-cleanup. A share deletion credential is generated for each link and retained only in the user's
-browser; it is not included in the public URL.
+The user selects a 1-day, 7-day, or 30-day expiry when creating a share link. At expiry the
+sharing service deletes the uploaded package — HTML, Markdown, manifest, and all media — and
+stops serving it.
+
+One small record survives expiry: the public X permalink of the captured post, together with its
+title, the post author's public handle, and the expiry date. An expired link then answers with a
+notice page carrying that link back to the original post, so a recipient is not left at a dead
+end. This record contains no information about who created the link, and only a URL that was
+already public on X. It is removed automatically 180 days after expiry, or immediately if the
+creator deletes the link.
+
+A share deletion credential is generated for each link and retained only in the user's browser;
+it is not included in the public URL. Deleting a link removes the expiry record along with
+everything else.
 
 Local archives remain wherever the user saved them until the user deletes them. Browser-stored
 preferences and metadata remain until cleared by the user or browser.
