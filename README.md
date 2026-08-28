@@ -1,5 +1,7 @@
 # SourceCapsule
 
+English | [简体中文](README.zh-CN.md)
+
 **Save X/Twitter threads & Articles as clean Markdown for LLMs — plus a one-file offline HTML
 archive.**
 

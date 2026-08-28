@@ -122,7 +122,7 @@ assert.equal(finalize.status, 200);
 const page = await worker.fetch(new Request(created.viewUrl), env, ctx);
 assert.equal(page.status, 200);
 assert.equal(await page.text(), '<!doctype html><title>Shared</title>');
-assert.equal(page.headers.get('X-Robots-Tag'), 'noindex, nofollow, noarchive');
+assert.equal(page.headers.get('X-Robots-Tag'), 'noindex, nofollow');
 
 const markdown = await worker.fetch(new Request(created.markdownUrl), env, ctx);
 assert.equal(markdown.status, 200);
@@ -335,7 +335,7 @@ const past = new Date(Date.now() - 86400000).toISOString();
   const body = await expired.text();
   assert.ok(body.includes(SOURCE), 'tombstone links back to the original post');
   assert.ok(!body.includes('<script>alert(1)</script>'), 'title is HTML-escaped');
-  assert.equal(expired.headers.get('X-Robots-Tag'), 'noindex, nofollow, noarchive');
+  assert.equal(expired.headers.get('X-Robots-Tag'), 'noindex, nofollow');
 
   assert.equal(store.objects.has(`capsules/${capsule.id}/content.html`), false, 'HTML deleted');
   assert.equal(

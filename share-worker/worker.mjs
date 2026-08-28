@@ -323,7 +323,7 @@ function tombstoneHtml(meta) {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex, nofollow, noarchive">
+<meta name="robots" content="noindex, nofollow">
 <title>This SourceCapsule link has expired</title>
 <style>
   :root { color-scheme: light dark; --bg:#ffffff; --fg:#15202b; --muted:#5b7083; --line:#e1e8ed; --accent:#1d9bf0; }
@@ -374,7 +374,7 @@ function tombstoneResponse(request, meta, path) {
     'Content-Type': markdown ? 'text/markdown;charset=utf-8' : 'text/html;charset=utf-8',
     'Content-Length': String(new TextEncoder().encode(body).byteLength),
     'Cache-Control': 'public, max-age=300',
-    'X-Robots-Tag': 'noindex, nofollow, noarchive',
+    'X-Robots-Tag': 'noindex, nofollow',
     'Referrer-Policy': 'no-referrer',
     'X-Content-Type-Options': 'nosniff',
   });
@@ -419,7 +419,11 @@ async function serveCapsule(request, env, ctx, id, path) {
     headers.set('Content-Length', String(object.size));
   }
   headers.set('Cache-Control', 'public, max-age=300');
-  headers.set('X-Robots-Tag', 'noindex, nofollow, noarchive');
+  // noindex/nofollow keep unlisted capsules out of search results. Deliberately
+  // NOT noarchive: several AI browsing stacks read noarchive as "may not retain
+  // this content" and refuse to fetch at all, which breaks the one thing an
+  // AI-readable share link exists for. Do not add it back.
+  headers.set('X-Robots-Tag', 'noindex, nofollow');
   headers.set('Referrer-Policy', 'no-referrer');
   headers.set('X-Content-Type-Options', 'nosniff');
   if (path === 'content.html') {
