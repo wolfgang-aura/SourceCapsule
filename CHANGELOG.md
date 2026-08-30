@@ -6,6 +6,50 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- **Unattended capture from the command line (experimental, Windows only).**
+
+  ```powershell
+  node scripts\sourcecapsule-capture.mjs --url "https://x.com/handle/status/123" --json
+  ```
+
+  captures a post and prints the finished AI readable link as JSON, with no clicks, no
+  prompts, and no clipboard use. Only that JSON reaches stdout; progress and diagnostics go
+  to stderr, and a failure exits nonzero.
+
+  It reuses the existing capture path instead of adding a second one. The extension opens the
+  post in a background window, waits for the passive GraphQL recovery layer, then runs the
+  same `share` export a menu click runs. Strict completeness validation stays on. If evidence
+  is still missing after every recovery layer and retry, the command fails with `needs_owner`
+  and reports what is missing rather than publishing a capsule with dead ends in it.
+
+  Setup is `npm run build:extension` followed by `npm run install:native-host`. The installer
+  needs no administrator rights: it registers under `HKCU` only and installs the host into
+  `%LOCALAPPDATA%\SourceCapsule\native-host`. Because browsers only ever spawn native
+  messaging hosts and cannot be dialed into, the extension holds the port, the host owns a
+  Windows named pipe, and the command-line tool connects to that pipe. One host owns the pipe
+  at a time, which is also what limits this to one capture at a time.
+
+- **`scripts/start-sourcecapsule-browser.ps1`**, which starts the browser with the extension
+  loaded and can install a Desktop, Start Menu, and Startup shortcut for it. `-Status` exits
+  nonzero when the running browser is missing the flag, and `-Restart -Verify` repairs the
+  bridge and confirms it answers.
+
+### Fixed
+
+- Capsule pages and tombstones no longer send `noarchive` in `X-Robots-Tag`, and the
+  tombstone page no longer carries it in `<meta name="robots">`. Several AI browsing tools
+  read `noarchive` as "you may not retain this", and refused to fetch the page at all, which
+  defeats the purpose of an AI readable link. `noindex, nofollow` still applies.
+- The native messaging host no longer outlives the browser that spawned it. The launcher
+  never closed the Node process's input when the browser's stream ended, so an orphaned host
+  kept the named pipe and later requests hung for their full timeout against a host with no
+  extension behind it.
+- An unattended strict refusal now reaches the caller as `needs_owner` with the assessment
+  counts. The export path was catching that error and turning it into an on-page notice, so
+  the command line saw a generic failure with no detail about what was missing.
+
 ## [1.5.2] - 2026-08-24
 
 ### Changed
