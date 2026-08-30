@@ -114,6 +114,38 @@ public static class SourceCapsuleLauncher
             fromChild.Start();
             errFromChild.Start();
 
+            // When the browser goes away its stdin hits EOF and the to-child pump
+            // returns. Nothing else closes the child's stdin, so without this the Node
+            // host never sees EOF, never exits, and this launcher blocks forever on
+            // WaitForExit. The orphan keeps the capture named pipe, and every later CLI
+            // request is answered by a host whose browser is long dead - which looks
+            // exactly like "the host is unreachable".
+            Thread reaper = new Thread(delegate ()
+            {
+                toChild.Join();
+                Trace("browser stream closed; closing node stdin");
+                try
+                {
+                    child.StandardInput.Close();
+                }
+                catch (Exception)
+                {
+                }
+                if (!child.WaitForExit(5000))
+                {
+                    Trace("node did not exit after stdin close; killing it");
+                    try
+                    {
+                        child.Kill();
+                    }
+                    catch (Exception)
+                    {
+                    }
+                }
+            });
+            reaper.IsBackground = true;
+            reaper.Start();
+
             child.WaitForExit();
             fromChild.Join(2000);
             Trace("node exited with " + child.ExitCode);

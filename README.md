@@ -292,6 +292,41 @@ Verify the bridge with:
 node scripts\sourcecapsule-capture.mjs --ping
 ```
 
+### Keeping the extension loaded across restarts
+
+`--load-extension` installs at Chromium's `COMMAND_LINE` location. The browser records it in the
+profile but does **not** load it again on a start that lacks the flag, so an ordinary restart has
+no SourceCapsule extension at all: no service worker, no native port, and a CLI that cannot reach
+the host. The worker is not asleep; it does not exist.
+
+Install a launcher that always passes the flag:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start-sourcecapsule-browser.ps1 -InstallShortcut -InstallStartup
+```
+
+That puts **Brave with SourceCapsule** on the Desktop, in the Start Menu, and in Startup. Start
+the browser from it and the bridge is always there. Starting it any other way silently drops the
+extension.
+
+To check or repair the current state:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\start-sourcecapsule-browser.ps1 -Status
+powershell -ExecutionPolicy Bypass -File scripts\start-sourcecapsule-browser.ps1 -Restart -Verify
+```
+
+`-Status` reports whether the running browser has the flag and exits nonzero when it does not.
+`-Restart` closes it and starts it correctly; a browser that is already running without the flag
+cannot be fixed by launching it again, because the second launch just hands its arguments to the
+existing process. `-Verify` then polls `--ping` until the bridge answers, so the launcher cannot
+report success while the bridge is still down.
+
+The alternative is a one-time **Load unpacked** of `dist\sourcecapsule-extension` from
+`brave://extensions`, which records the extension at the `UNPACKED` location and survives restarts
+without any launcher. It is a manual UI step, and it cannot coexist with the command-line copy:
+same `key`, same extension ID.
+
 ### How it fits together
 
 The browser spawns native messaging hosts; nothing outside can dial into the browser. So the
@@ -303,11 +338,11 @@ capture at a time. Timeouts are bounded at every hop and the URL is validated ag
 ### Known limits
 
 - Windows only. The pipe and the installer are Windows-specific.
-- The browser must be running with the extension loaded and signed into X.
+- The browser must be running with the extension loaded and signed into X, which in practice
+  means starting it from the launcher above.
 - If the extension is not actually running, the bridge reports
-  `Specified native messaging host not found`. Loading the extension from the command line
-  (`brave.exe --load-extension="...\dist\sourcecapsule-extension"`) is the most reliable way to
-  guarantee it is live at startup.
+  `Specified native messaging host not found`. That is almost always a start without
+  `--load-extension`, not a bad registration.
 - The capture window is visible but never focused. A hidden tab has `requestAnimationFrame`
   paused and timers throttled, which starves the media force-load pass and manufactures
   strict-mode blockers.

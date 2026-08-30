@@ -98,8 +98,15 @@ async function connectWithRetry() {
       }
     }
   }
+  // Almost always the same cause: the browser is running, but it was started without
+  // --load-extension, so the extension is not loaded at all and no service worker ever
+  // opened the native port. Say that, and say the fix, rather than "host unreachable".
   throw new Error(
-    `Cannot reach the SourceCapsule native host (${lastError && lastError.code}). Is Chrome running with the extension loaded?`
+    `Cannot reach the SourceCapsule native host (${lastError && lastError.code}). ` +
+      'The browser is probably running without the extension: a start that lacks ' +
+      '--load-extension does not reload a command-line-installed extension. Run ' +
+      'powershell -ExecutionPolicy Bypass -File scripts\\start-sourcecapsule-browser.ps1 -Status ' +
+      'to check, and add -Restart -Verify to fix it.'
   );
 }
 

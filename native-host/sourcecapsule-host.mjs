@@ -35,11 +35,24 @@ function log(...parts) {
 
 // ---- Chrome side: native messaging framing -------------------------------------
 
+// Independently of the launcher, the host refuses to outlive its browser. An orphan
+// keeps the named pipe, so every later CLI request reaches a host whose extension is
+// gone and times out instead of failing fast. The 20s heartbeat means a dead stdout is
+// noticed within 20s even when nothing else is happening.
+function exitBecauseBrowserIsGone(reason) {
+  log('browser connection gone:', reason, '- exiting so the pipe is released');
+  process.exit(0);
+}
+
 function sendToChrome(message) {
   const body = Buffer.from(JSON.stringify(message), 'utf8');
   const header = Buffer.alloc(4);
   header.writeUInt32LE(body.length, 0);
-  process.stdout.write(Buffer.concat([header, body]));
+  try {
+    process.stdout.write(Buffer.concat([header, body]));
+  } catch (error) {
+    exitBecauseBrowserIsGone(`stdout write failed (${error.message})`);
+  }
 }
 
 let stdinBuffer = Buffer.alloc(0);
@@ -59,10 +72,14 @@ function readChromeMessages(onMessage) {
       }
     }
   });
-  process.stdin.on('end', () => {
-    log('chrome closed the port; exiting');
-    process.exit(0);
-  });
+  // 'end' is the clean case. 'close' and 'error' cover a browser that was killed rather
+  // than closed, which is how an orphan was surviving a Brave restart.
+  process.stdin.on('end', () => exitBecauseBrowserIsGone('stdin ended'));
+  process.stdin.on('close', () => exitBecauseBrowserIsGone('stdin closed'));
+  process.stdin.on('error', (error) => exitBecauseBrowserIsGone(`stdin error (${error.message})`));
+  process.stdout.on('error', (error) =>
+    exitBecauseBrowserIsGone(`stdout error (${error.message})`)
+  );
 }
 
 // ---- CLI side: named pipe -------------------------------------------------------

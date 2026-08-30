@@ -164,12 +164,32 @@ the finished AI readable link as JSON, with no clicks, prompts, or clipboard use
   manufactures strict-mode blockers.
 - **Strict mode stays strict.** With no human to answer `confirmShipDespiteIncomplete`, a
   surviving blocker raises `NeedsOwnerError` and the CLI reports `needs_owner` with the
-  assessment counts. Never "fix" an unattended failure by relaxing the gate.
+  assessment counts. Never "fix" an unattended failure by relaxing the gate. `runExport`'s
+  catch **rethrows when `automation` is true**: absorbing the error into a toast nobody can
+  read turned a strict refusal into `no_capsule` with no blockers. `test/strict-capture.test.mjs`
+  is the regression fixture - it drives the real controller boundary against media and
+  syndication layers that answer 404 (authoritative in both, so no recovery can succeed).
 - **stdout is a contract.** `formatResult` allowlists the published fields so transport
   details (the correlation id) can never leak into what another program parses.
 - If the bridge reports `Specified native messaging host not found`, the usual cause is that
   the extension is not actually running, not a bad registration. Launching the browser with
   `--load-extension=dist/sourcecapsule-extension` is the reliable fix.
+- **`--load-extension` does not survive a restart, by design.** It installs at Chromium's
+  `COMMAND_LINE` location (the profile's Secure Preferences records `"location": 8`), and a
+  start without the flag does not load it. So an ordinary browser restart has no extension at
+  all - the worker is not asleep, it does not exist - and the CLI cannot reach the host.
+  `scripts/start-sourcecapsule-browser.ps1` is the durable path: `-InstallShortcut
+  -InstallStartup` for the owner-visible launcher, `-Status` to diagnose (nonzero when the
+  running browser lacks the flag), `-Restart -Verify` to repair and confirm. Launching the
+  browser again while it is already running cannot fix it: the second launch hands its
+  arguments to the existing process and the flag is dropped. A one-time Load unpacked records
+  `UNPACKED` instead and needs no launcher, but it is a manual UI step and cannot coexist with
+  the command-line copy (same `key`, same ID).
+- **The host must not outlive its browser.** `launcher.cs` closes the Node child's stdin once
+  the browser's stream ends, and the host exits on stdin end/close/error or a failed stdout
+  write. Without both, a killed browser left an orphan holding
+  `\\.\pipe\sourcecapsule-capture`, and every later CLI request was answered by a host whose
+  extension was gone - a full-timeout hang that reads exactly like "the host is unreachable".
 
 ## Gotchas
 

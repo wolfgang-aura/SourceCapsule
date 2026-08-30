@@ -11223,6 +11223,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       });
     } catch (e) {
       errlog(e);
+      // An unattended run has no toast to read and nobody to read it. Its caller turns
+      // errors into a machine-readable result, so the error has to reach it. Swallowing
+      // it here is what made a strict-mode refusal report `no_capsule` with no blockers
+      // instead of `needs_owner` with the assessment - the CLI's whole reason to exist.
+      if (automation) throw e;
       showToast(`Export failed: ${e.message}`, { error: true });
     } finally {
       setBusy(false);
