@@ -17,7 +17,10 @@ import os from 'node:os';
 import path from 'node:path';
 
 // Windows named pipe path: \\.\pipe\sourcecapsule-capture
-const PIPE = String.raw`\\.\pipe\sourcecapsule-capture`;
+const DEFAULT_PIPE = String.raw`\\.\pipe\sourcecapsule-capture`;
+// Tests (and any parallel install) can point at their own pipe so they never fight
+// the host the browser already has running.
+const PIPE = process.env.SOURCECAPSULE_PIPE || DEFAULT_PIPE;
 const LOG = path.join(os.tmpdir(), 'sourcecapsule-native-host.log');
 const REQUEST_MAX_MS = 15 * 60 * 1000;
 

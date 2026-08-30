@@ -34,8 +34,25 @@ public static class SourceCapsuleLauncher
         }
     }
 
+    private static void Trace(string message)
+    {
+        // Written before anything can fail, so an empty log means the browser never
+        // invoked the host at all, and a log with only a start line means Node failed.
+        try
+        {
+            string logPath = Path.Combine(
+                Path.GetTempPath(), "sourcecapsule-launcher.log");
+            File.AppendAllText(
+                logPath, DateTime.UtcNow.ToString("o") + "  " + message + Environment.NewLine);
+        }
+        catch (Exception)
+        {
+        }
+    }
+
     public static int Main(string[] args)
     {
+        Trace("launcher invoked with " + args.Length + " arg(s): " + string.Join(" | ", args));
         string here = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
         string script = Path.Combine(here, "sourcecapsule-host.mjs");
         string node = Environment.GetEnvironmentVariable("SOURCECAPSULE_NODE");
@@ -53,6 +70,12 @@ public static class SourceCapsuleLauncher
             arguments += " \"" + arg + "\"";
         }
 
+        Trace("node=" + node + " script=" + script);
+        if (!File.Exists(node))
+        {
+            Trace("FATAL: node executable not found");
+            return 2;
+        }
         ProcessStartInfo info = new ProcessStartInfo(node, arguments);
         info.UseShellExecute = false;
         info.CreateNoWindow = true;
@@ -60,7 +83,17 @@ public static class SourceCapsuleLauncher
         info.RedirectStandardOutput = true;
         info.RedirectStandardError = true;
 
-        using (Process child = Process.Start(info))
+        Process child;
+        try
+        {
+            child = Process.Start(info);
+        }
+        catch (Exception error)
+        {
+            Trace("FATAL: could not start node: " + error.Message);
+            return 3;
+        }
+        using (child)
         {
             Thread toChild = new Thread(delegate ()
             {
@@ -83,6 +116,7 @@ public static class SourceCapsuleLauncher
 
             child.WaitForExit();
             fromChild.Join(2000);
+            Trace("node exited with " + child.ExitCode);
             return child.ExitCode;
         }
     }

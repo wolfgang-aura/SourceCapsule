@@ -46,7 +46,59 @@ function bytesToBase64(bytes) {
   return btoa(binary);
 }
 
+// Reports why the native bridge is or is not connected. The service worker console is
+// invisible to everything outside devtools, so this is how the failure becomes readable
+// from a page, from the popup, or from an automated check.
+function bridgeStatus(sendResponse) {
+  const report = {
+    ok: true,
+    extensionId: chrome.runtime.id,
+    hasConnectNative: typeof chrome.runtime.connectNative === 'function',
+    permissions: chrome.runtime.getManifest().permissions || [],
+    connected: !!nativePort,
+    attempt: null,
+  };
+  if (nativePort) {
+    sendResponse(report);
+    return;
+  }
+  let probe;
+  try {
+    probe = chrome.runtime.connectNative(NATIVE_HOST);
+  } catch (error) {
+    report.attempt = { stage: 'threw', message: error.message };
+    sendResponse(report);
+    return;
+  }
+  // A rejected host does not throw. It disconnects on the next turn with the reason in
+  // lastError, so the answer has to wait for that.
+  let settled = false;
+  const finish = (stage, message) => {
+    if (settled) return;
+    settled = true;
+    report.attempt = { stage, message };
+    sendResponse(report);
+  };
+  probe.onDisconnect.addListener(() => {
+    const error = chrome.runtime.lastError;
+    finish('disconnected', error ? error.message : 'no lastError');
+  });
+  probe.onMessage.addListener((message) => {
+    finish('connected', JSON.stringify(message).slice(0, 200));
+    try {
+      probe.disconnect();
+    } catch {
+      /* already gone */
+    }
+  });
+  setTimeout(() => finish('timeout', 'no message and no disconnect within 4s'), 4000);
+}
+
 function handleMessage(message, _sender, sendResponse) {
+  if (message && message.type === 'sourcecapsule:bridge-status') {
+    bridgeStatus(sendResponse);
+    return true;
+  }
   if (!message || message.type !== 'sourcecapsule:http') return false;
   const request = message.request || {};
   if (!allowedUrl(request.url)) {

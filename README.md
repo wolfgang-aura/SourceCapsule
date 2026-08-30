@@ -234,6 +234,84 @@ This package reuses the tested userscript engine through a thin compatibility la
 the automated package suite plus live-X validation. It remains an unpacked beta until a separate
 Chrome Web Store publication is prepared.
 
+## Unattended capture from the command line (experimental)
+
+One command captures a post and returns a ready AI readable link, with no clicks, no prompts,
+and no clipboard use:
+
+```powershell
+node scripts\sourcecapsule-capture.mjs --url "https://x.com/handle/status/123" --json
+```
+
+```json
+{
+  "ok": true,
+  "sourceUrl": "https://x.com/handle/status/123",
+  "viewUrl": "https://sourcecapsule-share.wolfgang-aura.workers.dev/c/...",
+  "markdownUrl": "https://sourcecapsule-share.wolfgang-aura.workers.dev/c/....md",
+  "expiresAt": "2026-09-06T12:51:33.824Z",
+  "complete": true,
+  "warnings": []
+}
+```
+
+Only that JSON goes to stdout. Progress and diagnostics go to stderr, and a failure exits nonzero.
+
+It reuses the normal capture path. The extension opens the post in a **background window**, waits
+for the passive GraphQL recovery layer, runs the same `share` export a menu click would run, and
+keeps strict completeness validation on. If strict mode still finds missing evidence after every
+recovery layer and retry, the command fails with `needs_owner` and lists what is missing, rather
+than publishing a capsule with dead ends in it:
+
+```json
+{
+  "ok": false,
+  "error": "needs_owner",
+  "message": "Strict capture could not recover missing evidence.",
+  "counts": { "imageFetchFailed": 2 }
+}
+```
+
+### Setup
+
+```powershell
+npm.cmd run build:extension
+npm.cmd run install:native-host
+```
+
+The installer needs no administrator rights. It writes everything under `HKCU` and installs the
+host into `%LOCALAPPDATA%\SourceCapsule\native-host`, registering it for Chrome, Edge, and Brave.
+
+Then load `dist\sourcecapsule-extension` as an unpacked extension and confirm its ID reads
+`gaclgcfljpjojddiikddejenlnjaggie`. The ID is pinned by a `key` in the manifest, because the
+native messaging host has to name a fixed extension origin.
+
+Verify the bridge with:
+
+```powershell
+node scripts\sourcecapsule-capture.mjs --ping
+```
+
+### How it fits together
+
+The browser spawns native messaging hosts; nothing outside can dial into the browser. So the
+service worker holds a long-lived port to the host, the host owns a Windows named pipe, and the
+CLI connects to that pipe. One host owns the pipe at a time, which is also what enforces one
+capture at a time. Timeouts are bounded at every hop and the URL is validated against a canonical
+`x.com/<handle>/status/<id>` pattern in both the CLI and the extension.
+
+### Known limits
+
+- Windows only. The pipe and the installer are Windows-specific.
+- The browser must be running with the extension loaded and signed into X.
+- If the extension is not actually running, the bridge reports
+  `Specified native messaging host not found`. Loading the extension from the command line
+  (`brave.exe --load-extension="...\dist\sourcecapsule-extension"`) is the most reliable way to
+  guarantee it is live at startup.
+- The capture window is visible but never focused. A hidden tab has `requestAnimationFrame`
+  paused and timers throttled, which starves the media force-load pass and manufactures
+  strict-mode blockers.
+
 ## What is captured
 
 | Content | Result |

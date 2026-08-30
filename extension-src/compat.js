@@ -117,6 +117,20 @@
     }
   };
 
+  // Wake the service worker whenever an X page loads. The worker's startup is what
+  // (re)opens the native messaging port for local automation, and an idle worker has no
+  // other reason to start: the CLI cannot reach it, because the host it would talk to is
+  // only spawned by the worker itself. The message needs no handler; starting is the point.
+  try {
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
+      chrome.runtime.sendMessage({ type: 'sourcecapsule:hello' }, () => {
+        void chrome.runtime.lastError; // no listener answers this; ignore the noise
+      });
+    }
+  } catch {
+    /* waking the worker is best effort */
+  }
+
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = { directHttpRequest, friendlyExtensionError };
   }

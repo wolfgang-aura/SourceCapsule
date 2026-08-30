@@ -138,6 +138,39 @@ timestamp, parent id, and media **links** — not just an inventory of reply ids
 - Coverage is **best effort** and the Markdown receipt says so, listing known-but-
   uncaptured reply ids. X's public reply counter is a reference, never a denominator.
 
+## Unattended capture (experimental, Windows)
+
+`node scripts/sourcecapsule-capture.mjs --url "<post>" --json` captures a post and prints
+the finished AI readable link as JSON, with no clicks, prompts, or clipboard use.
+
+- **Direction matters.** The browser spawns native messaging hosts; nothing outside can dial
+  into the browser. So the service worker holds a long-lived port to
+  `native-host/sourcecapsule-host.mjs`, the host owns the Windows named pipe
+  `\\.\pipe\sourcecapsule-capture`, and the CLI connects to that pipe. One host owns the
+  pipe, which is also what enforces one capture at a time. `SOURCECAPSULE_PIPE` overrides the
+  name so tests never fight the host a running browser already owns.
+- **The registered host must be a real `.exe`.** Chromium is unreliable about launching
+  `.bat`/`.cmd` native hosts. `scripts/install-native-host.ps1` compiles
+  `native-host/launcher.cs` with the .NET compiler already on Windows, installs everything to
+  `%LOCALAPPDATA%\SourceCapsule\native-host`, and registers it under HKCU only. Two traps it
+  handles: PowerShell 5.1 writes a UTF-8 BOM that Chromium rejects outright, and a running
+  host holds its own exe open so a reinstall must stop it first.
+- **The extension ID is pinned** by a `key` in `extension-src/manifest.json`, because the host
+  manifest has to name a fixed `chrome-extension://` origin. Do not regenerate it.
+- **Capture reuses `runExport('share')`.** `runAutomatedShareCapture` only waits for the page
+  and the passive capture layer, then hands off. Do not add a second parsing path here.
+- **The tab is ACTIVE in an UNFOCUSED window, never hidden.** A hidden tab has
+  `requestAnimationFrame` paused and timers throttled, which starves `forceLoadMedia` and
+  manufactures strict-mode blockers.
+- **Strict mode stays strict.** With no human to answer `confirmShipDespiteIncomplete`, a
+  surviving blocker raises `NeedsOwnerError` and the CLI reports `needs_owner` with the
+  assessment counts. Never "fix" an unattended failure by relaxing the gate.
+- **stdout is a contract.** `formatResult` allowlists the published fields so transport
+  details (the correlation id) can never leak into what another program parses.
+- If the bridge reports `Specified native messaging host not found`, the usual cause is that
+  the extension is not actually running, not a bad registration. Launching the browser with
+  `--load-extension=dist/sourcecapsule-extension` is the reliable fix.
+
 ## Gotchas
 
 - **CORS is the whole reason it's a userscript.** Media bytes from `pbs.twimg.com` /

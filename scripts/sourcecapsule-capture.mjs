@@ -13,7 +13,10 @@ import process from 'node:process';
 import { pathToFileURL } from 'node:url';
 
 // Windows named pipe path: \\.\pipe\sourcecapsule-capture
-const PIPE = String.raw`\\.\pipe\sourcecapsule-capture`;
+const DEFAULT_PIPE = String.raw`\\.\pipe\sourcecapsule-capture`;
+// Tests (and any parallel install) can point at their own pipe so they never fight
+// the host the browser already has running.
+const PIPE = process.env.SOURCECAPSULE_PIPE || DEFAULT_PIPE;
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const CONNECT_RETRIES = 3;
 const CONNECT_RETRY_DELAY_MS = 750;
@@ -41,6 +44,31 @@ export function canonicalXUrl(value) {
   const match = CANONICAL_X_URL.exec(String(value || '').trim());
   if (!match) return null;
   return { url: `https://x.com/${match[1]}/status/${match[2]}`, handle: match[1], id: match[2] };
+}
+
+// stdout carries the contract and nothing else. The transport's correlation id and any
+// future envelope fields stay on this side of the boundary.
+const RESULT_FIELDS = [
+  'ok',
+  'sourceUrl',
+  'viewUrl',
+  'markdownUrl',
+  'expiresAt',
+  'complete',
+  'warnings',
+  'error',
+  'message',
+  'blockers',
+  'counts',
+];
+
+export function formatResult(reply) {
+  const out = {};
+  for (const field of RESULT_FIELDS) {
+    if (reply && Object.prototype.hasOwnProperty.call(reply, field)) out[field] = reply[field];
+  }
+  if (out.ok && !Array.isArray(out.warnings)) out.warnings = [];
+  return out;
 }
 
 function progress(...parts) {
@@ -132,7 +160,7 @@ async function main() {
     },
     args.timeoutMs
   );
-  process.stdout.write(`${JSON.stringify(reply, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify(formatResult(reply), null, 2)}\n`);
   return reply.ok ? 0 : 1;
 }
 

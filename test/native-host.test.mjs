@@ -10,10 +10,12 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
-import { canonicalXUrl } from '../scripts/sourcecapsule-capture.mjs';
+import { canonicalXUrl, formatResult } from '../scripts/sourcecapsule-capture.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const PIPE = String.raw`\\.\pipe\sourcecapsule-capture`;
+// A dedicated pipe per test run, so the test never collides with the host the browser
+// already has running (which owns the real \\.\pipe\sourcecapsule-capture).
+const PIPE = String.raw`\\.\pipe\sourcecapsule-test-` + process.pid;
 
 function encode(message) {
   const body = Buffer.from(JSON.stringify(message), 'utf8');
@@ -68,9 +70,51 @@ function canonicalUrlChecks() {
   console.log('ok  canonical X URL validation');
 }
 
+function resultContractChecks() {
+  // stdout is a contract other programs parse. Transport fields must never leak into it.
+  const success = formatResult({
+    id: '1788094282150-dgglbo',
+    ok: true,
+    sourceUrl: 'https://x.com/handle/status/123',
+    viewUrl: 'https://example.workers.dev/c/abc',
+    markdownUrl: 'https://example.workers.dev/c/abc.md',
+    expiresAt: '2026-09-06T12:51:33.824Z',
+    complete: true,
+    warnings: [],
+  });
+  assert.deepEqual(Object.keys(success), [
+    'ok',
+    'sourceUrl',
+    'viewUrl',
+    'markdownUrl',
+    'expiresAt',
+    'complete',
+    'warnings',
+  ]);
+  assert.equal('id' in success, false);
+
+  const blocked = formatResult({
+    id: 'x1',
+    ok: false,
+    error: 'needs_owner',
+    message: 'Strict capture could not recover missing evidence.',
+    counts: { imageFetchFailed: 2 },
+    blockers: [{ kind: 'image' }],
+  });
+  assert.deepEqual(blocked, {
+    ok: false,
+    error: 'needs_owner',
+    message: 'Strict capture could not recover missing evidence.',
+    blockers: [{ kind: 'image' }],
+    counts: { imageFetchFailed: 2 },
+  });
+  console.log('ok  stdout result contract');
+}
+
 async function transportChecks() {
   const host = spawn(process.execPath, [path.join(root, 'native-host', 'sourcecapsule-host.mjs')], {
     stdio: ['pipe', 'pipe', 'inherit'],
+    env: { ...process.env, SOURCECAPSULE_PIPE: PIPE },
   });
   const received = [];
   let ready;
@@ -126,5 +170,6 @@ async function transportChecks() {
 }
 
 canonicalUrlChecks();
+resultContractChecks();
 await transportChecks();
 console.log('native-host transport tests passed');

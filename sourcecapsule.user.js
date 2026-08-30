@@ -5713,6 +5713,33 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     )
       return;
     extensionControllerRegistered = true;
+    // Same-origin diagnostic relay. The service worker's console is unreadable outside
+    // devtools, so a page (or an automated check driving one) can ask why the native
+    // bridge is down and read the answer back off the window.
+    window.addEventListener('message', (event) => {
+      if (event.source !== window || event.origin !== location.origin) return;
+      const data = event.data;
+      if (!data || data.type !== 'sourcecapsule:bridge-diagnose') return;
+      // Opt-in only. Answering this probe makes the worker attempt a native connect,
+      // which spawns a local process, so no ordinary page script gets to trigger it.
+      let enabled = false;
+      try {
+        enabled = localStorage.getItem('sourcecapsule:bridge-debug') === '1';
+      } catch {
+        enabled = false;
+      }
+      if (!enabled) return;
+      chrome.runtime.sendMessage({ type: 'sourcecapsule:bridge-status' }, (report) => {
+        const error = chrome.runtime.lastError;
+        window.postMessage(
+          {
+            type: 'sourcecapsule:bridge-diagnose-result',
+            report: error ? { ok: false, message: error.message } : report,
+          },
+          location.origin
+        );
+      });
+    });
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const result = extensionControllerMessage(message);
       // capture-share runs a full export, so it answers with a promise. Returning true

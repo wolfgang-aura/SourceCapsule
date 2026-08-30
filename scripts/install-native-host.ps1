@@ -14,11 +14,17 @@ $ErrorActionPreference = 'Stop'
 
 $hostName = 'com.wolfgang_aura.sourcecapsule'
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$hostDir = Join-Path $repoRoot 'native-host'
+$sourceDir = Join-Path $repoRoot 'native-host'
+$launcherSource = Join-Path $sourceDir 'launcher.cs'
+$sourceScript = Join-Path $sourceDir 'sourcecapsule-host.mjs'
+
+# The host is INSTALLED outside the repo, under LOCALAPPDATA. The browser resolves the
+# manifest path at connect time, so a repo that moves, gets cleaned, or sits in a synced
+# folder must not be able to break an existing registration.
+$hostDir = Join-Path $env:LOCALAPPDATA 'SourceCapsule\native-host'
 $hostScript = Join-Path $hostDir 'sourcecapsule-host.mjs'
 $hostCmd = Join-Path $hostDir 'sourcecapsule-host.cmd'
 $hostExe = Join-Path $hostDir 'sourcecapsule-host.exe'
-$launcherSource = Join-Path $hostDir 'launcher.cs'
 $manifestPath = Join-Path $hostDir "$hostName.json"
 
 # Chrome, Edge, and Brave all read the same per-user layout under their own key.
@@ -47,9 +53,14 @@ if ($Uninstall) {
     exit 0
 }
 
-if (-not (Test-Path $hostScript)) {
-    throw "Host script not found: $hostScript"
+if (-not (Test-Path $sourceScript)) {
+    throw "Host script not found: $sourceScript"
 }
+if (-not (Test-Path $hostDir)) {
+    New-Item -ItemType Directory -Path $hostDir -Force | Out-Null
+}
+Copy-Item -Path $sourceScript -Destination $hostScript -Force
+Write-Host "Installed $hostScript"
 
 $node = (Get-Command node -ErrorAction SilentlyContinue)
 if ($null -eq $node) {
@@ -65,7 +76,15 @@ Write-Host "Node: $nodeExe"
 $nodePathFile = Join-Path $hostDir 'node-path.txt'
 [System.IO.File]::WriteAllText($nodePathFile, $nodeExe, (New-Object System.Text.UTF8Encoding($false)))
 
+# A host spawned by a running browser holds this file open, so reinstalling over a live
+# bridge fails on a locked file. Stop the launcher first; the browser reconnects on its
+# own through the service worker's reconnect alarm.
+Get-Process -Name 'sourcecapsule-host' -ErrorAction SilentlyContinue | ForEach-Object {
+    Write-Host "Stopping running host (pid $($_.Id))"
+    $_ | Stop-Process -Force
+}
 if (Test-Path $hostExe) {
+    Start-Sleep -Milliseconds 500
     Remove-Item $hostExe -Force
 }
 Add-Type -TypeDefinition (Get-Content $launcherSource -Raw) `
