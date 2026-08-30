@@ -72,7 +72,7 @@ module.exports = [
   },
   {
     // ESM Node test + tooling scripts.
-    files: ['test/**/*.mjs', 'scripts/**/*.mjs'],
+    files: ['test/**/*.mjs', 'scripts/**/*.mjs', 'native-host/**/*.mjs'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'module',

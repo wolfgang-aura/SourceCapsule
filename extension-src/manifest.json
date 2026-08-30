@@ -3,7 +3,7 @@
   "name": "SourceCapsule",
   "version": "1.5.2",
   "description": "Save complete X threads, Articles, and posts as offline archives, agent-ready Markdown, or expiring share links.",
-  "permissions": ["activeTab", "storage"],
+  "permissions": ["activeTab", "storage", "nativeMessaging", "alarms", "tabs"],
   "host_permissions": [
     "https://x.com/*",
     "https://twitter.com/*",
@@ -42,5 +42,6 @@
   "action": {
     "default_title": "SourceCapsule",
     "default_popup": "popup.html"
-  }
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAhm26OFRvYKPakv6VWntMtkTvy//zv8bf+LJ3nCv8RdIK91XqTlpfUGSr8c9GIWsKZ9K//W2p2cXFqqCD4JEkt/x1BVCPo5bkUCEiQYNv45VfJeSKPz69VcOCYDwtFvN6WTTHr5UIKnEzialrfsfJISoq3MBYRxKxtQOCbgO8ncOfK2FQdi/S4I8mnktHCp77w6yJSdqiXsCbIogHacUttIRyjbK5O+TwrfFCsidpfWSkLhHE+xd7un3yyQThXsjrnOXm3mfnf9SuQzBzIlCV9hPKvQSOfI8DomUSOoRH3S9cckt3zNgUHevBuF+HVbzi6Ty6jprfdexZ6A6luD5MHwIDAQAB"
 }

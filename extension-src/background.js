@@ -93,3 +93,73 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage)
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = { allowedUrl, handleMessage, PRODUCTION_HOSTS };
 }
+
+// --- Local automation bridge -----------------------------------------------------
+// The CLI cannot talk to Chrome directly; Chrome spawns native hosts. So the service
+// worker holds a long-lived port to the host, and the host relays CLI requests over a
+// named pipe. Inbound native messages reset the MV3 idle timer, and the host sends a
+// heartbeat every 20s, so this port is what keeps the worker resident.
+const NATIVE_HOST = 'com.wolfgang_aura.sourcecapsule';
+let nativePort = null;
+
+function respondToHost(id, payload) {
+  if (!nativePort) return;
+  try {
+    nativePort.postMessage({ ...payload, id });
+  } catch (error) {
+    console.warn('[SourceCapsule] native reply failed:', error.message);
+  }
+}
+
+async function handleAutomationRequest(request) {
+  if (request.action === 'ping') {
+    return {
+      ok: true,
+      extensionVersion: chrome.runtime.getManifest().version,
+      extensionId: chrome.runtime.id,
+    };
+  }
+  return { ok: false, error: 'unknown_action', message: `Unsupported action: ${request.action}` };
+}
+
+function connectNativeHost() {
+  if (nativePort) return;
+  try {
+    nativePort = chrome.runtime.connectNative(NATIVE_HOST);
+  } catch (error) {
+    console.warn('[SourceCapsule] native host unavailable:', error.message);
+    nativePort = null;
+    return;
+  }
+  nativePort.onMessage.addListener((message) => {
+    if (!message || typeof message !== 'object') return;
+    if (message.type === 'sourcecapsule:heartbeat') return;
+    if (message.type === 'sourcecapsule:host-status') {
+      console.log('[SourceCapsule] native host status', JSON.stringify(message));
+      return;
+    }
+    if (!message.id || !message.action) return;
+    handleAutomationRequest(message)
+      .then((result) => respondToHost(message.id, result))
+      .catch((error) =>
+        respondToHost(message.id, { ok: false, error: 'internal', message: error.message })
+      );
+  });
+  nativePort.onDisconnect.addListener(() => {
+    const error = chrome.runtime.lastError;
+    console.warn('[SourceCapsule] native port closed:', error ? error.message : 'no error');
+    nativePort = null;
+  });
+}
+
+if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.connectNative) {
+  chrome.runtime.onStartup.addListener(connectNativeHost);
+  chrome.runtime.onInstalled.addListener(connectNativeHost);
+  if (chrome.alarms) {
+    chrome.alarms.create('sourcecapsule:native-reconnect', { periodInMinutes: 0.5 });
+    chrome.alarms.onAlarm.addListener((alarm) => {
+      if (alarm.name === 'sourcecapsule:native-reconnect') connectNativeHost();
+    });
+  }
+  connectNativeHost();
+}
