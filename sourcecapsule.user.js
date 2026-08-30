@@ -5586,6 +5586,77 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     return next;
   }
 
+  // Unattended capture, driven by the CLI through the native messaging host. This is a
+  // thin wrapper: it waits for the page and the passive capture layer, then hands off to
+  // the same runExport('share') path a click would use. No parsing lives here.
+  async function runAutomatedShareCapture({ expiryDays = 0, readyTimeoutMs = 60000 } = {}) {
+    const started = Date.now();
+    // 1. The tab was created moments ago, so wait for X to render the post itself.
+    let pageType = detectPageType();
+    while (!pageType && Date.now() - started < readyTimeoutMs) {
+      await sleep(500);
+      pageType = detectPageType();
+    }
+    if (!pageType) {
+      return {
+        ok: false,
+        error: 'page_not_ready',
+        message: `No post or article rendered within ${Math.round(readyTimeoutMs / 1000)}s.`,
+      };
+    }
+    // 2. Give the passive GraphQL capture layer a moment to tee the TweetDetail body.
+    //    Without it, long-form text and quote permalinks arrive only as previews.
+    const captureDeadline = Date.now() + 15000;
+    while (
+      networkCaptureDiagnostics.installed &&
+      networkCaptureDiagnostics.interestingResponses === 0 &&
+      Date.now() < captureDeadline
+    ) {
+      await sleep(500);
+    }
+    try {
+      const result = await runExport('share', {
+        automation: true,
+        includeThread: true,
+        expiryDays: Number(expiryDays) || 0,
+      });
+      if (!result || !result.created) {
+        return { ok: false, error: 'no_capsule', message: 'The export produced no share link.' };
+      }
+      const { created, model } = result;
+      const stats = archiveStats(model);
+      const assessment = assessExportCompleteness(model);
+      const warnings = [];
+      if (stats.missingMedia) warnings.push(`${stats.missingMedia} media item(s) missing`);
+      if (stats.incompleteMedia)
+        warnings.push(`${stats.incompleteMedia} media item(s) incomplete (poster or link only)`);
+      if (stats.quoteTombstones)
+        warnings.push(`${stats.quoteTombstones} quoted post(s) deleted on X`);
+      if (networkCaptureDiagnostics.interestingResponses === 0)
+        warnings.push('no passive GraphQL capture was observed for this page');
+      return {
+        ok: true,
+        sourceUrl: model.sourceUrl || location.href,
+        viewUrl: created.viewUrl,
+        markdownUrl: created.markdownUrl,
+        expiresAt: created.expiresAt,
+        complete: assessment.verdict === 'clean',
+        warnings,
+      };
+    } catch (error) {
+      if (error && error.code === 'needs_owner') {
+        return {
+          ok: false,
+          error: 'needs_owner',
+          message: error.message,
+          blockers: (error.assessment && error.assessment.blockers) || [],
+          counts: (error.assessment && error.assessment.counts) || {},
+        };
+      }
+      return { ok: false, error: 'capture_failed', message: error.message };
+    }
+  }
+
   function extensionControllerMessage(message) {
     if (
       !message ||
@@ -5625,6 +5696,9 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       showFolderPickerPrompt();
       return { ok: true, requiresPageAction: true };
     }
+    if (message.action === 'capture-share') {
+      return runAutomatedShareCapture(message.value || {});
+    }
     return { ok: false, error: 'Unknown SourceCapsule extension action.' };
   }
 
@@ -5640,7 +5714,16 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       return;
     extensionControllerRegistered = true;
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-      sendResponse(extensionControllerMessage(message));
+      const result = extensionControllerMessage(message);
+      // capture-share runs a full export, so it answers with a promise. Returning true
+      // keeps the message channel open until it settles.
+      if (result && typeof result.then === 'function') {
+        result
+          .then(sendResponse)
+          .catch((error) => sendResponse({ ok: false, error: 'internal', message: error.message }));
+        return true;
+      }
+      sendResponse(result);
       return false;
     });
   }
@@ -10722,9 +10805,27 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * @param targetTweetEl when set, export exactly that post (per-post button); else the page.
    * @param trigger the clicked button, for busy-state feedback.
    */
+  // Raised when strict mode still sees blockers after every recovery layer ran and no
+  // human is present to answer the modal. Automation must fail loudly here rather than
+  // ship a capture with dead ends in it.
+  class NeedsOwnerError extends Error {
+    constructor(assessment) {
+      super('Strict capture could not recover missing evidence.');
+      this.name = 'NeedsOwnerError';
+      this.code = 'needs_owner';
+      this.assessment = assessment;
+    }
+  }
+
   async function runExport(
     exportType,
-    { targetTweetEl = null, trigger = null, includeThread = true } = {}
+    {
+      targetTweetEl = null,
+      trigger = null,
+      includeThread = true,
+      automation = false,
+      expiryDays = 0,
+    } = {}
   ) {
     const type = targetTweetEl ? 'post' : detectPageType();
     if (!type) return;
@@ -10745,6 +10846,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     setBusy(true);
     try {
       let metadata = {};
+      // Automation has no modal to pick an expiry in, so the caller supplies it. Only a
+      // value the UI itself offers is accepted; anything else falls back to the default.
+      if (expiryDays && CONFIG.share.expiryDays.includes(expiryDays)) {
+        metadata.expiryDays = expiryDays;
+      }
       const needsShare = exportType === 'share' || exportType === 'library-share';
       const needsLibrary = exportType === 'library-share' || exportType.startsWith('library');
       if (exportTypeNeedsCaptureOptions(exportType)) {
@@ -10882,6 +10988,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             log('strict-mode auto-repair resolved all blockers');
           }
         }
+        if (assessment.verdict !== 'clean' && automation) {
+          // No human is watching an unattended run, so the confirm modal would hang
+          // forever. Strict mode stays strict: report what is missing and stop.
+          log('automation blocked by strict-mode gate', assessment.counts);
+          throw new NeedsOwnerError(assessment);
+        }
         if (assessment.verdict !== 'clean') {
           hideToast();
           const proceed = await confirmShipDespiteIncomplete({
@@ -10924,13 +11036,20 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           });
         }
         let copied = false;
-        try {
-          await copyText(created.viewUrl);
-          copied = true;
-        } catch (copyError) {
-          warn('AI readable link created but automatic clipboard copy failed:', copyError.message);
+        // Automation never touches the clipboard: it would clobber whatever the owner
+        // has copied, and the caller receives the URLs in its JSON reply anyway.
+        if (!automation) {
+          try {
+            await copyText(created.viewUrl);
+            copied = true;
+          } catch (copyError) {
+            warn(
+              'AI readable link created but automatic clipboard copy failed:',
+              copyError.message
+            );
+          }
+          showShareResult(created, { copied });
         }
-        showShareResult(created, { copied });
         showToast(
           `AI readable link ready; expires ${readableUtcTime(created.expiresAt)}${copied ? ' (copied)' : ''}`
         );
@@ -11008,8 +11127,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         return;
       }
       if (outputType === 'share') {
-        await publishAndCopyShare();
-        return;
+        const created = await publishAndCopyShare();
+        return { created, model };
       }
       const basename = `${slugify(model.title)}.${nowStamp()}`;
       const htmlFilename = `${basename}.html`;

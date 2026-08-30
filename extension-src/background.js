@@ -102,12 +102,103 @@ if (typeof module !== 'undefined' && module.exports) {
 const NATIVE_HOST = 'com.wolfgang_aura.sourcecapsule';
 let nativePort = null;
 
+// Development-build diagnostics. A service worker cannot write to disk and its console
+// is only visible in devtools, so bridge failures are invisible to the CLI. In a
+// development build (which grants http://127.0.0.1/*), each connect attempt is also
+// posted to a local listener: scripts/bridge-diagnostics.mjs. No-op in production.
+function reportBridgeDiagnostic(stage, detail) {
+  if (!DEVELOPMENT_HOSTS_ENABLED) return;
+  try {
+    fetch('http://127.0.0.1:8799/diagnostic', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stage, detail, at: new Date().toISOString() }),
+    }).catch(() => {});
+  } catch {
+    /* diagnostics must never break the bridge */
+  }
+}
+
 function respondToHost(id, payload) {
   if (!nativePort) return;
   try {
     nativePort.postMessage({ ...payload, id });
   } catch (error) {
     console.warn('[SourceCapsule] native reply failed:', error.message);
+  }
+}
+
+// Server-side copy of the CLI's check. The CLI is convenience; this is the boundary that
+// actually decides what gets opened, so it must not trust the caller's string.
+const CANONICAL_X_URL =
+  /^https:\/\/(?:www\.|mobile\.)?(?:x|twitter)\.com\/[A-Za-z0-9_]{1,15}\/status\/\d{1,25}(?:[/?#].*)?$/;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// The content script answers 'get-state' as soon as it is running. Polling for that is
+// more reliable than tabs.onUpdated, which fires before the script is listening.
+async function waitForContentScript(tabId, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = 'no response';
+  while (Date.now() < deadline) {
+    try {
+      const state = await chrome.tabs.sendMessage(tabId, {
+        type: 'sourcecapsule:controller',
+        version: 1,
+        action: 'get-state',
+      });
+      if (state && state.ok) return state;
+      lastError = (state && state.error) || 'content script declined';
+    } catch (error) {
+      lastError = error.message;
+    }
+    await sleep(500);
+  }
+  throw new Error(`Content script never became ready: ${lastError}`);
+}
+
+async function captureShare(request) {
+  if (!CANONICAL_X_URL.test(String(request.url || ''))) {
+    return {
+      ok: false,
+      error: 'invalid_url',
+      message: 'Only a canonical https://x.com/<handle>/status/<id> URL can be captured.',
+    };
+  }
+  const timeoutMs = Math.min(Number(request.timeoutMs) || 300000, 900000);
+  // A hidden tab gets rAF paused and timers throttled, which starves the media
+  // force-load pass and manufactures strict-mode blockers. An ACTIVE tab in an
+  // UNFOCUSED window is not throttled and still never steals focus from the owner.
+  const window = await chrome.windows.create({
+    url: request.url,
+    focused: false,
+    state: 'normal',
+    width: 1280,
+    height: 900,
+  });
+  const tabId = window.tabs && window.tabs[0] && window.tabs[0].id;
+  if (!tabId) {
+    return { ok: false, error: 'no_tab', message: 'Could not open a capture tab.' };
+  }
+  try {
+    await waitForContentScript(tabId, Math.min(timeoutMs, 90000));
+    const result = await chrome.tabs.sendMessage(tabId, {
+      type: 'sourcecapsule:controller',
+      version: 1,
+      action: 'capture-share',
+      value: { expiryDays: Number(request.expiryDays) || 0 },
+    });
+    return result || { ok: false, error: 'no_result', message: 'The capture returned nothing.' };
+  } catch (error) {
+    return { ok: false, error: 'capture_failed', message: error.message };
+  } finally {
+    try {
+      await chrome.windows.remove(window.id);
+    } catch (error) {
+      console.warn('[SourceCapsule] could not close capture window:', error.message);
+    }
   }
 }
 
@@ -119,15 +210,22 @@ async function handleAutomationRequest(request) {
       extensionId: chrome.runtime.id,
     };
   }
+  if (request.action === 'capture-share') return captureShare(request);
   return { ok: false, error: 'unknown_action', message: `Unsupported action: ${request.action}` };
 }
 
 function connectNativeHost() {
   if (nativePort) return;
+  reportBridgeDiagnostic('connect-attempt', {
+    id: chrome.runtime.id,
+    host: NATIVE_HOST,
+    hasConnectNative: typeof chrome.runtime.connectNative === 'function',
+  });
   try {
     nativePort = chrome.runtime.connectNative(NATIVE_HOST);
   } catch (error) {
     console.warn('[SourceCapsule] native host unavailable:', error.message);
+    reportBridgeDiagnostic('connect-threw', error.message);
     nativePort = null;
     return;
   }
@@ -136,6 +234,7 @@ function connectNativeHost() {
     if (message.type === 'sourcecapsule:heartbeat') return;
     if (message.type === 'sourcecapsule:host-status') {
       console.log('[SourceCapsule] native host status', JSON.stringify(message));
+      reportBridgeDiagnostic('host-status', message);
       return;
     }
     if (!message.id || !message.action) return;
@@ -148,6 +247,7 @@ function connectNativeHost() {
   nativePort.onDisconnect.addListener(() => {
     const error = chrome.runtime.lastError;
     console.warn('[SourceCapsule] native port closed:', error ? error.message : 'no error');
+    reportBridgeDiagnostic('port-closed', error ? error.message : 'no lastError');
     nativePort = null;
   });
 }
@@ -161,5 +261,6 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.connectNat
       if (alarm.name === 'sourcecapsule:native-reconnect') connectNativeHost();
     });
   }
+  reportBridgeDiagnostic('worker-start', { id: chrome.runtime.id });
   connectNativeHost();
 }
