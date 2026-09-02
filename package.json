@@ -33,6 +33,7 @@
     "test:share": "node test/share-worker.test.mjs",
     "test:x-probe": "node test/x-api-probe.test.mjs && node test/native-host.test.mjs",
     "probe:x": "node scripts/probe-x-mobile.mjs",
+    "accept:extension": "node scripts/accept-extension.mjs",
     "build:extension": "node scripts/build-extension.mjs",
     "start:browser": "powershell -ExecutionPolicy Bypass -File scripts/start-sourcecapsule-browser.ps1",
     "install:native-host": "powershell -ExecutionPolicy Bypass -File scripts/install-native-host.ps1",

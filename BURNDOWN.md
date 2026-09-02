@@ -29,9 +29,12 @@ until the next burn compresses the file. Not gitignored — it's a project doc.
 ## Blocked-on-human — do not attempt
 
 See `SESSION_HANDOFF.md` "Open items — blocked on you" for the current list
-(popup/toolbar checks, real library saves, native folder picker, hosted share
-upload verification). Agent tools cannot exercise the extension popup or the
-File System Access folder picker.
+(real library saves, native folder picker, hosted share upload verification).
+The extension popup is no longer on this list: since 2026-09-02, agent tools
+exercise it end to end via chrome-devtools-mcp (see
+`docs/extension-acceptance.md`), and the EN/ZH-CN toggle plus the
+strict-export persistence check passed 24/24 against the real MV3 build. The
+File System Access folder picker still needs a human (a real native dialog).
 
 ## Ideas to grow the menu
 
