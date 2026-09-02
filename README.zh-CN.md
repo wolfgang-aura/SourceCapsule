@@ -192,7 +192,7 @@ npm.cmd run build:extension
 2. 打开右上角的 **Developer mode**。
 3. 点 **Load unpacked**。
 4. 选
-   `SourceCapsule\dist\sourcecapsule-extension`。
+   `dist\sourcecapsule-extension`。
 5. 在 Tampermonkey 里对 x.com 停用 SourceCapsule 用户脚本，免得出现两个按钮。
 6. 刷新一个状态页，测试快速保存、只存本条、复制 Markdown 和 AI 可读链接。
 

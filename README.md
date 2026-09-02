@@ -226,7 +226,7 @@ Then in Chrome:
 2. Turn on **Developer mode** in the top-right.
 3. Click **Load unpacked**.
 4. Choose
-   `SourceCapsule\dist\sourcecapsule-extension`.
+   `dist\sourcecapsule-extension`.
 5. Disable the SourceCapsule userscript in Tampermonkey for x.com to avoid duplicate buttons.
 6. Refresh a status page and test quick save, this-post-only, copy Markdown, and AI readable links.
 
