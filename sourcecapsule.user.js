@@ -6085,7 +6085,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
    is draggable and remembers where you put it. */
 #${CONFIG.buttonId}{position:fixed;right:96px;bottom:20px;z-index:99999}
 .xa-ctl{font:600 14px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-.xa-ctl-trigger{display:inline-flex;align-items:center;gap:6px;padding:11px 16px;border:none;border-radius:9999px;
+.xa-ctl-trigger{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;padding:11px 16px;border:none;border-radius:9999px;
   background:#1d9bf0;color:#fff;font:inherit;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.25);
   user-select:none;transition:transform .08s ease,background .15s ease}
 .xa-ctl-floating .xa-ctl-trigger{cursor:grab;touch-action:none}
@@ -8510,13 +8510,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       saveWithNote: 'Save with note / tags',
       copyMarkdown: 'Copy clean Markdown',
       copyMarkdownShort: 'Copy Markdown',
-      createAiLink: 'Create AI readable link',
+      createAiLink: 'Create AI link',
+      createAiLinkThread: 'Create AI link (full thread)',
       saveFullThread: 'Save full thread',
       captureReplies: 'Capture replies (experimental)',
       downloadReplyArchive: 'Download reply archive',
-      saveArticle: 'Save article',
-      saveThread: 'Save thread',
-      savePost: 'Save post',
       openPostFirst: 'Open post first',
       exporting: 'Exporting...',
     },
@@ -8525,13 +8523,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       saveWithNote: '附注保存 / 添加标签',
       copyMarkdown: '复制 Markdown',
       copyMarkdownShort: '复制 Markdown',
-      createAiLink: '创建 AI 可读链接',
+      createAiLink: '创建 AI 链接',
+      createAiLinkThread: '创建 AI 链接（完整话题串）',
       saveFullThread: '保存完整话题串',
       captureReplies: '捕获回复（实验性功能）',
       downloadReplyArchive: '下载回复存档',
-      saveArticle: '保存文章',
-      saveThread: '保存话题串',
-      savePost: '保存帖子',
       openPostFirst: '请先打开帖子',
       exporting: '正在导出…',
     },
@@ -8574,6 +8570,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   // short: a ten-item drop-down made the common actions hard to find, so only the
   // ones worth a click of their own are listed.
   //
+  // 'share' is NOT a menu item because it is the trigger button's own action - the
+  // default click on every control creates the AI readable link. The menu holds the
+  // alternatives to that default.
+  //
   // Removed from the MENU, not from the engine: 'library-share' was just "save,
   // then share" - two items that are already here - and 'both' (the HTML + Markdown
   // ZIP) is a fallback for non-Chromium, which "Save to library" already falls back
@@ -8584,17 +8584,22 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     { key: 'library-note', i18nKey: 'saveWithNote' },
     { divider: true },
     { key: 'copy', i18nKey: 'copyMarkdown' },
-    { key: 'share', i18nKey: 'createAiLink' },
   ];
   const POST_EXPORT_TYPES = [
+    { key: 'library', i18nKey: 'saveToLibrary' },
     { key: 'library-note', i18nKey: 'saveWithNote' },
     { key: 'copy', i18nKey: 'copyMarkdownShort' },
-    { key: 'share', i18nKey: 'createAiLink' },
   ];
   // Which X surface the probe scrolls is an implementation detail of how X paginates
   // replies, not a choice a reader should have to make - and picking only one gives
   // up the coverage the others contribute. One item runs all three and merges.
+  //
+  // 'share-thread' is the AI-link twin of 'library-thread': the same escape hatch,
+  // for the same reason. The trigger already links the whole thread when auto-
+  // detection sees one, but detection reads the DOM once at render time, so a
+  // focused post must always offer a way to force full-thread scope.
   const THREAD_EXPORT_TYPES = [
+    { key: 'share-thread', i18nKey: 'createAiLinkThread' },
     { key: 'library-thread', i18nKey: 'saveFullThread' },
     ...POST_EXPORT_TYPES,
     { divider: true },
@@ -8607,10 +8612,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   }
 
   function postExportRequest(exportType) {
-    return {
-      exportType: exportType === 'library-thread' ? 'library' : exportType,
-      includeThread: exportType === 'library-thread',
-    };
+    if (exportType === 'library-thread') return { exportType: 'library', includeThread: true };
+    if (exportType === 'share-thread') return { exportType: 'share', includeThread: true };
+    return { exportType, includeThread: false };
   }
 
   // Per-reply text cap. Generous enough for long-form replies, bounded so one abusive
@@ -10420,7 +10424,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     // every same-author reply BEFORE building the model - so this is safe even when
     // the current DOM shows only the focused post.
     const menuItems = isFocusedPost ? THREAD_EXPORT_TYPES : POST_EXPORT_TYPES;
-    const triggerI18nKey = openFirstReason ? 'openPostFirst' : isThread ? 'saveThread' : 'savePost';
+    // The default click creates the AI readable link. The label stays constant so the
+    // button does not shift under the cursor as X lazily fills the conversation; the
+    // title carries the scope (whole thread vs this post alone).
+    const triggerI18nKey = openFirstReason ? 'openPostFirst' : 'createAiLink';
     return {
       isThread,
       includeThread: isThread,
@@ -10431,8 +10438,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       title: openFirstReason
         ? 'Open this post before exporting so SourceCapsule can capture the full article/thread content'
         : isThread
-          ? 'Quick-save this full thread to your SourceCapsule library'
-          : 'Quick-save only this post to your SourceCapsule library',
+          ? 'Create one AI readable link covering this full thread'
+          : 'Create an AI readable link for this post',
       menuItems,
     };
   }
@@ -11237,12 +11244,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   function ensureFloatingControl(type) {
     const existing = document.getElementById(CONFIG.buttonId);
     if (existing) {
-      // The article reader can load AFTER the control is first injected, so detectPageType may
-      // have said "post" initially. Relabel the live control when the type is now known (unless
-      // it's mid-export). Export itself re-checks the type at click time, so content is correct
-      // regardless; this just keeps the label honest.
+      // The label no longer depends on page type - every control's default action is
+      // "Create AI link" - but a language change still has to reach a live control, and
+      // the label must not be stomped mid-export. Export re-checks the page type at click
+      // time, so article vs thread scope is correct regardless of what was rendered here.
       const trig = existing.querySelector('.xa-ctl-trigger');
-      const i18nKey = type === 'article' ? 'saveArticle' : 'saveThread';
+      const i18nKey = 'createAiLink';
       const label = pt(i18nKey);
       if (trig && !trig.disabled && trig.textContent !== label) {
         trig.textContent = label;
@@ -11252,11 +11259,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     }
     ensureStyle();
     const { wrap } = createExportControl({
-      triggerI18nKey: type === 'article' ? 'saveArticle' : 'saveThread',
-      triggerTitle: `Quick-save this ${type === 'article' ? 'article' : 'full thread'} to your SourceCapsule library (drag to move)`,
+      triggerI18nKey: 'createAiLink',
+      triggerTitle: `Create one AI readable link for this ${type === 'article' ? 'article' : 'full thread'} (drag to move)`,
       className: 'xa-ctl xa-ctl-floating',
       menuItems: EXPORT_TYPES,
-      onQuick: (trigger) => runExport('library', { trigger, includeThread: true }),
+      onQuick: (trigger) => runExport('share', { trigger, includeThread: true }),
       onPick: (exportType, trigger) =>
         runExport(exportType, {
           trigger,
@@ -11309,8 +11316,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         className: `xa-ctl ${CONFIG.postControlClass}`,
         menuItems: mode.menuItems,
         onQuick: (trigger) => {
+          // Re-read the mode at click time: X may have filled in the rest of the
+          // conversation since the button was rendered, so a post that looked
+          // single-post then is a thread now, and one link should cover all of it.
           const currentMode = postControlCaptureMode(tweetEl, column);
-          return runExport('library', {
+          return runExport('share', {
             targetTweetEl: tweetEl,
             trigger,
             includeThread: currentMode.includeThread,
@@ -11364,10 +11374,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const caret = column.querySelector('[data-testid="caret"]'); // topmost = article header
     if (!caret || !caret.parentElement) return;
     const { wrap } = createExportControl({
-      triggerI18nKey: 'saveArticle',
-      triggerTitle: `Quick-save this article to your SourceCapsule library`,
+      triggerI18nKey: 'createAiLink',
+      triggerTitle: `Create an AI readable link for this article`,
       className: `xa-ctl ${CONFIG.postControlClass}`,
-      onQuick: (trigger) => runExport('library', { trigger }),
+      onQuick: (trigger) => runExport('share', { trigger }),
       onPick: (exportType, trigger) => runExport(exportType, { trigger }),
     });
     wrap.classList.add('xa-ctl-inline');

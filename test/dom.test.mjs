@@ -450,10 +450,12 @@ check(
     const focusedMode = engine.postControlCaptureMode(focused, column);
     assert.equal(focusedMode.isThread, true);
     assert.equal(focusedMode.includeThread, true);
-    assert.equal(focusedMode.i18nKey, 'saveThread');
-    // Manual checklist T02 requires the drop-down's first item to be "Save full
-    // thread" on every focused post - assert order, not just presence.
-    assert.equal(focusedMode.menuItems[0].key, 'library-thread');
+    // The default click creates the AI readable link on every control, thread or not.
+    assert.equal(focusedMode.i18nKey, 'createAiLink');
+    // Manual checklist T02: every focused post keeps a way to FORCE full-thread scope,
+    // for both outputs, at the top of the drop-down - assert order, not just presence.
+    assert.equal(focusedMode.menuItems[0].key, 'share-thread');
+    assert.equal(focusedMode.menuItems[1].key, 'library-thread');
     // The three per-surface capture items collapsed into one that runs all of them.
     const focusedKeys = focusedMode.menuItems.filter((item) => !item.divider).map((i) => i.key);
     assert.ok(!focusedKeys.some((key) => /^reply-probe-/.test(key)), 'no per-surface menu items');
@@ -466,8 +468,9 @@ check(
     const continuationMode = engine.postControlCaptureMode(continuation, column);
     assert.equal(continuationMode.isThread, false);
     assert.equal(continuationMode.includeThread, false);
-    assert.equal(continuationMode.i18nKey, 'savePost');
+    assert.equal(continuationMode.i18nKey, 'createAiLink');
     assert.ok(!continuationMode.menuItems.some((item) => item.key === 'library-thread'));
+    assert.ok(!continuationMode.menuItems.some((item) => item.key === 'share-thread'));
   }
 );
 
@@ -901,13 +904,13 @@ check(
       const mode = engine.postControlCaptureMode(focused, column);
       // Auto-detection correctly reports a single post at THIS instant...
       assert.equal(mode.isThread, false);
-      assert.equal(mode.label, 'Save post');
-      // ...but the menu still exposes the escape hatch, and it must be the
-      // first item so T02's "drop-down's first item is Save full thread" holds.
-      assert.equal(
-        mode.menuItems[0].key,
-        'library-thread',
-        'focused post must always offer Save full thread as the first menu item'
+      assert.equal(mode.label, 'Create AI link');
+      // ...but the menu still exposes both escape hatches, at the top, so T02's
+      // "the drop-down leads with the forced full-thread items" holds.
+      assert.deepEqual(
+        mode.menuItems.slice(0, 2).map((item) => item.key),
+        ['share-thread', 'library-thread'],
+        'focused post must always offer forced full-thread capture first'
       );
     } finally {
       // Restore the shared thread fixture for later checks.
@@ -962,7 +965,7 @@ check('home timeline gets visible per-post save controls without opening a post'
   assert.ok(controls.every((control) => control.classList.contains('xa-ctl-inline')));
   assert.deepEqual(
     controls.map((control) => control.querySelector('.xa-ctl-trigger').textContent),
-    ['Save post', 'Save post', 'Open post first']
+    ['Create AI link', 'Create AI link', 'Open post first']
   );
   const menus = Array.from(document.querySelectorAll('.xa-ctl-menu'));
   assert.equal(menus.length, 3);
@@ -970,6 +973,8 @@ check('home timeline gets visible per-post save controls without opening a post'
     item.textContent.trim()
   );
   assert.ok(!menuLabels.includes('Save full thread'));
+  assert.ok(!menuLabels.includes('Create AI link (full thread)'));
+  assert.ok(menuLabels.includes('Save to library'));
   assert.ok(menuLabels.includes('Save with note / tags'));
   assert.equal(engine.exportTypeNeedsCaptureOptions('share'), false);
   assert.equal(engine.exportTypeNeedsCaptureOptions('library-note'), true);
@@ -4456,18 +4461,28 @@ check('the media count in the receipt matches the media the file actually lists'
   assert.equal(archive.mediaLinkCount, 3);
 });
 
-check('the post menu offers six items, and no item the engine cannot serve', () => {
+check('the post menu offers seven items, and no item the engine cannot serve', () => {
   // A ten-item drop-down buried the common actions. This pins the short menu so a
   // future addition is a deliberate decision rather than a drift back to ten.
   const keys = engine.THREAD_EXPORT_TYPES.filter((item) => !item.divider).map((item) => item.key);
   assert.deepEqual(keys, [
+    'share-thread',
     'library-thread',
+    'library',
     'library-note',
     'copy',
-    'share',
     'reply-probe',
     'reply-archive-download',
   ]);
+  // 'share' is the trigger button's own action, so it must not also be a menu item.
+  const allMenuKeys = [
+    ...engine.EXPORT_TYPES,
+    ...engine.POST_EXPORT_TYPES,
+    ...engine.THREAD_EXPORT_TYPES,
+  ]
+    .filter((item) => !item.divider)
+    .map((item) => item.key);
+  assert.ok(!allMenuKeys.includes('share'), 'plain share is the default click, not a menu item');
   // Removed from the menu only - runExport must still honour the keys, because the
   // extension popup and saved automation drive them directly.
   const menus = [engine.EXPORT_TYPES, engine.POST_EXPORT_TYPES, engine.THREAD_EXPORT_TYPES];
