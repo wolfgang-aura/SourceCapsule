@@ -65,9 +65,17 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
 
 ## Export modes
 
-- Menu offers **Save to library** (primary), **Save with note / tags**, **Copy clean Markdown**,
-  **Share with AI**, **Save locally + share with AI**, and **Download HTML + Markdown** (the
-  engine still supports the `html`/`md` single-file keys; they are just no longer menu items).
+- **The default click on every control is `share` — "Create AI link".** It is the trigger's own
+  action, so `share` is deliberately NOT a menu item. On a focused post the trigger passes
+  `includeThread` from `postControlCaptureMode`, re-read at click time, so a thread becomes ONE
+  capsule (`## Full Thread`, `Post n of N`) rather than a link per post. `share-thread` is the
+  AI-link twin of `library-thread`: same escape hatch, first in the focused-post menu, for when
+  X's virtualization hides the follow-ups at button-render time.
+- Menu offers **Create AI link (full thread)** and **Save full thread** (focused posts only),
+  then **Save to library**, **Save with note / tags**, **Copy clean Markdown**. The engine still
+  supports `library-share`, `both`, `html` and `md`; they are just no longer menu items.
+- Plain `share` publishes at the default 7-day expiry with no modal — the labelled click IS the
+  confirmation. Only the combined save-and-share flow prompts for an expiry.
 - **Save to library** (`saveToLibrary`) writes each export into a per-post folder under a root the
   user picks once: `<root>/<date>/<handle>-<id>/{<handle>-<id>.html?, <handle>-<id>.llm.md, media/}`. It uses the
   **File System Access API** (`getRootDir` persists the `FileSystemDirectoryHandle` in IndexedDB;

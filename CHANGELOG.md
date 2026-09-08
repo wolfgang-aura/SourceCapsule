@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- **"Create AI link" is now the default action on every SourceCapsule button**, replacing the
+  quick-save to library. Saving to the library moved into the drop-down, where the default
+  action used to sit.
+- **An AI link now covers a whole thread in one capsule.** On a focused post the default click
+  carries the detected thread scope, so a thread publishes as a single capsule
+  (`## Full Thread`, `Post n of N`) instead of one link per post to stitch together by hand.
+  The scope is re-read at click time, so a post that X had not yet filled out when the button
+  rendered is still captured whole.
+- **New menu item `Create AI link (full thread)`**, the AI-link twin of `Save full thread`, for
+  the case where X's virtualization defeats thread auto-detection entirely.
+
 ### Added
 
 - **Unattended capture from the command line (experimental, Windows only).**
