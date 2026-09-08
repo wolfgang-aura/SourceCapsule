@@ -5334,10 +5334,26 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     }, 1500);
   }
 
+  // navigator.clipboard.writeText() does not always settle. When the browser window is
+  // not OS-focused, Chromium can leave the promise pending forever instead of rejecting -
+  // and an unbounded await there hung the whole export AFTER the capsule was published,
+  // leaving the button stuck on "Exporting..." and the sticky toast lying about a link
+  // that already existed. Bound the wait and fall through to the selection fallback.
+  const CLIPBOARD_WRITE_TIMEOUT_MS = 2000;
+
   async function copyText(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       try {
-        await navigator.clipboard.writeText(text);
+        let timer;
+        await Promise.race([
+          navigator.clipboard.writeText(text),
+          new Promise((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('clipboard write did not settle')),
+              CLIPBOARD_WRITE_TIMEOUT_MS
+            );
+          }),
+        ]).finally(() => clearTimeout(timer));
         return;
       } catch (error) {
         warn('navigator clipboard unavailable; trying selection fallback:', error.message);
@@ -10428,17 +10444,25 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     // button does not shift under the cursor as X lazily fills the conversation; the
     // title carries the scope (whole thread vs this post alone).
     const triggerI18nKey = openFirstReason ? 'openPostFirst' : 'createAiLink';
+    // The default click on a FOCUSED post always takes full-thread scope, whatever
+    // auto-detection currently sees. X renders a status page with the root post alone
+    // and fills the conversation in later, so `isThread` is false for the first seconds
+    // after load - and a click in that window used to publish the root post by itself,
+    // which is precisely the "one link per post, stitch them yourself" problem. Thread
+    // scope costs a full-column scroll and yields the same single post when there is no
+    // thread, so it is the safe default. `isThread` still drives the tooltip, and
+    // continuation posts stay post-only.
     return {
       isThread,
-      includeThread: isThread,
+      includeThread: isFocusedPost,
       requiresOpenPost: !!openFirstReason,
       openFirstReason,
       label: pt(triggerI18nKey),
       i18nKey: triggerI18nKey,
       title: openFirstReason
         ? 'Open this post before exporting so SourceCapsule can capture the full article/thread content'
-        : isThread
-          ? 'Create one AI readable link covering this full thread'
+        : isFocusedPost
+          ? 'Create one AI readable link covering this post and the rest of its thread'
           : 'Create an AI readable link for this post',
       menuItems,
     };
@@ -10851,6 +10875,42 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     }
   }
 
+  // Bounds for the pre-scroll conversation wait. The ceiling is what a post with no
+  // replies at all costs; the settle window is how long the count must hold still once
+  // more than the root post is mounted, so a partially-painted conversation is not
+  // mistaken for the whole one. Measured on a painting page, a post that HAS replies
+  // clears this in well under a second, so the ceiling is only ever paid in full by a
+  // reply-less post - and it buys the case that matters: a click landing in the second
+  // between the export button mounting and X's TweetDetail response, which otherwise
+  // publishes a one-post "thread".
+  const CONVERSATION_WAIT_MS = 6000;
+  const CONVERSATION_SETTLE_MS = 800;
+  const CONVERSATION_POLL_MS = 200;
+
+  /**
+   * Wait until the status page's conversation is on the page. Returns the top-level tweet
+   * count it settled on (1 means the root post really is alone). Never throws: a miss here
+   * costs a scroll pass that finds nothing, not a failed export.
+   */
+  async function waitForConversation(column) {
+    if (!column) return 0;
+    const deadline = Date.now() + CONVERSATION_WAIT_MS;
+    let count = topLevelTweetEls(column).length;
+    let lastChange = Date.now();
+    while (Date.now() < deadline) {
+      await sleep(CONVERSATION_POLL_MS);
+      const next = topLevelTweetEls(column).length;
+      if (next !== count) {
+        count = next;
+        lastChange = Date.now();
+        continue;
+      }
+      if (count > 1 && Date.now() - lastChange >= CONVERSATION_SETTLE_MS) break;
+    }
+    log('conversation wait settled on', count, 'top-level post(s)');
+    return count;
+  }
+
   async function runExport(
     exportType,
     {
@@ -10911,6 +10971,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         }
       }
       resetMediaState();
+      if (type === 'post' && includeThread) {
+        // X paints a status page with the root post ALONE and fetches the rest of the
+        // conversation a beat later. In that window the column is barely taller than the
+        // viewport, so forceLoadMedia has nothing to scroll, returns at once, and the
+        // model is built from the root post by itself - publishing a "thread" link that
+        // holds one post. Wait for the conversation to actually arrive first.
+        showToast('Waiting for the conversation to load...', { sticky: true });
+        await waitForConversation(pick(document, CONFIG.selectors.primaryColumn, { quiet: true }));
+      }
       if (CONFIG.forceLoad) {
         showToast('Loading media...', { sticky: true });
         if (targetTweetEl && !includeThread) {
@@ -11306,6 +11375,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             if (mode.i18nKey) trigger.dataset.i18nKey = mode.i18nKey;
             trigger.title = mode.title;
           }
+          // An overlay-placed control was injected before the header caret mounted and
+          // is covering the post's own text. Re-place it now that the caret exists.
+          if (!existing.classList.contains('xa-ctl-inline')) placePostControl(existing, tweetEl);
           return;
         }
       }
@@ -11348,18 +11420,30 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         'data-sourcecapsule-menu-mode',
         mode.menuItems === THREAD_EXPORT_TYPES ? 'thread' : 'post'
       );
-      // Prefer placing the control inline in the header, right before X's "..." menu, so it
-      // sits beside Subscribe/More and flows with them. Fall back to an absolute overlay if
-      // the header caret can't be found.
-      const caret = tweetEl.querySelector('[data-testid="caret"]');
-      if (caret && caret.parentElement) {
-        wrap.classList.add('xa-ctl-inline');
-        caret.parentElement.insertBefore(wrap, caret);
-      } else {
-        if (getComputedStyle(tweetEl).position === 'static') tweetEl.style.position = 'relative';
-        tweetEl.appendChild(wrap);
-      }
+      placePostControl(wrap, tweetEl);
     });
+  }
+
+  /**
+   * Put one post control in the header, right before X's "..." menu, so it sits beside
+   * Subscribe/More and flows with them. Falls back to an absolute overlay when the caret
+   * has not mounted yet - which is exactly what happens on a focused post, whose header
+   * caret renders after the article does. The overlay then sits ON TOP of the post text,
+   * so `ensurePerPostControls` calls this again on every pass: as soon as the caret
+   * appears, the control moves out of the reader's way. Returns true if it ended up
+   * inline.
+   */
+  function placePostControl(wrap, tweetEl) {
+    const caret = tweetEl.querySelector('[data-testid="caret"]');
+    if (caret && caret.parentElement) {
+      wrap.classList.add('xa-ctl-inline');
+      caret.parentElement.insertBefore(wrap, caret);
+      return true;
+    }
+    wrap.classList.remove('xa-ctl-inline');
+    if (getComputedStyle(tweetEl).position === 'static') tweetEl.style.position = 'relative';
+    tweetEl.appendChild(wrap);
+    return false;
   }
 
   // Inline "Export article" control in the article's header, beside X's "..." menu - the
@@ -11840,6 +11924,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       writeReplyProbeResult,
       runReplyProbe,
       postControlCaptureMode,
+      copyText,
+      waitForConversation,
       timelineArticlePreviewReason,
       showShareResult,
       showCaptureReceipt,

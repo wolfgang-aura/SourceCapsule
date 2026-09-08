@@ -76,6 +76,20 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
   supports `library-share`, `both`, `html` and `md`; they are just no longer menu items.
 - Plain `share` publishes at the default 7-day expiry with no modal — the labelled click IS the
   confirmation. Only the combined save-and-share flow prompts for an expiry.
+- **`postControlCaptureMode` returns `includeThread: isFocusedPost`, not `isThread`.** X paints a
+  status page with the root post ALONE and fetches the conversation a beat later, so `isThread` is
+  false for the first second — and a click in that window used to publish a one-post "thread".
+  `isThread` still drives the tooltip; the scope does not depend on it.
+- **`waitForConversation` runs before the media scroll** on any focused-post thread export. Without
+  it `forceLoadMedia` has nothing to scroll in that same window, returns at once, and the model is
+  built from the root post by itself. It exits as soon as more than one top-level post has been
+  mounted and held still, so the 6s ceiling is only ever paid in full by a reply-less post.
+- **`copyText` bounds `navigator.clipboard.writeText`.** Chromium can leave that promise pending
+  forever when the window is not OS-focused; unbounded, it stranded the export AFTER the capsule
+  was published — button stuck on "Exporting...", sticky toast lying about a link that existed.
+- **`placePostControl` re-places an overlay control once X's header caret mounts.** On a focused
+  post the caret renders after the article, so the control lands as an absolute overlay on top of
+  the post's own text and used to stay there for the life of the page.
 - **Save to library** (`saveToLibrary`) writes each export into a per-post folder under a root the
   user picks once: `<root>/<date>/<handle>-<id>/{<handle>-<id>.html?, <handle>-<id>.llm.md, media/}`. It uses the
   **File System Access API** (`getRootDir` persists the `FileSystemDirectoryHandle` in IndexedDB;

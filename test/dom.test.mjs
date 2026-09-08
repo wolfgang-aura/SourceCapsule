@@ -904,7 +904,13 @@ check(
       const mode = engine.postControlCaptureMode(focused, column);
       // Auto-detection correctly reports a single post at THIS instant...
       assert.equal(mode.isThread, false);
+      // ...but the DEFAULT click still takes thread scope. X fills a status page's
+      // conversation in after the root post, so a click in that window would otherwise
+      // publish the root post alone - one link per post, exactly what the default
+      // action exists to avoid.
+      assert.equal(mode.includeThread, true);
       assert.equal(mode.label, 'Create AI link');
+      assert.match(mode.title, /the rest of its thread/);
       // ...but the menu still exposes both escape hatches, at the top, so T02's
       // "the drop-down leads with the forced full-thread items" holds.
       assert.deepEqual(
@@ -4528,6 +4534,103 @@ check('a capture pass never advances to a surface it does not understand', () =>
   // A single-surface run (popup, diagnostics) carries no queue and must not chain.
   assert.equal(engine.nextReplyProbePass({ surface: 'top', queue: undefined }), null);
 });
+
+// Async regression: a clipboard write that never settles must not hang the export.
+// Chromium leaves navigator.clipboard.writeText() pending forever when the browser
+// window is not OS-focused. Unbounded, that stranded the whole share flow AFTER the
+// capsule was published - button stuck on "Exporting...", sticky toast lying about a
+// link that already existed. copyText must give up and fall through instead.
+{
+  const name = 'a clipboard write that never settles falls through instead of hanging';
+  const savedClipboard = global.navigator.clipboard;
+  const savedExec = global.document.execCommand;
+  const setClipboard = (value) =>
+    Object.defineProperty(global.navigator, 'clipboard', { value, configurable: true });
+  try {
+    setClipboard({ writeText: () => new Promise(() => {}) });
+    global.document.execCommand = () => false;
+    const started = Date.now();
+    let threw = null;
+    try {
+      await engine.copyText('https://example.invalid/c/abc');
+    } catch (e) {
+      threw = e;
+    }
+    const elapsed = Date.now() - started;
+    assert.ok(threw, 'copyText must reject once both paths fail, never hang');
+    assert.match(threw.message, /Clipboard access was denied/);
+    assert.ok(elapsed < 5000, `copyText took ${elapsed}ms; the bound never fired`);
+    // The happy path still resolves immediately, not after the timeout.
+    let wrote = '';
+    setClipboard({
+      writeText: (t) => {
+        wrote = t;
+        return Promise.resolve();
+      },
+    });
+    await engine.copyText('ok');
+    assert.equal(wrote, 'ok');
+    console.log(`  ✓ ${name}`);
+  } catch (e) {
+    failures++;
+    console.error(`  ✗ ${name}
+    ${e.message}`);
+  } finally {
+    setClipboard(savedClipboard);
+    global.document.execCommand = savedExec;
+  }
+}
+
+// Async regression: a thread export clicked the instant the button appears must wait for
+// X to deliver the conversation. X paints a status page with the root post alone, so the
+// scroll pass has nothing to scroll and returns at once - and the "full thread" link then
+// contains exactly one post. That is the bug the default action exists to prevent.
+{
+  const name = 'thread export waits for X to deliver the conversation before scrolling';
+  try {
+    const waitDom = new JSDOM(
+      `<html><body><div data-testid="primaryColumn">
+         <article data-testid="tweet"><div>root</div></article>
+       </div></body></html>`,
+      { url: 'https://x.com/finkd/status/2097402101332590646' }
+    );
+    const column = waitDom.window.document.querySelector('[data-testid="primaryColumn"]');
+    const savedDocument = global.document;
+    const savedNode = global.Node;
+    global.document = waitDom.window.document;
+    global.Node = waitDom.window.Node;
+    try {
+      // The conversation lands a beat after the click, exactly as X does it.
+      setTimeout(() => {
+        for (let i = 0; i < 3; i += 1) {
+          const el = waitDom.window.document.createElement('article');
+          el.setAttribute('data-testid', 'tweet');
+          column.appendChild(el);
+        }
+      }, 400);
+      const settled = await engine.waitForConversation(column);
+      assert.ok(settled > 1, `waited out the conversation but still saw ${settled} post(s)`);
+      assert.equal(settled, 4);
+      // A genuinely single post must still return, not hang.
+      const soloColumn = waitDom.window.document.createElement('div');
+      const solo = waitDom.window.document.createElement('article');
+      solo.setAttribute('data-testid', 'tweet');
+      soloColumn.appendChild(solo);
+      const started = Date.now();
+      assert.equal(await engine.waitForConversation(soloColumn), 1);
+      assert.ok(Date.now() - started < 15000, 'the wait must be bounded');
+      assert.equal(await engine.waitForConversation(null), 0);
+    } finally {
+      global.document = savedDocument;
+      global.Node = savedNode;
+    }
+    console.log(`  ✓ ${name}`);
+  } catch (e) {
+    failures++;
+    console.error(`  ✗ ${name}
+    ${e.message}`);
+  }
+}
 
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);

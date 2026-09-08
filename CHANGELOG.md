@@ -19,6 +19,20 @@ All notable changes to this project are documented here. The format is based on
 - **New menu item `Create AI link (full thread)`**, the AI-link twin of `Save full thread`, for
   the case where X's virtualization defeats thread auto-detection entirely.
 
+### Fixed
+
+- **A thread export clicked the moment the page loads no longer publishes the root post alone.**
+  X paints a status page with the root post by itself and fetches the conversation a beat later;
+  the export now waits for it to arrive before scrolling for media. Live-verified: clicked with
+  exactly one post in the DOM, the published capsule holds all 8.
+- **The export no longer hangs after a successful publish.** `navigator.clipboard.writeText()` can
+  stay pending forever when the browser window is not OS-focused, which left the button stuck on
+  "Exporting..." and the progress toast claiming to still be publishing a link that already
+  existed. The clipboard wait is now bounded and falls through to the selection copy.
+- **Post controls no longer sit on top of the post's own text.** On a focused post X's header caret
+  mounts after the article, so the control was placed as an absolute overlay and stayed there; it
+  now moves into the header as soon as the caret exists.
+
 ### Added
 
 - **Unattended capture from the command line (experimental, Windows only).**
