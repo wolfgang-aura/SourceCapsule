@@ -52,6 +52,26 @@ assert.deepEqual(engine.postExportRequest('copy'), {
   exportType: 'copy',
   includeThread: false,
 });
+// The AI readable link is the default action and must cover a whole thread in one
+// capsule - the user should never have to link each post and stitch them together.
+assert.deepEqual(engine.postExportRequest('share-thread'), {
+  exportType: 'share',
+  includeThread: true,
+});
+assert.deepEqual(engine.postExportRequest('share'), {
+  exportType: 'share',
+  includeThread: false,
+});
+assert.ok(
+  engine.THREAD_EXPORT_TYPES.some(
+    (item) => item.key === 'share-thread' && item.i18nKey === 'createAiLinkThread'
+  ),
+  'thread menu can force full-thread scope for the AI readable link'
+);
+assert.ok(
+  !engine.POST_EXPORT_TYPES.some((item) => item.key === 'share-thread'),
+  'ordinary post menu does not offer full-thread AI links'
+);
 
 // A 1x1 transparent PNG, already base64-inlined — stands in for fetched media.
 const PNG =

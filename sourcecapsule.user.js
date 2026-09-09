@@ -2184,6 +2184,18 @@
     return quotes.sort(compareDocumentOrder);
   }
 
+  /**
+   * Display name out of one line of a User-Name block, without the trailing @handle.
+   * X does not always separate the name from the handle with a newline: `innerText` can
+   * come back as "Mark Zuckerberg@finkd", and `textContent` (jsdom, some userscript hosts)
+   * never separates them at all. So slice at the first @token instead of trusting the split.
+   */
+  function displayNameFromLine(line) {
+    const text = String(line || '');
+    const handleMatch = text.match(/@[A-Za-z0-9_]+/);
+    return (handleMatch ? text.slice(0, handleMatch.index) : text).replace(/[·•]\s*$/, '').trim();
+  }
+
   /** Parse {name, handle} from a single User-Name block's text. */
   function authorFromNameBlock(nameBlock) {
     const out = { name: '', handle: '' };
@@ -2191,12 +2203,13 @@
     const text = nameBlock.innerText || nameBlock.textContent || '';
     const handleMatch = text.match(/@[A-Za-z0-9_]+/);
     out.handle = handleMatch ? handleMatch[0] : '';
-    // The display name is usually the first line before the @handle.
-    out.name =
+    // The display name is the first line, minus any @handle X glued onto it.
+    out.name = displayNameFromLine(
       text
         .split('\n')
         .map((s) => s.trim())
-        .filter(Boolean)[0] || '';
+        .filter(Boolean)[0] || ''
+    );
     return out;
   }
 
@@ -5334,10 +5347,26 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     }, 1500);
   }
 
+  // navigator.clipboard.writeText() does not always settle. When the browser window is
+  // not OS-focused, Chromium can leave the promise pending forever instead of rejecting -
+  // and an unbounded await there hung the whole export AFTER the capsule was published,
+  // leaving the button stuck on "Exporting..." and the sticky toast lying about a link
+  // that already existed. Bound the wait and fall through to the selection fallback.
+  const CLIPBOARD_WRITE_TIMEOUT_MS = 2000;
+
   async function copyText(text) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       try {
-        await navigator.clipboard.writeText(text);
+        let timer;
+        await Promise.race([
+          navigator.clipboard.writeText(text),
+          new Promise((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('clipboard write did not settle')),
+              CLIPBOARD_WRITE_TIMEOUT_MS
+            );
+          }),
+        ]).finally(() => clearTimeout(timer));
         return;
       } catch (error) {
         warn('navigator clipboard unavailable; trying selection fallback:', error.message);
@@ -6085,7 +6114,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
    is draggable and remembers where you put it. */
 #${CONFIG.buttonId}{position:fixed;right:96px;bottom:20px;z-index:99999}
 .xa-ctl{font:600 14px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
-.xa-ctl-trigger{display:inline-flex;align-items:center;gap:6px;padding:11px 16px;border:none;border-radius:9999px;
+.xa-ctl-trigger{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;padding:11px 16px;border:none;border-radius:9999px;
   background:#1d9bf0;color:#fff;font:inherit;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.25);
   user-select:none;transition:transform .08s ease,background .15s ease}
 .xa-ctl-floating .xa-ctl-trigger{cursor:grab;touch-action:none}
@@ -8510,13 +8539,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       saveWithNote: 'Save with note / tags',
       copyMarkdown: 'Copy clean Markdown',
       copyMarkdownShort: 'Copy Markdown',
-      createAiLink: 'Create AI readable link',
+      createAiLink: 'Create AI link',
+      createAiLinkThread: 'Create AI link (full thread)',
       saveFullThread: 'Save full thread',
       captureReplies: 'Capture replies (experimental)',
       downloadReplyArchive: 'Download reply archive',
-      saveArticle: 'Save article',
-      saveThread: 'Save thread',
-      savePost: 'Save post',
       openPostFirst: 'Open post first',
       exporting: 'Exporting...',
     },
@@ -8525,13 +8552,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       saveWithNote: '附注保存 / 添加标签',
       copyMarkdown: '复制 Markdown',
       copyMarkdownShort: '复制 Markdown',
-      createAiLink: '创建 AI 可读链接',
+      createAiLink: '创建 AI 链接',
+      createAiLinkThread: '创建 AI 链接（完整话题串）',
       saveFullThread: '保存完整话题串',
       captureReplies: '捕获回复（实验性功能）',
       downloadReplyArchive: '下载回复存档',
-      saveArticle: '保存文章',
-      saveThread: '保存话题串',
-      savePost: '保存帖子',
       openPostFirst: '请先打开帖子',
       exporting: '正在导出…',
     },
@@ -8574,6 +8599,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   // short: a ten-item drop-down made the common actions hard to find, so only the
   // ones worth a click of their own are listed.
   //
+  // 'share' is NOT a menu item because it is the trigger button's own action - the
+  // default click on every control creates the AI readable link. The menu holds the
+  // alternatives to that default.
+  //
   // Removed from the MENU, not from the engine: 'library-share' was just "save,
   // then share" - two items that are already here - and 'both' (the HTML + Markdown
   // ZIP) is a fallback for non-Chromium, which "Save to library" already falls back
@@ -8584,17 +8613,22 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     { key: 'library-note', i18nKey: 'saveWithNote' },
     { divider: true },
     { key: 'copy', i18nKey: 'copyMarkdown' },
-    { key: 'share', i18nKey: 'createAiLink' },
   ];
   const POST_EXPORT_TYPES = [
+    { key: 'library', i18nKey: 'saveToLibrary' },
     { key: 'library-note', i18nKey: 'saveWithNote' },
     { key: 'copy', i18nKey: 'copyMarkdownShort' },
-    { key: 'share', i18nKey: 'createAiLink' },
   ];
   // Which X surface the probe scrolls is an implementation detail of how X paginates
   // replies, not a choice a reader should have to make - and picking only one gives
   // up the coverage the others contribute. One item runs all three and merges.
+  //
+  // 'share-thread' is the AI-link twin of 'library-thread': the same escape hatch,
+  // for the same reason. The trigger already links the whole thread when auto-
+  // detection sees one, but detection reads the DOM once at render time, so a
+  // focused post must always offer a way to force full-thread scope.
   const THREAD_EXPORT_TYPES = [
+    { key: 'share-thread', i18nKey: 'createAiLinkThread' },
     { key: 'library-thread', i18nKey: 'saveFullThread' },
     ...POST_EXPORT_TYPES,
     { divider: true },
@@ -8607,10 +8641,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   }
 
   function postExportRequest(exportType) {
-    return {
-      exportType: exportType === 'library-thread' ? 'library' : exportType,
-      includeThread: exportType === 'library-thread',
-    };
+    if (exportType === 'library-thread') return { exportType: 'library', includeThread: true };
+    if (exportType === 'share-thread') return { exportType: 'share', includeThread: true };
+    return { exportType, includeThread: false };
   }
 
   // Per-reply text cap. Generous enough for long-form replies, bounded so one abusive
@@ -8638,22 +8671,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return match ? Number(match[1].replace(/,/g, '')) || 0 : 0;
   }
 
-  /**
-   * Display name out of a User-Name block, without the trailing @handle.
-   * `authorFromNameBlock` relies on X's newline-separated `innerText`, which jsdom (and
-   * some userscript hosts reading `textContent`) never produce - so "Reply Person@replier"
-   * would leak into the archive as the author's name. Strip from the first @token.
-   */
+  /** Display name out of a User-Name block, without the trailing @handle. */
   function replyDisplayNameFromTweet(tweetEl) {
-    const nameBlock = pick(tweetEl, CONFIG.selectors.userName, { quiet: true });
-    if (!nameBlock) return '';
-    const line =
-      String(nameBlock.innerText || nameBlock.textContent || '')
-        .split('\n')
-        .map((part) => part.trim())
-        .filter(Boolean)[0] || '';
-    const handleMatch = line.match(/@[A-Za-z0-9_]+/);
-    return (handleMatch ? line.slice(0, handleMatch.index) : line).replace(/[·•]\s*$/, '').trim();
+    return authorFromNameBlock(pick(tweetEl, CONFIG.selectors.userName, { quiet: true })).name;
   }
 
   /**
@@ -10420,19 +10440,30 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     // every same-author reply BEFORE building the model - so this is safe even when
     // the current DOM shows only the focused post.
     const menuItems = isFocusedPost ? THREAD_EXPORT_TYPES : POST_EXPORT_TYPES;
-    const triggerI18nKey = openFirstReason ? 'openPostFirst' : isThread ? 'saveThread' : 'savePost';
+    // The default click creates the AI readable link. The label stays constant so the
+    // button does not shift under the cursor as X lazily fills the conversation; the
+    // title carries the scope (whole thread vs this post alone).
+    const triggerI18nKey = openFirstReason ? 'openPostFirst' : 'createAiLink';
+    // The default click on a FOCUSED post always takes full-thread scope, whatever
+    // auto-detection currently sees. X renders a status page with the root post alone
+    // and fills the conversation in later, so `isThread` is false for the first seconds
+    // after load - and a click in that window used to publish the root post by itself,
+    // which is precisely the "one link per post, stitch them yourself" problem. Thread
+    // scope costs a full-column scroll and yields the same single post when there is no
+    // thread, so it is the safe default. `isThread` still drives the tooltip, and
+    // continuation posts stay post-only.
     return {
       isThread,
-      includeThread: isThread,
+      includeThread: isFocusedPost,
       requiresOpenPost: !!openFirstReason,
       openFirstReason,
       label: pt(triggerI18nKey),
       i18nKey: triggerI18nKey,
       title: openFirstReason
         ? 'Open this post before exporting so SourceCapsule can capture the full article/thread content'
-        : isThread
-          ? 'Quick-save this full thread to your SourceCapsule library'
-          : 'Quick-save only this post to your SourceCapsule library',
+        : isFocusedPost
+          ? 'Create one AI readable link covering this post and the rest of its thread'
+          : 'Create an AI readable link for this post',
       menuItems,
     };
   }
@@ -10844,6 +10875,42 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     }
   }
 
+  // Bounds for the pre-scroll conversation wait. The ceiling is what a post with no
+  // replies at all costs; the settle window is how long the count must hold still once
+  // more than the root post is mounted, so a partially-painted conversation is not
+  // mistaken for the whole one. Measured on a painting page, a post that HAS replies
+  // clears this in well under a second, so the ceiling is only ever paid in full by a
+  // reply-less post - and it buys the case that matters: a click landing in the second
+  // between the export button mounting and X's TweetDetail response, which otherwise
+  // publishes a one-post "thread".
+  const CONVERSATION_WAIT_MS = 6000;
+  const CONVERSATION_SETTLE_MS = 800;
+  const CONVERSATION_POLL_MS = 200;
+
+  /**
+   * Wait until the status page's conversation is on the page. Returns the top-level tweet
+   * count it settled on (1 means the root post really is alone). Never throws: a miss here
+   * costs a scroll pass that finds nothing, not a failed export.
+   */
+  async function waitForConversation(column) {
+    if (!column) return 0;
+    const deadline = Date.now() + CONVERSATION_WAIT_MS;
+    let count = topLevelTweetEls(column).length;
+    let lastChange = Date.now();
+    while (Date.now() < deadline) {
+      await sleep(CONVERSATION_POLL_MS);
+      const next = topLevelTweetEls(column).length;
+      if (next !== count) {
+        count = next;
+        lastChange = Date.now();
+        continue;
+      }
+      if (count > 1 && Date.now() - lastChange >= CONVERSATION_SETTLE_MS) break;
+    }
+    log('conversation wait settled on', count, 'top-level post(s)');
+    return count;
+  }
+
   async function runExport(
     exportType,
     {
@@ -10904,6 +10971,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         }
       }
       resetMediaState();
+      if (type === 'post' && includeThread) {
+        // X paints a status page with the root post ALONE and fetches the rest of the
+        // conversation a beat later. In that window the column is barely taller than the
+        // viewport, so forceLoadMedia has nothing to scroll, returns at once, and the
+        // model is built from the root post by itself - publishing a "thread" link that
+        // holds one post. Wait for the conversation to actually arrive first.
+        showToast('Waiting for the conversation to load...', { sticky: true });
+        await waitForConversation(pick(document, CONFIG.selectors.primaryColumn, { quiet: true }));
+      }
       if (CONFIG.forceLoad) {
         showToast('Loading media...', { sticky: true });
         if (targetTweetEl && !includeThread) {
@@ -11237,12 +11313,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   function ensureFloatingControl(type) {
     const existing = document.getElementById(CONFIG.buttonId);
     if (existing) {
-      // The article reader can load AFTER the control is first injected, so detectPageType may
-      // have said "post" initially. Relabel the live control when the type is now known (unless
-      // it's mid-export). Export itself re-checks the type at click time, so content is correct
-      // regardless; this just keeps the label honest.
+      // The label no longer depends on page type - every control's default action is
+      // "Create AI link" - but a language change still has to reach a live control, and
+      // the label must not be stomped mid-export. Export re-checks the page type at click
+      // time, so article vs thread scope is correct regardless of what was rendered here.
       const trig = existing.querySelector('.xa-ctl-trigger');
-      const i18nKey = type === 'article' ? 'saveArticle' : 'saveThread';
+      const i18nKey = 'createAiLink';
       const label = pt(i18nKey);
       if (trig && !trig.disabled && trig.textContent !== label) {
         trig.textContent = label;
@@ -11252,11 +11328,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     }
     ensureStyle();
     const { wrap } = createExportControl({
-      triggerI18nKey: type === 'article' ? 'saveArticle' : 'saveThread',
-      triggerTitle: `Quick-save this ${type === 'article' ? 'article' : 'full thread'} to your SourceCapsule library (drag to move)`,
+      triggerI18nKey: 'createAiLink',
+      triggerTitle: `Create one AI readable link for this ${type === 'article' ? 'article' : 'full thread'} (drag to move)`,
       className: 'xa-ctl xa-ctl-floating',
       menuItems: EXPORT_TYPES,
-      onQuick: (trigger) => runExport('library', { trigger, includeThread: true }),
+      onQuick: (trigger) => runExport('share', { trigger, includeThread: true }),
       onPick: (exportType, trigger) =>
         runExport(exportType, {
           trigger,
@@ -11299,6 +11375,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             if (mode.i18nKey) trigger.dataset.i18nKey = mode.i18nKey;
             trigger.title = mode.title;
           }
+          // An overlay-placed control was injected before the header caret mounted and
+          // is covering the post's own text. Re-place it now that the caret exists.
+          if (!existing.classList.contains('xa-ctl-inline')) placePostControl(existing, tweetEl);
           return;
         }
       }
@@ -11309,8 +11388,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         className: `xa-ctl ${CONFIG.postControlClass}`,
         menuItems: mode.menuItems,
         onQuick: (trigger) => {
+          // Re-read the mode at click time: X may have filled in the rest of the
+          // conversation since the button was rendered, so a post that looked
+          // single-post then is a thread now, and one link should cover all of it.
           const currentMode = postControlCaptureMode(tweetEl, column);
-          return runExport('library', {
+          return runExport('share', {
             targetTweetEl: tweetEl,
             trigger,
             includeThread: currentMode.includeThread,
@@ -11338,18 +11420,30 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         'data-sourcecapsule-menu-mode',
         mode.menuItems === THREAD_EXPORT_TYPES ? 'thread' : 'post'
       );
-      // Prefer placing the control inline in the header, right before X's "..." menu, so it
-      // sits beside Subscribe/More and flows with them. Fall back to an absolute overlay if
-      // the header caret can't be found.
-      const caret = tweetEl.querySelector('[data-testid="caret"]');
-      if (caret && caret.parentElement) {
-        wrap.classList.add('xa-ctl-inline');
-        caret.parentElement.insertBefore(wrap, caret);
-      } else {
-        if (getComputedStyle(tweetEl).position === 'static') tweetEl.style.position = 'relative';
-        tweetEl.appendChild(wrap);
-      }
+      placePostControl(wrap, tweetEl);
     });
+  }
+
+  /**
+   * Put one post control in the header, right before X's "..." menu, so it sits beside
+   * Subscribe/More and flows with them. Falls back to an absolute overlay when the caret
+   * has not mounted yet - which is exactly what happens on a focused post, whose header
+   * caret renders after the article does. The overlay then sits ON TOP of the post text,
+   * so `ensurePerPostControls` calls this again on every pass: as soon as the caret
+   * appears, the control moves out of the reader's way. Returns true if it ended up
+   * inline.
+   */
+  function placePostControl(wrap, tweetEl) {
+    const caret = tweetEl.querySelector('[data-testid="caret"]');
+    if (caret && caret.parentElement) {
+      wrap.classList.add('xa-ctl-inline');
+      caret.parentElement.insertBefore(wrap, caret);
+      return true;
+    }
+    wrap.classList.remove('xa-ctl-inline');
+    if (getComputedStyle(tweetEl).position === 'static') tweetEl.style.position = 'relative';
+    tweetEl.appendChild(wrap);
+    return false;
   }
 
   // Inline "Export article" control in the article's header, beside X's "..." menu - the
@@ -11364,10 +11458,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const caret = column.querySelector('[data-testid="caret"]'); // topmost = article header
     if (!caret || !caret.parentElement) return;
     const { wrap } = createExportControl({
-      triggerI18nKey: 'saveArticle',
-      triggerTitle: `Quick-save this article to your SourceCapsule library`,
+      triggerI18nKey: 'createAiLink',
+      triggerTitle: `Create an AI readable link for this article`,
       className: `xa-ctl ${CONFIG.postControlClass}`,
-      onQuick: (trigger) => runExport('library', { trigger }),
+      onQuick: (trigger) => runExport('share', { trigger }),
       onPick: (exportType, trigger) => runExport(exportType, { trigger }),
     });
     wrap.classList.add('xa-ctl-inline');
@@ -11830,6 +11924,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       writeReplyProbeResult,
       runReplyProbe,
       postControlCaptureMode,
+      authorFromNameBlock,
+      copyText,
+      waitForConversation,
       timelineArticlePreviewReason,
       showShareResult,
       showCaptureReceipt,

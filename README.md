@@ -33,7 +33,7 @@ copy-paste mangling, no dead links when the thread disappears.
    (auto-updates), or open
    [sourcecapsule.user.js](https://raw.githubusercontent.com/wolfgang-aura/SourceCapsule/main/sourcecapsule.user.js)
    and click **Install**.
-3. Open any post, thread, or Article on x.com and click **Save thread** / **Save article**.
+3. Open any post, thread, or Article on x.com and click **Create AI link**.
 
 The source file is also the shipped artifact: plain JavaScript, no production build step.
 
@@ -88,8 +88,9 @@ The source file is also the shipped artifact: plain JavaScript, no production bu
   folder-vs-ZIP delivery, with accessible switches, keyboard navigation, dark mode, and
   reduced-motion support. One-off HTML + Markdown downloads now arrive together in one ZIP.
 
-The product remains local-first. Nothing is uploaded until you explicitly choose
-**Create AI readable link** and confirm the expiry — and the reply archive never uploads at
+The product remains local-first. Nothing is uploaded until you click **Create AI link** (the
+default button action, which publishes at the 7-day default expiry) or choose the combined
+save-and-share flow, which asks for the expiry first — and the reply archive never uploads at
 all. When a save and a share are combined, the local copy is completed first, so an upload
 failure cannot take it away. Shared capsules exclude raw video, are capped at 25 MB, and
 retain source links when media cannot be included.
@@ -98,14 +99,17 @@ retain source links when media cannot be included.
 
 On the X timeline, a status page, or an Article:
 
-- Click **Save post**, **Save thread**, or **Save article** for the default quick-save flow.
+- Click **Create AI link** — the default action on every button. On a focused post that is a
+  thread, one click produces **one link covering the whole thread**, not a link per post.
+  It uploads immediately with the 7-day default expiry.
 - If a timeline card says **Open post first**, open the post and save from the status/Article page;
   the feed preview does not contain enough content for a complete archive.
 - Click **...** beside it for:
-  - Save full thread (on a focused post page)
+  - Create AI link (full thread) — on a focused post page
+  - Save full thread — on a focused post page
+  - Save to library
   - Save with note and tags
   - Copy clean Markdown
-  - Create AI readable link
   - Capture replies (experimental) — on a focused post page
   - Download reply archive — on a focused post page
 
@@ -177,10 +181,10 @@ The userscript ships pointing at the hosted share service
 per-IP rate limiting on link creation, a 25 MB package cap, and 1/7/30-day expiry with daily
 cleanup. To try it:
 
-1. Open a post on x.com and click **...** beside the SourceCapsule button.
-2. Click **Create AI readable link**.
-3. Keep **7 days**, or choose 1/30 days.
-4. Confirm. The resulting URL is copied to your clipboard.
+1. Open a post on x.com.
+2. Click **Create AI link**. It publishes at the 7-day default expiry; to pick 1 or 30 days,
+   use **Save with note / tags** and share from the receipt instead.
+3. The resulting URL is copied to your clipboard.
 5. Paste the URL into a new tab. Add `.md` to the capsule URL for the clean Markdown endpoint.
 
 When the link expires, the archived copy is deleted but the link does not go blank: it serves a

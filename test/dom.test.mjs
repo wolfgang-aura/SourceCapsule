@@ -411,6 +411,30 @@ check('buildModelForPost yields a paragraph block with the tweet text', () => {
   assert.ok(!para.html.includes('Wrong context tweet'), `selected the context tweet: ${para.html}`);
 });
 
+check('the display name never absorbs the @handle X glues onto it', () => {
+  const block = document.createElement('div');
+  // X does not always emit a newline between the two, and jsdom has no innerText at all,
+  // so the block reads back as one run: this is what produced "Mark Zuckerberg@finkd".
+  block.textContent = 'Mark Zuckerberg@finkd';
+  assert.deepEqual(engine.authorFromNameBlock(block), {
+    name: 'Mark Zuckerberg',
+    handle: '@finkd',
+  });
+
+  const separated = document.createElement('div');
+  separated.textContent = 'Mark Zuckerberg\n@finkd\n\u00b7\n2h';
+  assert.deepEqual(engine.authorFromNameBlock(separated), {
+    name: 'Mark Zuckerberg',
+    handle: '@finkd',
+  });
+
+  const trailingSeparator = document.createElement('div');
+  trailingSeparator.textContent = 'Mark Zuckerberg \u00b7 @finkd';
+  assert.equal(engine.authorFromNameBlock(trailingSeparator).name, 'Mark Zuckerberg');
+
+  assert.deepEqual(engine.authorFromNameBlock(null), { name: '', handle: '' });
+});
+
 check('buildModelForPost captures same-author thread continuations only', () => {
   const paragraphs = allBlocks(model.blocks)
     .filter((b) => b.kind === 'paragraph')
@@ -450,10 +474,12 @@ check(
     const focusedMode = engine.postControlCaptureMode(focused, column);
     assert.equal(focusedMode.isThread, true);
     assert.equal(focusedMode.includeThread, true);
-    assert.equal(focusedMode.i18nKey, 'saveThread');
-    // Manual checklist T02 requires the drop-down's first item to be "Save full
-    // thread" on every focused post - assert order, not just presence.
-    assert.equal(focusedMode.menuItems[0].key, 'library-thread');
+    // The default click creates the AI readable link on every control, thread or not.
+    assert.equal(focusedMode.i18nKey, 'createAiLink');
+    // Manual checklist T02: every focused post keeps a way to FORCE full-thread scope,
+    // for both outputs, at the top of the drop-down - assert order, not just presence.
+    assert.equal(focusedMode.menuItems[0].key, 'share-thread');
+    assert.equal(focusedMode.menuItems[1].key, 'library-thread');
     // The three per-surface capture items collapsed into one that runs all of them.
     const focusedKeys = focusedMode.menuItems.filter((item) => !item.divider).map((i) => i.key);
     assert.ok(!focusedKeys.some((key) => /^reply-probe-/.test(key)), 'no per-surface menu items');
@@ -466,8 +492,9 @@ check(
     const continuationMode = engine.postControlCaptureMode(continuation, column);
     assert.equal(continuationMode.isThread, false);
     assert.equal(continuationMode.includeThread, false);
-    assert.equal(continuationMode.i18nKey, 'savePost');
+    assert.equal(continuationMode.i18nKey, 'createAiLink');
     assert.ok(!continuationMode.menuItems.some((item) => item.key === 'library-thread'));
+    assert.ok(!continuationMode.menuItems.some((item) => item.key === 'share-thread'));
   }
 );
 
@@ -901,13 +928,19 @@ check(
       const mode = engine.postControlCaptureMode(focused, column);
       // Auto-detection correctly reports a single post at THIS instant...
       assert.equal(mode.isThread, false);
-      assert.equal(mode.label, 'Save post');
-      // ...but the menu still exposes the escape hatch, and it must be the
-      // first item so T02's "drop-down's first item is Save full thread" holds.
-      assert.equal(
-        mode.menuItems[0].key,
-        'library-thread',
-        'focused post must always offer Save full thread as the first menu item'
+      // ...but the DEFAULT click still takes thread scope. X fills a status page's
+      // conversation in after the root post, so a click in that window would otherwise
+      // publish the root post alone - one link per post, exactly what the default
+      // action exists to avoid.
+      assert.equal(mode.includeThread, true);
+      assert.equal(mode.label, 'Create AI link');
+      assert.match(mode.title, /the rest of its thread/);
+      // ...but the menu still exposes both escape hatches, at the top, so T02's
+      // "the drop-down leads with the forced full-thread items" holds.
+      assert.deepEqual(
+        mode.menuItems.slice(0, 2).map((item) => item.key),
+        ['share-thread', 'library-thread'],
+        'focused post must always offer forced full-thread capture first'
       );
     } finally {
       // Restore the shared thread fixture for later checks.
@@ -962,7 +995,7 @@ check('home timeline gets visible per-post save controls without opening a post'
   assert.ok(controls.every((control) => control.classList.contains('xa-ctl-inline')));
   assert.deepEqual(
     controls.map((control) => control.querySelector('.xa-ctl-trigger').textContent),
-    ['Save post', 'Save post', 'Open post first']
+    ['Create AI link', 'Create AI link', 'Open post first']
   );
   const menus = Array.from(document.querySelectorAll('.xa-ctl-menu'));
   assert.equal(menus.length, 3);
@@ -970,6 +1003,8 @@ check('home timeline gets visible per-post save controls without opening a post'
     item.textContent.trim()
   );
   assert.ok(!menuLabels.includes('Save full thread'));
+  assert.ok(!menuLabels.includes('Create AI link (full thread)'));
+  assert.ok(menuLabels.includes('Save to library'));
   assert.ok(menuLabels.includes('Save with note / tags'));
   assert.equal(engine.exportTypeNeedsCaptureOptions('share'), false);
   assert.equal(engine.exportTypeNeedsCaptureOptions('library-note'), true);
@@ -4456,18 +4491,28 @@ check('the media count in the receipt matches the media the file actually lists'
   assert.equal(archive.mediaLinkCount, 3);
 });
 
-check('the post menu offers six items, and no item the engine cannot serve', () => {
+check('the post menu offers seven items, and no item the engine cannot serve', () => {
   // A ten-item drop-down buried the common actions. This pins the short menu so a
   // future addition is a deliberate decision rather than a drift back to ten.
   const keys = engine.THREAD_EXPORT_TYPES.filter((item) => !item.divider).map((item) => item.key);
   assert.deepEqual(keys, [
+    'share-thread',
     'library-thread',
+    'library',
     'library-note',
     'copy',
-    'share',
     'reply-probe',
     'reply-archive-download',
   ]);
+  // 'share' is the trigger button's own action, so it must not also be a menu item.
+  const allMenuKeys = [
+    ...engine.EXPORT_TYPES,
+    ...engine.POST_EXPORT_TYPES,
+    ...engine.THREAD_EXPORT_TYPES,
+  ]
+    .filter((item) => !item.divider)
+    .map((item) => item.key);
+  assert.ok(!allMenuKeys.includes('share'), 'plain share is the default click, not a menu item');
   // Removed from the menu only - runExport must still honour the keys, because the
   // extension popup and saved automation drive them directly.
   const menus = [engine.EXPORT_TYPES, engine.POST_EXPORT_TYPES, engine.THREAD_EXPORT_TYPES];
@@ -4513,6 +4558,103 @@ check('a capture pass never advances to a surface it does not understand', () =>
   // A single-surface run (popup, diagnostics) carries no queue and must not chain.
   assert.equal(engine.nextReplyProbePass({ surface: 'top', queue: undefined }), null);
 });
+
+// Async regression: a clipboard write that never settles must not hang the export.
+// Chromium leaves navigator.clipboard.writeText() pending forever when the browser
+// window is not OS-focused. Unbounded, that stranded the whole share flow AFTER the
+// capsule was published - button stuck on "Exporting...", sticky toast lying about a
+// link that already existed. copyText must give up and fall through instead.
+{
+  const name = 'a clipboard write that never settles falls through instead of hanging';
+  const savedClipboard = global.navigator.clipboard;
+  const savedExec = global.document.execCommand;
+  const setClipboard = (value) =>
+    Object.defineProperty(global.navigator, 'clipboard', { value, configurable: true });
+  try {
+    setClipboard({ writeText: () => new Promise(() => {}) });
+    global.document.execCommand = () => false;
+    const started = Date.now();
+    let threw = null;
+    try {
+      await engine.copyText('https://example.invalid/c/abc');
+    } catch (e) {
+      threw = e;
+    }
+    const elapsed = Date.now() - started;
+    assert.ok(threw, 'copyText must reject once both paths fail, never hang');
+    assert.match(threw.message, /Clipboard access was denied/);
+    assert.ok(elapsed < 5000, `copyText took ${elapsed}ms; the bound never fired`);
+    // The happy path still resolves immediately, not after the timeout.
+    let wrote = '';
+    setClipboard({
+      writeText: (t) => {
+        wrote = t;
+        return Promise.resolve();
+      },
+    });
+    await engine.copyText('ok');
+    assert.equal(wrote, 'ok');
+    console.log(`  ✓ ${name}`);
+  } catch (e) {
+    failures++;
+    console.error(`  ✗ ${name}
+    ${e.message}`);
+  } finally {
+    setClipboard(savedClipboard);
+    global.document.execCommand = savedExec;
+  }
+}
+
+// Async regression: a thread export clicked the instant the button appears must wait for
+// X to deliver the conversation. X paints a status page with the root post alone, so the
+// scroll pass has nothing to scroll and returns at once - and the "full thread" link then
+// contains exactly one post. That is the bug the default action exists to prevent.
+{
+  const name = 'thread export waits for X to deliver the conversation before scrolling';
+  try {
+    const waitDom = new JSDOM(
+      `<html><body><div data-testid="primaryColumn">
+         <article data-testid="tweet"><div>root</div></article>
+       </div></body></html>`,
+      { url: 'https://x.com/finkd/status/2097402101332590646' }
+    );
+    const column = waitDom.window.document.querySelector('[data-testid="primaryColumn"]');
+    const savedDocument = global.document;
+    const savedNode = global.Node;
+    global.document = waitDom.window.document;
+    global.Node = waitDom.window.Node;
+    try {
+      // The conversation lands a beat after the click, exactly as X does it.
+      setTimeout(() => {
+        for (let i = 0; i < 3; i += 1) {
+          const el = waitDom.window.document.createElement('article');
+          el.setAttribute('data-testid', 'tweet');
+          column.appendChild(el);
+        }
+      }, 400);
+      const settled = await engine.waitForConversation(column);
+      assert.ok(settled > 1, `waited out the conversation but still saw ${settled} post(s)`);
+      assert.equal(settled, 4);
+      // A genuinely single post must still return, not hang.
+      const soloColumn = waitDom.window.document.createElement('div');
+      const solo = waitDom.window.document.createElement('article');
+      solo.setAttribute('data-testid', 'tweet');
+      soloColumn.appendChild(solo);
+      const started = Date.now();
+      assert.equal(await engine.waitForConversation(soloColumn), 1);
+      assert.ok(Date.now() - started < 15000, 'the wait must be bounded');
+      assert.equal(await engine.waitForConversation(null), 0);
+    } finally {
+      global.document = savedDocument;
+      global.Node = savedNode;
+    }
+    console.log(`  ✓ ${name}`);
+  } catch (e) {
+    failures++;
+    console.error(`  ✗ ${name}
+    ${e.message}`);
+  }
+}
 
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);

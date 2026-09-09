@@ -6,6 +6,44 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Changed
+
+- **"Create AI link" is now the default action on every SourceCapsule button**, replacing the
+  quick-save to library. Saving to the library moved into the drop-down, where the default
+  action used to sit.
+- **An AI link now covers a whole thread in one capsule.** On a focused post the default click
+  carries the detected thread scope, so a thread publishes as a single capsule
+  (`## Full Thread`, `Post n of N`) instead of one link per post to stitch together by hand.
+  The scope is re-read at click time, so a post that X had not yet filled out when the button
+  rendered is still captured whole.
+- **New menu item `Create AI link (full thread)`**, the AI-link twin of `Save full thread`, for
+  the case where X's virtualization defeats thread auto-detection entirely.
+
+### Fixed
+
+- **A thread export clicked the moment the page loads no longer publishes the root post alone.**
+  X paints a status page with the root post by itself and fetches the conversation a beat later;
+  the export now waits for it to arrive before scrolling for media. Live-verified: clicked with
+  exactly one post in the DOM, the published capsule holds all 8.
+- **The export no longer hangs after a successful publish.** `navigator.clipboard.writeText()` can
+  stay pending forever when the browser window is not OS-focused, which left the button stuck on
+  "Exporting..." and the progress toast claiming to still be publishing a link that already
+  existed. The clipboard wait is now bounded and falls through to the selection copy.
+- **Export titles no longer read `Mark Zuckerberg@finkd (@finkd) on X`.** X does not always put a
+  newline between a display name and its handle, and the name parser trusted that split. It now
+  slices at the first `@token`, the same way the reply archive already did. Live-verified against
+  a published capsule. ([#4](https://github.com/wolfgang-aura/SourceCapsule/issues/4))
+- **Post controls no longer sit on top of the post's own text.** On a focused post X's header caret
+  mounts after the article, so the control was placed as an absolute overlay and stayed there; it
+  now moves into the header as soon as the caret exists.
+
+### Known issues
+
+- Unattended CLI capture publishes only the root post of a thread. The capture window is
+  unfocused by design, X does not mount the rest of the conversation without paints, and the
+  capsule reports no warning about what it dropped. Clicking the button in a focused tab is
+  unaffected. ([#5](https://github.com/wolfgang-aura/SourceCapsule/issues/5))
+
 ### Added
 
 - **Unattended capture from the command line (experimental, Windows only).**
