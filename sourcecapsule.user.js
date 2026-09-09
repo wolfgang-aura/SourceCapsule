@@ -5663,6 +5663,18 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
         warnings.push(`${stats.quoteTombstones} quoted post(s) deleted on X`);
       if (networkCaptureDiagnostics.interestingResponses === 0)
         warnings.push('no passive GraphQL capture was observed for this page');
+      // Thread scope was requested. Say plainly how much of the thread came back, and
+      // name the stage when it is one post: a capsule that silently drops the follow-ups
+      // is worse than a capsule that admits it did.
+      const capturedPosts = model.blocks.filter((b) => b.kind === 'thread-marker').length || 1;
+      const conversation = { ...conversationWaitDiagnostics };
+      if (capturedPosts <= 1) {
+        warnings.push(
+          conversation.settled > 1
+            ? `only the root post was captured, though ${conversation.settled} top-level post(s) were on the page`
+            : `only the root post was captured; the conversation never mounted (settled on ${conversation.settled} post(s) after ${conversation.elapsedMs}ms${conversation.timedOut ? ', hit the wait ceiling' : ''})`
+        );
+      }
       return {
         ok: true,
         sourceUrl: model.sourceUrl || location.href,
@@ -5670,6 +5682,8 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
         markdownUrl: created.markdownUrl,
         expiresAt: created.expiresAt,
         complete: assessment.verdict === 'clean',
+        capturedPosts,
+        conversation,
         warnings,
       };
     } catch (error) {
@@ -10892,11 +10906,24 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * count it settled on (1 means the root post really is alone). Never throws: a miss here
    * costs a scroll pass that finds nothing, not a failed export.
    */
+  // Last conversation wait, kept so an unattended capture can report the stage it failed
+  // at instead of leaving the owner to infer it from a short capsule.
+  const conversationWaitDiagnostics = {
+    ran: false,
+    startedWith: 0,
+    settled: 0,
+    elapsedMs: 0,
+    timedOut: false,
+  };
+
   async function waitForConversation(column) {
     if (!column) return 0;
-    const deadline = Date.now() + CONVERSATION_WAIT_MS;
+    const started = Date.now();
+    const deadline = started + CONVERSATION_WAIT_MS;
     let count = topLevelTweetEls(column).length;
+    const startedWith = count;
     let lastChange = Date.now();
+    let timedOut = true;
     while (Date.now() < deadline) {
       await sleep(CONVERSATION_POLL_MS);
       const next = topLevelTweetEls(column).length;
@@ -10905,8 +10932,18 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         lastChange = Date.now();
         continue;
       }
-      if (count > 1 && Date.now() - lastChange >= CONVERSATION_SETTLE_MS) break;
+      if (count > 1 && Date.now() - lastChange >= CONVERSATION_SETTLE_MS) {
+        timedOut = false;
+        break;
+      }
     }
+    Object.assign(conversationWaitDiagnostics, {
+      ran: true,
+      startedWith,
+      settled: count,
+      elapsedMs: Date.now() - started,
+      timedOut,
+    });
     log('conversation wait settled on', count, 'top-level post(s)');
     return count;
   }
@@ -11927,6 +11964,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       authorFromNameBlock,
       copyText,
       waitForConversation,
+      conversationWaitDiagnostics,
       timelineArticlePreviewReason,
       showShareResult,
       showCaptureReceipt,

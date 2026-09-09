@@ -184,6 +184,17 @@ the finished AI readable link as JSON, with no clicks, prompts, or clipboard use
 - **The tab is ACTIVE in an UNFOCUSED window, never hidden.** A hidden tab has
   `requestAnimationFrame` paused and timers throttled, which starves `forceLoadMedia` and
   manufactures strict-mode blockers.
+- **The browser must run with `--disable-features=CalculateNativeWinOcclusion`.** Unfocused is
+  not enough: Windows occlusion tracking treats a fully covered window exactly like a hidden
+  tab, so the capture window fetched X's TweetDetail and then never mounted it. The capsule
+  came back holding the root post alone. Measured on one thread: without the flag the
+  conversation wait settles on 1 top-level post after 6.9s; with it, 13 posts in 1.7s and a
+  capsule holding all 8. `start-sourcecapsule-browser.ps1` passes it and writes it into the
+  shortcut, and `-Status` exits 3 when the running browser lacks it.
+- **An unattended capture reports its thread scope.** The result carries `capturedPosts` and
+  the `conversation` counters `waitForConversation` recorded, and warns when thread scope was
+  requested and one post came back. A capsule that silently drops seven posts is the failure
+  mode that made this bug survive a live verification.
 - **Strict mode stays strict.** With no human to answer `confirmShipDespiteIncomplete`, a
   surviving blocker raises `NeedsOwnerError` and the CLI reports `needs_owner` with the
   assessment counts. Never "fix" an unattended failure by relaxing the gate. `runExport`'s

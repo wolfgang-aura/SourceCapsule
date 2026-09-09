@@ -29,6 +29,14 @@ All notable changes to this project are documented here. The format is based on
   stay pending forever when the browser window is not OS-focused, which left the button stuck on
   "Exporting..." and the progress toast claiming to still be publishing a link that already
   existed. The clipboard wait is now bounded and falls through to the selection copy.
+- **Unattended CLI capture no longer publishes a thread as its root post alone.** The capture
+  window is unfocused by design, and Windows occlusion tracking treats a fully covered window
+  like a hidden tab, so X fetched the conversation and then never mounted it. The browser now
+  starts with `--disable-features=CalculateNativeWinOcclusion`. Measured on the same thread:
+  1 top-level post after 6.9s before, 13 in 1.7s after, and the capsule holds all 8.
+  **Re-run `-InstallShortcut -InstallStartup` to put the flag in your existing shortcut**, and
+  `-Status` now exits 3 when the running browser is missing it.
+  ([#5](https://github.com/wolfgang-aura/SourceCapsule/issues/5))
 - **Export titles no longer read `Mark Zuckerberg@finkd (@finkd) on X`.** X does not always put a
   newline between a display name and its handle, and the name parser trusted that split. It now
   slices at the first `@token`, the same way the reply archive already did. Live-verified against
@@ -37,15 +45,12 @@ All notable changes to this project are documented here. The format is based on
   mounts after the article, so the control was placed as an absolute overlay and stayed there; it
   now moves into the header as soon as the caret exists.
 
-### Known issues
-
-- Unattended CLI capture publishes only the root post of a thread. The capture window is
-  unfocused by design, X does not mount the rest of the conversation without paints, and the
-  capsule reports no warning about what it dropped. Clicking the button in a focused tab is
-  unaffected. ([#5](https://github.com/wolfgang-aura/SourceCapsule/issues/5))
 
 ### Added
 
+- **An unattended capture now says how much of the thread it got.** The JSON carries
+  `capturedPosts` and the `conversation` counters the pre-scroll wait recorded, and warns when
+  thread scope was requested and one post came back.
 - **Unattended capture from the command line (experimental, Windows only).**
 
   ```powershell
