@@ -313,6 +313,12 @@ That puts **Brave with SourceCapsule** on the Desktop, in the Start Menu, and in
 the browser from it and the bridge is always there. Starting it any other way silently drops the
 extension.
 
+The launcher also passes `--disable-features=CalculateNativeWinOcclusion`, and the capture needs
+it. The capture window is deliberately unfocused, Windows occlusion tracking treats a fully
+covered window like a hidden tab, and a browser without the flag fetches a thread's conversation
+and never renders it: the capsule comes back holding the root post alone. If you installed the
+shortcut before this flag existed, run `-InstallShortcut -InstallStartup` again.
+
 To check or repair the current state:
 
 ```powershell

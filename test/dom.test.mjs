@@ -4643,6 +4643,12 @@ check('a capture pass never advances to a surface it does not understand', () =>
       const settled = await engine.waitForConversation(column);
       assert.ok(settled > 1, `waited out the conversation but still saw ${settled} post(s)`);
       assert.equal(settled, 4);
+      // The diagnostics are what an unattended capture reports when this stage is the one
+      // that failed, so they have to describe the run, not just the outcome.
+      assert.equal(engine.conversationWaitDiagnostics.ran, true);
+      assert.equal(engine.conversationWaitDiagnostics.startedWith, 1);
+      assert.equal(engine.conversationWaitDiagnostics.settled, 4);
+      assert.equal(engine.conversationWaitDiagnostics.timedOut, false);
       // A genuinely single post must still return, not hang.
       const soloColumn = waitDom.window.document.createElement('div');
       const solo = waitDom.window.document.createElement('article');
@@ -4651,6 +4657,10 @@ check('a capture pass never advances to a surface it does not understand', () =>
       const started = Date.now();
       assert.equal(await engine.waitForConversation(soloColumn), 1);
       assert.ok(Date.now() - started < 15000, 'the wait must be bounded');
+      // A lone post rides the ceiling out. That is the same signature as a conversation
+      // the browser refused to paint, which is why the capture reports the count too.
+      assert.equal(engine.conversationWaitDiagnostics.timedOut, true);
+      assert.equal(engine.conversationWaitDiagnostics.settled, 1);
       assert.equal(await engine.waitForConversation(null), 0);
     } finally {
       global.document = savedDocument;

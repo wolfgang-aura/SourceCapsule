@@ -80,6 +80,18 @@ function Get-BrowserMainProcesses([string]$exePath) {
     return @($all | Where-Object { $_.CommandLine -and $_.CommandLine -notmatch '--type=' })
 }
 
+# Windows occlusion tracking treats a fully covered window like a hidden tab: rendering
+# suspended, rAF paused. The capture window is deliberately unfocused and therefore usually
+# covered, so X fetched the conversation but never mounted it and the capsule held the root
+# post alone. Measured on the same thread: without this flag the wait settles on 1 top-level
+# post after 6.9s; with it, 13 posts in 1.7s and a capsule holding all 8.
+$occlusionFlag = '--disable-features=CalculateNativeWinOcclusion'
+
+function Test-HasOcclusionFlag($proc) {
+    if (-not $proc.CommandLine) { return $false }
+    return $proc.CommandLine -match 'CalculateNativeWinOcclusion'
+}
+
 function Test-HasExtensionFlag($proc, [string]$extensionDir) {
     if (-not $proc.CommandLine) { return $false }
     if ($proc.CommandLine -notmatch '--load-extension') { return $false }
@@ -103,7 +115,7 @@ function New-BrowserShortcut([string]$path, [string]$exePath, [string]$extension
     $shell = New-Object -ComObject WScript.Shell
     $link = $shell.CreateShortcut($path)
     $link.TargetPath = $exePath
-    $link.Arguments = "--load-extension=`"$extensionDir`" --restore-last-session"
+    $link.Arguments = "--load-extension=`"$extensionDir`" $occlusionFlag --restore-last-session"
     $link.WorkingDirectory = Split-Path -Parent $exePath
     $link.IconLocation = "$exePath,0"
     $link.Description = 'Brave with the SourceCapsule extension loaded (unattended capture bridge)'
@@ -142,12 +154,17 @@ if ($Status) {
     Write-Host "Running main processes: $($running.Count)"
     Write-Host "  with the extension flag:    $($withFlag.Count)"
     Write-Host "  without the extension flag: $($withoutFlag.Count)"
+    $occluded = @($withFlag | Where-Object { -not (Test-HasOcclusionFlag $_) })
     foreach ($entry in (Get-ShortcutTargets).GetEnumerator()) {
         $state = 'missing'
         if (Test-Path $entry.Value) { $state = 'installed' }
         Write-Host ("  shortcut {0,-9} {1}" -f $entry.Key, $state)
     }
     if ($withFlag.Count -gt 0) {
+        if ($occluded.Count -gt 0) {
+            Write-Warning ('The browser is running without ' + $occlusionFlag + '. Captures will still publish, but a thread will come back as its root post alone. Repair with -Restart -Verify, and reinstall the shortcut with -InstallShortcut.')
+            exit 3
+        }
         Write-Host 'Bridge should be available. Confirm with: node scripts\sourcecapsule-capture.mjs --ping'
         exit 0
     }
@@ -221,6 +238,7 @@ else {
     Write-Host "Starting $browser with $extensionFull"
     Start-Process -FilePath $browser -ArgumentList @(
         "--load-extension=$extensionFull",
+        $occlusionFlag,
         '--restore-last-session'
     )
 }

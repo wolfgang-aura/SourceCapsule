@@ -55,6 +55,8 @@ const RESULT_FIELDS = [
   'markdownUrl',
   'expiresAt',
   'complete',
+  'capturedPosts',
+  'conversation',
   'warnings',
   'error',
   'message',
