@@ -95,6 +95,14 @@ global.Node = dom.window.Node;
 global.location = dom.window.location;
 global.localStorage = dom.window.localStorage;
 global.getComputedStyle = dom.window.getComputedStyle;
+// Node only exposes a global `navigator` from v21 on, and CI runs 20, so the engine's
+// clipboard path threw ReferenceError there while passing locally. Always install
+// jsdom's, via defineProperty because newer Node defines the global as a getter.
+Object.defineProperty(global, 'navigator', {
+  value: dom.window.navigator,
+  configurable: true,
+  writable: true,
+});
 
 let failures = 0;
 function check(name, fn) {
