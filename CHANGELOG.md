@@ -29,9 +29,20 @@ All notable changes to this project are documented here. The format is based on
   stay pending forever when the browser window is not OS-focused, which left the button stuck on
   "Exporting..." and the progress toast claiming to still be publishing a link that already
   existed. The clipboard wait is now bounded and falls through to the selection copy.
+- **Export titles no longer read `Mark Zuckerberg@finkd (@finkd) on X`.** X does not always put a
+  newline between a display name and its handle, and the name parser trusted that split. It now
+  slices at the first `@token`, the same way the reply archive already did. Live-verified against
+  a published capsule. ([#4](https://github.com/wolfgang-aura/SourceCapsule/issues/4))
 - **Post controls no longer sit on top of the post's own text.** On a focused post X's header caret
   mounts after the article, so the control was placed as an absolute overlay and stayed there; it
   now moves into the header as soon as the caret exists.
+
+### Known issues
+
+- Unattended CLI capture publishes only the root post of a thread. The capture window is
+  unfocused by design, X does not mount the rest of the conversation without paints, and the
+  capsule reports no warning about what it dropped. Clicking the button in a focused tab is
+  unaffected. ([#5](https://github.com/wolfgang-aura/SourceCapsule/issues/5))
 
 ### Added
 

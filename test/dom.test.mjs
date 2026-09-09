@@ -411,6 +411,30 @@ check('buildModelForPost yields a paragraph block with the tweet text', () => {
   assert.ok(!para.html.includes('Wrong context tweet'), `selected the context tweet: ${para.html}`);
 });
 
+check('the display name never absorbs the @handle X glues onto it', () => {
+  const block = document.createElement('div');
+  // X does not always emit a newline between the two, and jsdom has no innerText at all,
+  // so the block reads back as one run: this is what produced "Mark Zuckerberg@finkd".
+  block.textContent = 'Mark Zuckerberg@finkd';
+  assert.deepEqual(engine.authorFromNameBlock(block), {
+    name: 'Mark Zuckerberg',
+    handle: '@finkd',
+  });
+
+  const separated = document.createElement('div');
+  separated.textContent = 'Mark Zuckerberg\n@finkd\n\u00b7\n2h';
+  assert.deepEqual(engine.authorFromNameBlock(separated), {
+    name: 'Mark Zuckerberg',
+    handle: '@finkd',
+  });
+
+  const trailingSeparator = document.createElement('div');
+  trailingSeparator.textContent = 'Mark Zuckerberg \u00b7 @finkd';
+  assert.equal(engine.authorFromNameBlock(trailingSeparator).name, 'Mark Zuckerberg');
+
+  assert.deepEqual(engine.authorFromNameBlock(null), { name: '', handle: '' });
+});
+
 check('buildModelForPost captures same-author thread continuations only', () => {
   const paragraphs = allBlocks(model.blocks)
     .filter((b) => b.kind === 'paragraph')

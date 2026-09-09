@@ -2184,6 +2184,18 @@
     return quotes.sort(compareDocumentOrder);
   }
 
+  /**
+   * Display name out of one line of a User-Name block, without the trailing @handle.
+   * X does not always separate the name from the handle with a newline: `innerText` can
+   * come back as "Mark Zuckerberg@finkd", and `textContent` (jsdom, some userscript hosts)
+   * never separates them at all. So slice at the first @token instead of trusting the split.
+   */
+  function displayNameFromLine(line) {
+    const text = String(line || '');
+    const handleMatch = text.match(/@[A-Za-z0-9_]+/);
+    return (handleMatch ? text.slice(0, handleMatch.index) : text).replace(/[·•]\s*$/, '').trim();
+  }
+
   /** Parse {name, handle} from a single User-Name block's text. */
   function authorFromNameBlock(nameBlock) {
     const out = { name: '', handle: '' };
@@ -2191,12 +2203,13 @@
     const text = nameBlock.innerText || nameBlock.textContent || '';
     const handleMatch = text.match(/@[A-Za-z0-9_]+/);
     out.handle = handleMatch ? handleMatch[0] : '';
-    // The display name is usually the first line before the @handle.
-    out.name =
+    // The display name is the first line, minus any @handle X glued onto it.
+    out.name = displayNameFromLine(
       text
         .split('\n')
         .map((s) => s.trim())
-        .filter(Boolean)[0] || '';
+        .filter(Boolean)[0] || ''
+    );
     return out;
   }
 
@@ -8658,22 +8671,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return match ? Number(match[1].replace(/,/g, '')) || 0 : 0;
   }
 
-  /**
-   * Display name out of a User-Name block, without the trailing @handle.
-   * `authorFromNameBlock` relies on X's newline-separated `innerText`, which jsdom (and
-   * some userscript hosts reading `textContent`) never produce - so "Reply Person@replier"
-   * would leak into the archive as the author's name. Strip from the first @token.
-   */
+  /** Display name out of a User-Name block, without the trailing @handle. */
   function replyDisplayNameFromTweet(tweetEl) {
-    const nameBlock = pick(tweetEl, CONFIG.selectors.userName, { quiet: true });
-    if (!nameBlock) return '';
-    const line =
-      String(nameBlock.innerText || nameBlock.textContent || '')
-        .split('\n')
-        .map((part) => part.trim())
-        .filter(Boolean)[0] || '';
-    const handleMatch = line.match(/@[A-Za-z0-9_]+/);
-    return (handleMatch ? line.slice(0, handleMatch.index) : line).replace(/[·•]\s*$/, '').trim();
+    return authorFromNameBlock(pick(tweetEl, CONFIG.selectors.userName, { quiet: true })).name;
   }
 
   /**
@@ -11924,6 +11924,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       writeReplyProbeResult,
       runReplyProbe,
       postControlCaptureMode,
+      authorFromNameBlock,
       copyText,
       waitForConversation,
       timelineArticlePreviewReason,
