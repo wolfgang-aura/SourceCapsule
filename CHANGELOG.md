@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-09-13
+
 ### Changed
 
 - **"Create AI link" is now the default action on every SourceCapsule button**, replacing the
@@ -21,6 +23,12 @@ All notable changes to this project are documented here. The format is based on
 
 ### Fixed
 
+- **The inline button no longer nudges the timeline down after each post paints.** X's header
+  row is 20px tall; the 28px control stretched it to 33px, and because the control mounts a
+  beat after the post, every post below it jumped 13px - a fast scroll-and-click landed on the
+  wrong post. The control now keeps X's own trick (negative block margins) so its layout height
+  matches the row. Measured on the installed build: 0px shift on the timeline and on a focused
+  post. ([#6](https://github.com/wolfgang-aura/SourceCapsule/issues/6))
 - **A thread export clicked the moment the page loads no longer publishes the root post alone.**
   X paints a status page with the root post by itself and fetches the conversation a beat later;
   the export now waits for it to arrive before scrolling for media. Live-verified: clicked with

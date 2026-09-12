@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SourceCapsule - Save X/Twitter Threads & Articles as Markdown for LLMs + Offline HTML
 // @namespace    https://github.com/wolfgang-aura/SourceCapsule
-// @version      1.5.2
+// @version      1.6.0
 // @description  One click saves an X (Twitter) thread, Article, or post as clean Markdown for LLM context (Claude, ChatGPT) plus a self-contained offline HTML archive - images, video, and quoted posts embedded, with honest completeness reporting. Local-first, with optional expiring AI readable links.
 // @author       wolfgang-aura
 // @license      MIT
@@ -207,7 +207,7 @@
   };
 
   const APP = 'SourceCapsule';
-  const VERSION = '1.5.2';
+  const VERSION = '1.6.0';
 
   // ===========================================================================
   // Small utilities
@@ -6153,8 +6153,14 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
   box-shadow:0 2px 8px rgba(0,0,0,.2);transition:opacity .12s ease}
 .${CONFIG.postControlClass} .xa-ctl-menu{right:auto;top:auto}
 /* Inline-in-header: full opacity and sized to match X's header buttons (Subscribe/More);
-   sits left of the "..." menu. */
-.${CONFIG.postControlClass}.xa-ctl-inline{position:static;display:inline-flex;align-items:center;margin-right:8px}
+   sits left of the "..." menu.
+   The header row is 20px tall: X's own caret keeps only ~19px in flow and paints its 35px
+   hover circle absolutely with -8px margins. Our 28px buttons would stretch that row to 33px,
+   and since the control lands ~400ms after the post paints, every post below it jumped 13px -
+   a fast scroller's click landed on the wrong post. Same trick as X: 28px tall, -4px block
+   margins, so the control's layout height is the row's 20px and inserting it moves nothing. */
+.${CONFIG.postControlClass}.xa-ctl-inline{position:static;display:inline-flex;align-items:center;
+  height:28px;margin:-4px 8px -4px 0;align-self:center}
 .${CONFIG.postControlClass}.xa-ctl-inline .xa-ctl-trigger{opacity:1;font-size:14px;padding:7px 16px}
 .${CONFIG.postControlClass}.xa-ctl-inline .xa-ctl-options{padding:7px 8px}
 /* Absolute fallback (no header caret found): visible overlay below the header row. */
