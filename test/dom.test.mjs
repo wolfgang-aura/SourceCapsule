@@ -1916,7 +1916,8 @@ await checkAsync(
       },
       222: {
         __typename: 'Tweet',
-        text: 'two',
+        // The DOM showed only the preview, exactly what syndication returns.
+        text: 'long-form post whose card was lost to lazy loading',
         note_tweet: { id: 'NoteTweetResults:2' },
         entities: {
           urls: [
@@ -2147,6 +2148,42 @@ await checkAsync(
     );
     assert.equal(model.thread.truncatedPosts, 1);
     assert.ok(!model.thread.recoveredNotes);
+  }
+);
+
+await checkAsync(
+  'a note post is not flagged truncated when the DOM already rendered past the syndication preview',
+  async () => {
+    // Real shape of x.com/kovainvest/status/2100620197811962233: the focused status page
+    // renders the full note text, syndication returns a preview cut at display_text_range
+    // (plus a trailing media t.co), and TweetDetail was never passively captured.
+    const full =
+      '$SNDK 这一年：2025年9月中约90美元 → 6月22日最高2354美元。 想涨到从没到过的价格，就绕不开一次次突破前高。 ' +
+      '@Kovaview01 52w high榜：177只股票离52周高点不到10%、均线多头排列， $IOVA 、 $ABCL 、 $TXG 三个月涨幅都超过150%。 还在只买标普500?';
+    const preview =
+      '$SNDK 这一年：2025年9月中约90美元 → 6月22日最高2354美元。\n\n想涨到从没到过的价格，就绕不开一次次突破前高。\n\n' +
+      '@Kovaview01  52w high榜：177只股票离52周高点不到10%、均线多头排列， $IOVA、';
+    const model = {
+      type: 'post',
+      sourceUrl: 'https://x.com/kovainvest/status/2100620197811962233',
+      blocks: [{ kind: 'paragraph', html: full }],
+    };
+    await engine.enrichFocusedPostViaSyndication(
+      model,
+      null,
+      async () => ({
+        __typename: 'Tweet',
+        text: `${preview} https://t.co/UKwucnHQVN`,
+        display_text_range: [0, [...preview].length],
+        note_tweet: { id: 'NoteTweetResults:2100620197811962233' },
+      }),
+      () => null
+    );
+    assert.equal(
+      model.blocks.findIndex((b) => b.kind === 'truncation-notice'),
+      -1,
+      'DOM text already extends past the preview, so nothing is missing'
+    );
   }
 );
 

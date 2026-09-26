@@ -8198,6 +8198,29 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   }
 
   /**
+   * True when the DOM-captured text runs past the preview syndication returns for a
+   * note post, i.e. X rendered the full text on the page. URLs are dropped from both
+   * sides (syndication has t.co, the DOM has display URLs) along with whitespace and
+   * ellipses, so only the prose is compared. Any doubt falls through to the notice.
+   */
+  function domTextExceedsSyndicationPreview(domText, data) {
+    let preview = String((data && data.text) || '');
+    const range = data && data.display_text_range;
+    if (Array.isArray(range) && Number.isFinite(range[1])) {
+      preview = [...preview].slice(0, range[1]).join('');
+    }
+    const prose = (s) =>
+      [
+        ...String(s || '')
+          .replace(/https?:\/\/\S+/gi, '')
+          .replace(/\S+\.[a-z]{2,}\/\S*/gi, '')
+          .replace(/[…\s]/g, ''),
+      ].length;
+    const previewLen = prose(preview);
+    return previewLen > 0 && prose(domText) > previewLen;
+  }
+
+  /**
    * Apply one post's syndication payload to its slice of the model: the blocks
    * between `index` (the post's thread-marker, or -1 for a focused single post)
    * and `end`, exclusive. Shared by the thread pass and the focused-post pass.
@@ -8339,6 +8362,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         recoveredNote = true;
       } else if (fullText && previewText.length >= fullText.length) {
         // The DOM already showed the complete note text - nothing to warn about.
+      } else if (!fullText && domTextExceedsSyndicationPreview(previewText, data)) {
+        // A focused status page renders the whole note even when its GraphQL body was
+        // never teed to the capture layer. The DOM already holds more than the preview,
+        // so there is nothing missing to warn about.
       } else if (!segment.some((b) => b.kind === 'truncation-notice')) {
         additions.push({ kind: 'truncation-notice', sourceUrl: marker.sourceUrl });
         truncatedPost = true;
