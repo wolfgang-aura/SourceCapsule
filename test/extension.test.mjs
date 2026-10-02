@@ -110,6 +110,57 @@ assert.deepEqual(Array.from(new Uint8Array(compatBinary.response)), [0, 255, 128
 const compatText = await viaCompat('text');
 assert.equal(typeof compatText.responseText, 'string');
 assert.equal(compatText.response, compatText.responseText);
+
+// The direct-request fallback is for a dead messaging channel only, and only for methods
+// that are safe to repeat. A background refusal or timeout must never be routed around.
+let directCalls = 0;
+globalThis.fetch = async () => {
+  directCalls += 1;
+  return new Response('direct', { status: 200 });
+};
+const gmRequest = (details) =>
+  new Promise((resolve) => {
+    globalThis.GM_xmlhttpRequest({
+      ...details,
+      onload: (result) => resolve({ loaded: result }),
+      onerror: (error) => resolve({ error }),
+      ontimeout: () => resolve({ timeout: true }),
+    });
+  });
+const withChrome = (sendMessage, lastError) => {
+  globalThis.chrome = {
+    runtime: {
+      sendMessage: (request, done) => {
+        globalThis.chrome.runtime.lastError = lastError || undefined;
+        sendMessage(request, done);
+        globalThis.chrome.runtime.lastError = undefined;
+      },
+    },
+  };
+};
+const noReceiver = { message: 'Could not establish connection. Receiving end does not exist.' };
+withChrome((_request, done) => done(undefined), noReceiver);
+const postNoChannel = await gmRequest({
+  method: 'POST',
+  url: 'https://pbs.twimg.com/a',
+  data: 'x',
+});
+assert.ok(postNoChannel.error, 'a POST is not replayed when the channel is down');
+assert.equal(directCalls, 0, 'no direct request for a POST');
+const getNoChannel = await gmRequest({ method: 'GET', url: 'https://pbs.twimg.com/a' });
+assert.equal(getNoChannel.loaded.status, 200, 'a GET may fall back when the channel is down');
+assert.equal(directCalls, 1);
+withChrome((_request, done) =>
+  done({ ok: false, error: 'SourceCapsule blocked a request to an unapproved host.' })
+);
+const refused = await gmRequest({ method: 'GET', url: 'https://evil.example/a' });
+assert.match(refused.error.message, /unapproved host/);
+withChrome((_request, done) => done({ ok: false, error: 'The operation was aborted' }));
+await gmRequest({ method: 'GET', url: 'https://pbs.twimg.com/a' });
+withChrome((_request, done) => done(undefined));
+await gmRequest({ method: 'GET', url: 'https://pbs.twimg.com/a' });
+assert.equal(directCalls, 1, 'a background answer or a missing result never triggers a fallback');
+
 delete globalThis.chrome;
 globalThis.fetch = realProxyFetch;
 
