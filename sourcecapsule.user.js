@@ -981,7 +981,8 @@
       'g'
     );
     const item = renderLibraryIndexItem(entry);
-    if (pattern.test(current)) return `${current.replace(pattern, item).trim()}\n`;
+    // Function replacer: a string replacement expands $$ $& $' $` found in a note.
+    if (pattern.test(current)) return `${current.replace(pattern, () => item).trim()}\n`;
     return `${current.trim()}\n\n${item}\n`;
   }
 
