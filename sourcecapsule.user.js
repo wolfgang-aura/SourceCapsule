@@ -5431,7 +5431,9 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
           if (response.status >= 200 && response.status < 300) {
             resolve(response.responseText || '');
           } else {
-            reject(new Error(`Share service returned HTTP ${response.status}.`));
+            const failure = new Error(`Share service returned HTTP ${response.status}.`);
+            failure.status = response.status;
+            reject(failure);
           }
         },
         onerror: (event) =>
@@ -5873,11 +5875,21 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       forgetShareLink(record && record.id);
       return { remoteDeleted: false };
     }
-    await gmHttp({
-      method: 'DELETE',
-      url: record.deleteUrl,
-      headers: { Authorization: `Bearer ${record.deleteToken}` },
-    });
+    try {
+      await gmHttp({
+        method: 'DELETE',
+        url: record.deleteUrl,
+        headers: { Authorization: `Bearer ${record.deleteToken}` },
+      });
+    } catch (error) {
+      // 404/410 means the capsule is already gone (expired, swept, or deleted elsewhere).
+      // Keeping the local record would leave a "Delete link" button that can never succeed.
+      if (error && (error.status === 404 || error.status === 410)) {
+        forgetShareLink(record.id);
+        return { remoteDeleted: false, alreadyGone: true };
+      }
+      throw error;
+    }
     forgetShareLink(record.id);
     return { remoteDeleted: true };
   }
@@ -12126,6 +12138,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       setShareLinks,
       rememberShareLink,
       forgetShareLink,
+      deleteSharedCapsule,
       shareLinkExpired,
       aiLinkReceiptText,
       showRecentShareLinks,

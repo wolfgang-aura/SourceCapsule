@@ -3301,6 +3301,49 @@ await checkAsync(
   }
 );
 
+await checkAsync(
+  'deleting a shared capsule the Worker no longer has forgets the record',
+  async () => {
+    const created = (id) => ({
+      id,
+      viewUrl: `https://share.example/c/${id}`,
+      markdownUrl: `https://share.example/c/${id}.md`,
+      deleteUrl: `https://share.example/api/capsules/${id}`,
+      deleteToken: 'token',
+      expiresAt: '2030-01-01T00:00:00.000Z',
+    });
+    const status = { value: 404 };
+    global.GM_xmlhttpRequest = (options) =>
+      options.onload({
+        status: status.value,
+        responseText: '',
+        response: null,
+        responseHeaders: '',
+      });
+    try {
+      const gone = engine.rememberShareLink(created('a'.repeat(32)), { title: 'Gone' });
+      for (const code of [404, 410]) {
+        status.value = code;
+        engine.rememberShareLink(created('a'.repeat(32)), { title: 'Gone' });
+        await engine.deleteSharedCapsule(gone);
+        assert.ok(!engine.getShareLinks().some((r) => r.id === gone.id), `HTTP ${code} forgets it`);
+      }
+      // Any other failure keeps the record so the owner can retry.
+      const kept = engine.rememberShareLink(created('b'.repeat(32)), { title: 'Kept' });
+      status.value = 500;
+      await assert.rejects(() => engine.deleteSharedCapsule(kept), /HTTP 500/);
+      assert.ok(
+        engine.getShareLinks().some((r) => r.id === kept.id),
+        'HTTP 500 keeps the record'
+      );
+      status.value = 404;
+      await engine.deleteSharedCapsule(kept);
+    } finally {
+      delete global.GM_xmlhttpRequest;
+    }
+  }
+);
+
 // ---------------------------------------------------------------------------
 // Quoted-post tombstones: the quoted post is gone on X itself (banned/deleted).
 // Captured as an honest note, never a strict-gate blocker.
