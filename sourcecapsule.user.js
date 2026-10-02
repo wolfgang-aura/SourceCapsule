@@ -8643,6 +8643,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         (inlineParent && inlineParent.user && inlineParent.user.screen_name) ||
         '';
       let parentData = null;
+      // Only a 404 is X saying the parent is gone. Any other failure (5xx,
+      // timeout, network) says nothing about the parent, so it must not be
+      // reported as deleted.
+      let parentFetchInconclusive = false;
       try {
         // Full fetch first: the inline `parent` payload is a slimmer shape that
         // can lack media; fall back to it only when the id fetch fails.
@@ -8650,6 +8654,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       } catch (e) {
         warn('reply-context parent fetch failed for', parentId, '-', e.message);
         parentData = inlineParent;
+        parentFetchInconclusive = !(e && e.status === 404);
       }
       if (
         parentData &&
@@ -8665,13 +8670,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         model.blocks.unshift(card);
         log('reply context: prepended parent post', parentId);
       } else {
-        // We KNOW it is a reply (X said so), but the parent is gone on X.
+        // We KNOW it is a reply (X said so). Say "gone" only when X answered
+        // 404; otherwise be honest that the parent just could not be fetched.
+        const who = parentHandle ? `a post by @${parentHandle}` : 'a post';
         model.blocks.unshift({
           kind: 'quote-tombstone',
           replyContext: true,
-          notice: parentHandle
-            ? `This post replies to a post by @${parentHandle} that is no longer available on X.`
-            : 'This post replies to a post that is no longer available on X.',
+          notice: parentFetchInconclusive
+            ? `This post replies to ${who}, but that post could not be fetched when this was saved.`
+            : `This post replies to ${who} that is no longer available on X.`,
           sourceUrl: model.sourceUrl,
         });
       }

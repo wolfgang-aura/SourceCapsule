@@ -3518,6 +3518,37 @@ await checkAsync('reply context leaves an honest note when the parent is gone on
   assert.equal(engine.assessExportCompleteness(model).verdict, 'clean');
 });
 
+await checkAsync(
+  'reply context does not claim the parent is gone when the fetch merely failed',
+  async () => {
+    for (const status of [500, undefined]) {
+      const model = {
+        type: 'post',
+        sourceUrl: 'https://x.com/replier/status/200',
+        blocks: [{ kind: 'paragraph', html: 'reply' }],
+      };
+      await engine.enrichReplyContextViaSyndication(model, null, async (id) => {
+        if (id === '200') {
+          return {
+            __typename: 'Tweet',
+            text: 'reply',
+            in_reply_to_status_id_str: '100',
+            in_reply_to_screen_name: 'someone',
+          };
+        }
+        const error = new Error(status ? `syndication: HTTP ${status}` : 'network timeout');
+        if (status) error.status = status;
+        throw error;
+      });
+      const note = model.blocks[0];
+      assert.equal(note.kind, 'quote-tombstone');
+      assert.doesNotMatch(note.notice, /no longer available/);
+      assert.match(note.notice, /could not be fetched/);
+      assert.match(note.notice, /@someone/);
+    }
+  }
+);
+
 await checkAsync('reply context skips a parent already captured in the thread', async () => {
   const model = {
     type: 'post',
