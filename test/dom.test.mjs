@@ -2078,6 +2078,28 @@ check('noteTweetParagraphBlocks splits paragraphs, escapes, and linkifies t.co u
   );
 });
 
+check('a plain text TweetDetail body still counts as an interesting capture response', () => {
+  const diag = engine.networkCaptureDiagnostics;
+  const before = diag.interestingResponses;
+  engine.handleNetworkCapturePayload({
+    source: 'SourceCapsule:network-capture',
+    type: 'response',
+    url: 'https://x.com/i/api/graphql/abc/TweetDetail',
+    transport: 'fetch:test',
+    body: JSON.stringify({ data: { conversation_id_str: 'plain-1', note: 'text only post' } }),
+  });
+  assert.equal(diag.interestingResponses, before + 1);
+  // An unrelated endpoint with no video, note or quote stays uninteresting.
+  engine.handleNetworkCapturePayload({
+    source: 'SourceCapsule:network-capture',
+    type: 'response',
+    url: 'https://x.com/i/api/graphql/abc/HomeTimeline',
+    transport: 'fetch:test',
+    body: JSON.stringify({ data: { unrelated: 'plain-2' } }),
+  });
+  assert.equal(diag.interestingResponses, before + 1);
+});
+
 await checkAsync(
   'syndication pass swaps the note preview for network-captured full text',
   async () => {

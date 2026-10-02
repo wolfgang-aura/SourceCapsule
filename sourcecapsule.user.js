@@ -7480,10 +7480,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     }
     const source = `network:${payload.transport || 'unknown'}`;
     const candidates = videoCandidatesFromCapturedBody(payload.body || '', source);
-    if (candidates.length) {
-      networkCaptureDiagnostics.interestingResponses += 1;
-      networkCaptureDiagnostics.candidates += candidates.length;
-    }
+    if (candidates.length) networkCaptureDiagnostics.candidates += candidates.length;
     candidates.forEach((candidate) =>
       rememberNetworkVideoCandidate(candidate, {
         url: payload.url || '',
@@ -7502,6 +7499,17 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (quotedRefs.length) {
       quotedRefs.forEach(rememberCapturedQuotedRef);
       log('captured quoted-post refs for', quotedRefs.length, 'parent(s) from', payload.url || '');
+    }
+    // "Interesting" is the signal that passive capture saw X's own data for this page,
+    // which the unattended wait and its warning rely on. A plain text post carries no
+    // video, note or quote, so a TweetDetail / TweetResultByRestId body counts by itself.
+    if (
+      candidates.length ||
+      notes.length ||
+      quotedRefs.length ||
+      /TweetDetail|TweetResultByRestId/i.test(payload.url || '')
+    ) {
+      networkCaptureDiagnostics.interestingResponses += 1;
     }
     if (/SearchTimeline|TweetDetail|TweetResult/i.test(payload.url || '')) {
       const replies = searchTimelineReplyRecordsFromCapturedBody(payload.body || '');
