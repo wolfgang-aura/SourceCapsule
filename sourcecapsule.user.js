@@ -5720,6 +5720,9 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
           counts: (error.assessment && error.assessment.counts) || {},
         };
       }
+      if (error && error.code === 'busy') {
+        return { ok: false, error: 'busy', message: error.message };
+      }
       return { ok: false, error: 'capture_failed', message: error.message };
     }
   }
@@ -11085,6 +11088,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return count;
   }
 
+  // One export at a time. Every export calls resetMediaState(), which clears the shared
+  // harvested media and the syndication cache; a second export starting mid-run would pull
+  // those out from under the first and ship it with holes.
+  let exportInFlight = false;
+
   async function runExport(
     exportType,
     {
@@ -11102,6 +11110,18 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       showOpenPostFirstNotice(targetTweetEl, openFirstReason);
       return;
     }
+    if (exportInFlight) {
+      if (automation) {
+        const busy = new Error('Another SourceCapsule export is still running in this tab.');
+        busy.code = 'busy';
+        throw busy;
+      }
+      showToast('Another export is still running. Wait for it to finish, then try again.', {
+        error: true,
+      });
+      return;
+    }
+    exportInFlight = true;
     const restoreLabel = trigger ? trigger.textContent : '';
     const setBusy = (busy) => {
       if (!trigger) return;
@@ -11480,6 +11500,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       if (automation) throw e;
       showToast(`Export failed: ${e.message}`, { error: true });
     } finally {
+      exportInFlight = false;
       setBusy(false);
     }
   }
@@ -12156,6 +12177,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       buildDiagnosticBundle,
       confirmShipDespiteIncomplete,
       extensionControllerMessage,
+      runExport,
       folderPickerAvailable,
       pickDirectoryViaExtensionBridge,
       handleFromSourceUrl,
