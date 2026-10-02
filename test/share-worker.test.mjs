@@ -464,4 +464,56 @@ const past = new Date(Date.now() - 86400000).toISOString();
   assert.equal(store.getCount, readsBefore, 'no per-capsule reads when nothing is due');
 }
 
+{
+  // Uploaded files are never trusted to choose how they are served. A capsule holder
+  // controls the bytes, the Content-Type header and (under media/) the extension, and
+  // all of it is served from the Worker's own origin.
+  const store = new MemoryR2();
+  const capsule = await publishCapsule(store);
+  const put = (name, type, body) =>
+    worker.fetch(
+      new Request(`${capsule.uploadUrl}/${name}`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${capsule.uploadToken}`, 'Content-Type': type },
+        body,
+        duplex: 'half',
+      }),
+      { CAPSULES: store },
+      ctx
+    );
+  const get = (path) =>
+    worker.fetch(
+      new Request(`https://share.example/c/${capsule.id}${path}`),
+      { CAPSULES: store },
+      ctx
+    );
+  await put('media/page.html', 'text/html', '<script>1</script>');
+  await put('media/vector.svg', 'image/svg+xml', '<svg xmlns="http://www.w3.org/2000/svg"/>');
+  await put('media/pic.jpg', 'text/html', '<script>1</script>');
+  await put('media/blob.bin', 'application/octet-stream', new Uint8Array([1]));
+
+  for (const name of ['page.html', 'vector.svg']) {
+    const res = await get(`/media/${name}`);
+    assert.equal(res.status, 200, name);
+    assert.ok(
+      !/html|svg/i.test(res.headers.get('Content-Type')),
+      `${name} is not served as markup`
+    );
+    assert.equal(res.headers.get('Content-Type'), 'application/octet-stream', name);
+    assert.match(res.headers.get('Content-Disposition') || '', /^attachment/, name);
+  }
+  const mislabelled = await get('/media/pic.jpg');
+  assert.equal(mislabelled.headers.get('Content-Type'), 'image/jpeg', 'type comes from the path');
+  for (const path of ['/media/pic.jpg', '/media/blob.bin', '.md', '/manifest.json']) {
+    const res = await get(path);
+    assert.match(
+      res.headers.get('Content-Security-Policy') || '',
+      /default-src 'none'/,
+      `${path} carries a CSP`
+    );
+  }
+  const md = await get('.md');
+  assert.equal(md.headers.get('Content-Type'), 'text/markdown;charset=utf-8');
+}
+
 console.log('SourceCapsule share worker test passed.');

@@ -98,6 +98,18 @@ function mimeFromPath(path) {
   return '';
 }
 
+// The Worker decides how a stored file is served, never the uploader. Fixed paths get the
+// type for their name. Anything under media/ is served inline only when its extension is an
+// image or mp4 type; every other extension (.html, .svg, .bin, ...) comes back as an opaque
+// download.
+function servedType(path) {
+  const inferred = mimeFromPath(path);
+  if (path.startsWith('media/')) {
+    return /^(image\/(?!svg)|video\/mp4)/.test(inferred) ? inferred : '';
+  }
+  return inferred;
+}
+
 async function getMeta(env, id) {
   const object = await env.CAPSULES.get(metaKey(id));
   if (!object) return null;
@@ -266,9 +278,7 @@ async function uploadFile(request, env, id, path) {
     return json(request, { error: 'Capsule exceeds the 25 MB limit.' }, 413);
   }
   await env.CAPSULES.put(key, bytes, {
-    httpMetadata: {
-      contentType: request.headers.get('Content-Type') || 'application/octet-stream',
-    },
+    httpMetadata: { contentType: servedType(path) || 'application/octet-stream' },
   });
   return json(request, { ok: true, path, bytes: bytes.byteLength });
 }
@@ -406,11 +416,10 @@ async function serveCapsule(request, env, ctx, id, path) {
   if (!object) return new Response('File not found.', { status: 404 });
   const headers = new Headers();
   object.writeHttpMetadata && object.writeHttpMetadata(headers);
-  const inferredType = mimeFromPath(path);
-  const storedType = headers.get('Content-Type') || '';
-  if (!storedType || storedType === 'application/octet-stream') {
-    if (inferredType) headers.set('Content-Type', inferredType);
-  }
+  // Ignore whatever type was stored with the object (older uploads kept the uploader's).
+  const type = servedType(path);
+  headers.set('Content-Type', type || 'application/octet-stream');
+  if (!type) headers.set('Content-Disposition', 'attachment');
   // R2's writeHttpMetadata omits Content-Length; without it, HEAD probes from
   // Slack, Discord, and Twitter link-preview crawlers can skip the asset (they
   // won't fetch an unknown-size body over their preview budget). Serve the size
@@ -426,12 +435,12 @@ async function serveCapsule(request, env, ctx, id, path) {
   headers.set('X-Robots-Tag', 'noindex, nofollow');
   headers.set('Referrer-Policy', 'no-referrer');
   headers.set('X-Content-Type-Options', 'nosniff');
-  if (path === 'content.html') {
-    headers.set(
-      'Content-Security-Policy',
-      "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"
-    );
-  }
+  headers.set(
+    'Content-Security-Policy',
+    path === 'content.html'
+      ? "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"
+      : "default-src 'none'; sandbox; frame-ancestors 'none'"
+  );
   return new Response(request.method === 'HEAD' ? null : object.body, { headers });
 }
 
