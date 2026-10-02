@@ -1049,6 +1049,30 @@ check('buildModelForPost uses the focused post permalink as sourceUrl', () => {
   assert.equal(model.publishedAt, '2026-06-25T12:00:00.000Z');
 });
 
+check('buildModelForPost keeps its own permalink when it quotes the focused post', () => {
+  const column = document.querySelector('[data-testid="primaryColumn"]');
+  const reply = document.createElement('article');
+  reply.setAttribute('data-testid', 'tweet');
+  reply.setAttribute('role', 'article');
+  reply.innerHTML = `
+    <div data-testid="User-Name"><a href="/replier"><span>Replier</span></a><a href="/replier"><span>@replier</span></a></div>
+    <div data-testid="tweetText" lang="en"><span>My reply quoting the focused post.</span></div>
+    <div role="link" tabindex="0">
+      <div data-testid="User-Name"><a href="/Vegahao"><span>Vega Hao</span></a><a href="/Vegahao"><span>@Vegahao</span></a></div>
+      <div data-testid="tweetText" lang="en"><span>Quoted focused text.</span></div>
+      <a href="/Vegahao/status/1790000000000000000"><time datetime="2026-06-25T12:00:00Z">Jun 25</time></a>
+    </div>
+    <a href="/replier/status/1790000000000009999"><time datetime="2026-06-26T08:00:00Z">Jun 26</time></a>`;
+  column.appendChild(reply);
+  try {
+    const replyModel = engine.buildModelForPost(reply);
+    assert.equal(replyModel.sourceUrl, 'https://x.com/replier/status/1790000000000009999');
+    assert.equal(replyModel.publishedAt, '2026-06-26T08:00:00.000Z');
+  } finally {
+    reply.remove();
+  }
+});
+
 check('buildModelForPost also captures the image', () => {
   const images = allBlocks(model.blocks).filter((b) => b.kind === 'image');
   const videos = allBlocks(model.blocks).filter((b) => b.kind === 'video');

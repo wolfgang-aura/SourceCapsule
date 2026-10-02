@@ -2694,13 +2694,18 @@
     const namePart = author.name || 'X post';
     const handlePart = author.handle ? ` (${author.handle})` : '';
 
+    // The exported post's OWN id, not the page's focused one: a reply that quotes the
+    // focused post carries that post's permalink in its quote card, and the default
+    // expected id would pick it.
+    const ownStatusId = tweetStatusId(tweetEl) || currentStatusId();
+    const ownSourceUrl = canonicalUrl(tweetEl, ownStatusId);
     const model = {
       type: 'post',
       title: `${namePart}${handlePart} on X`.trim(),
       heading: '',
       author,
-      sourceUrl: canonicalUrl(tweetEl),
-      publishedAt: publishedAtFromElement(tweetEl, statusIdFromSourceUrl(canonicalUrl(tweetEl))),
+      sourceUrl: ownSourceUrl,
+      publishedAt: publishedAtFromElement(tweetEl, statusIdFromSourceUrl(ownSourceUrl)),
       exportedAt: new Date().toISOString(),
       blocks,
     };
