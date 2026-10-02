@@ -65,6 +65,105 @@ assert.equal(directResult.status, 200);
 assert.deepEqual(Array.from(new Uint8Array(directResult.response)), [1, 2, 3, 4]);
 assert.match(directResult.responseHeaders, /content-type: image\/jpeg/);
 
+// The proxy must send ONE representation of the body. Sending decoded text plus base64
+// roughly triples a media response and can pass Chrome's 64 MiB message limit.
+const proxyBytes = Uint8Array.from([0, 255, 128, 7]);
+const realProxyFetch = globalThis.fetch;
+globalThis.fetch = async () => ({
+  status: 200,
+  headers: new Map([['content-type', 'image/jpeg']]),
+  arrayBuffer: async () => proxyBytes.buffer.slice(0),
+});
+const proxyThroughBackground = (extra) =>
+  new Promise((resolve) =>
+    background.handleMessage(
+      {
+        type: 'sourcecapsule:http',
+        request: { url: 'https://pbs.twimg.com/media/a.jpg', bodyText: null, ...extra },
+      },
+      null,
+      resolve
+    )
+  );
+const proxiedBinary = await proxyThroughBackground({ responseType: 'arraybuffer' });
+assert.equal(proxiedBinary.ok, true);
+assert.equal(typeof proxiedBinary.bodyBase64, 'string');
+assert.equal(proxiedBinary.responseText, undefined, 'binary replies carry base64 only');
+const proxiedText = await proxyThroughBackground({ responseType: 'text' });
+assert.equal(typeof proxiedText.responseText, 'string');
+assert.equal(proxiedText.bodyBase64, undefined, 'text replies carry text only');
+// End to end through compat.js: each caller gets the field it reads.
+globalThis.chrome = {
+  runtime: { sendMessage: (request, done) => background.handleMessage(request, null, done) },
+};
+const viaCompat = (responseType) =>
+  new Promise((resolve, reject) =>
+    globalThis.GM_xmlhttpRequest({
+      url: 'https://pbs.twimg.com/media/a.jpg',
+      responseType,
+      onload: resolve,
+      onerror: reject,
+    })
+  );
+const compatBinary = await viaCompat('arraybuffer');
+assert.deepEqual(Array.from(new Uint8Array(compatBinary.response)), [0, 255, 128, 7]);
+const compatText = await viaCompat('text');
+assert.equal(typeof compatText.responseText, 'string');
+assert.equal(compatText.response, compatText.responseText);
+
+// The direct-request fallback is for a dead messaging channel only, and only for methods
+// that are safe to repeat. A background refusal or timeout must never be routed around.
+let directCalls = 0;
+globalThis.fetch = async () => {
+  directCalls += 1;
+  return new Response('direct', { status: 200 });
+};
+const gmRequest = (details) =>
+  new Promise((resolve) => {
+    globalThis.GM_xmlhttpRequest({
+      ...details,
+      onload: (result) => resolve({ loaded: result }),
+      onerror: (error) => resolve({ error }),
+      ontimeout: () => resolve({ timeout: true }),
+    });
+  });
+const withChrome = (sendMessage, lastError) => {
+  globalThis.chrome = {
+    runtime: {
+      sendMessage: (request, done) => {
+        globalThis.chrome.runtime.lastError = lastError || undefined;
+        sendMessage(request, done);
+        globalThis.chrome.runtime.lastError = undefined;
+      },
+    },
+  };
+};
+const noReceiver = { message: 'Could not establish connection. Receiving end does not exist.' };
+withChrome((_request, done) => done(undefined), noReceiver);
+const postNoChannel = await gmRequest({
+  method: 'POST',
+  url: 'https://pbs.twimg.com/a',
+  data: 'x',
+});
+assert.ok(postNoChannel.error, 'a POST is not replayed when the channel is down');
+assert.equal(directCalls, 0, 'no direct request for a POST');
+const getNoChannel = await gmRequest({ method: 'GET', url: 'https://pbs.twimg.com/a' });
+assert.equal(getNoChannel.loaded.status, 200, 'a GET may fall back when the channel is down');
+assert.equal(directCalls, 1);
+withChrome((_request, done) =>
+  done({ ok: false, error: 'SourceCapsule blocked a request to an unapproved host.' })
+);
+const refused = await gmRequest({ method: 'GET', url: 'https://evil.example/a' });
+assert.match(refused.error.message, /unapproved host/);
+withChrome((_request, done) => done({ ok: false, error: 'The operation was aborted' }));
+await gmRequest({ method: 'GET', url: 'https://pbs.twimg.com/a' });
+withChrome((_request, done) => done(undefined));
+await gmRequest({ method: 'GET', url: 'https://pbs.twimg.com/a' });
+assert.equal(directCalls, 1, 'a background answer or a missing result never triggers a fallback');
+
+delete globalThis.chrome;
+globalThis.fetch = realProxyFetch;
+
 console.log('[4/5] Checking passive bridge validation, caps, and duplicate suppression...');
 const engine = require(path.join(root, 'sourcecapsule.user.js'));
 const payload = {
@@ -211,6 +310,115 @@ bridgeDom.window.dispatchEvent(
 const folderResult = await bridgeResult;
 assert.equal(folderResult.ok, true);
 assert.equal(folderResult.handle.name, 'Bridge Folder');
+
+console.log('[4b/5] Checking the three network tees stay aligned and never starve the page...');
+// The fetch/XHR tee exists three times: the unsafeWindow copy, the stringified copy the
+// userscript injects, and extension-src/page-bridge.js. They must agree on patterns and
+// on the rate cap, and none may go silent for the life of a long SPA session.
+const bridgeBodyFor = (n) =>
+  JSON.stringify({
+    rest_id: String(n),
+    legacy: { conversation_id_str: '100', full_text: `reply ${n}` },
+  });
+const stubBridgeFetch = (win) => {
+  win.fetch = async (url) => ({
+    url,
+    headers: { get: () => 'application/json' },
+    clone: () => ({ text: async () => bridgeBodyFor(String(url).split('n=')[1]) }),
+  });
+};
+const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
+const fireBridgeResponses = async (win, count, from) => {
+  for (let i = 0; i < count; i++) {
+    await win.fetch(`https://x.com/i/api/graphql/test/TweetDetail?n=${from + i}`);
+  }
+  await settle();
+};
+const newBridgeWindow = (patternSink) => {
+  const dom = new JSDOM('<!doctype html><title>Tee</title>', {
+    url: 'https://x.com/test/status/1',
+    runScripts: 'outside-only',
+  });
+  if (patternSink) {
+    const NativeRegExp = dom.window.RegExp;
+    dom.window.RegExp = class extends NativeRegExp {
+      constructor(pattern, flags) {
+        super(pattern, flags);
+        patternSink.push(this);
+      }
+    };
+  }
+  stubBridgeFetch(dom.window);
+  return dom.window;
+};
+const realNow = Date.now;
+let fakeNow = 5_000_000;
+const withFakeClock = async (win, fn) => {
+  Date.now = () => fakeNow;
+  win.Date.now = () => fakeNow;
+  try {
+    await fn();
+  } finally {
+    Date.now = realNow;
+  }
+};
+// Both MAIN-world copies post messages; run the identical scenario against each.
+const injectedPatterns = [];
+const messageBridges = {
+  'page-bridge.js': (win) => win.eval(bridgeSource),
+  'networkCaptureBridgeSource()': (win) => win.eval(engine.networkCaptureBridgeSource(6_000_000)),
+};
+for (const [name, install] of Object.entries(messageBridges)) {
+  const win = newBridgeWindow(name.startsWith('network') ? injectedPatterns : null);
+  const messages = [];
+  win.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'response') messages.push(event.data);
+  });
+  await withFakeClock(win, async () => {
+    install(win);
+    await fireBridgeResponses(win, 250, 0);
+    assert.equal(messages.length, 100, `${name}: one rate window admits at most 100 responses`);
+    fakeNow += 11_000;
+    await fireBridgeResponses(win, 1, 1000);
+    assert.equal(messages.length, 101, `${name}: the page is not silenced for good`);
+    const last = messages[messages.length - 1];
+    assert.equal(last.dropped, 150, `${name}: drops are reported to the userscript`);
+    assert.equal(last.contractVersion, 1, `${name}: every message carries contractVersion`);
+  });
+}
+// The userscript-side copy hands payloads straight to handleNetworkCapturePayload.
+{
+  const win = newBridgeWindow(null);
+  const diag = engine.networkCaptureDiagnostics;
+  const seenBefore = diag.responsesSeen;
+  const realLog = console.log;
+  console.log = () => {}; // the engine logs once per captured response
+  try {
+    await withFakeClock(win, async () => {
+      assert.equal(engine.installUnsafeWindowNetworkCapture(win), true);
+      await fireBridgeResponses(win, 250, 2000);
+      assert.equal(diag.responsesSeen - seenBefore, 100, 'unsafeWindow copy honours the same cap');
+      fakeNow += 11_000;
+      await fireBridgeResponses(win, 1, 3000);
+      assert.equal(diag.responsesSeen - seenBefore, 101);
+      assert.equal(diag.bridgeDropped, 150, 'drops surface in networkCaptureDiagnostics');
+    });
+  } finally {
+    console.log = realLog;
+  }
+}
+// Pattern drift fails here instead of silently in production.
+const literalFrom = (source, name) => {
+  const match = source.match(new RegExp(`const ${name} =\\s*(/.+/[a-z]*);`));
+  assert.ok(match, `page-bridge.js declares ${name}`);
+  return new Function(`return ${match[1]}`)();
+};
+const expectedPatterns = engine.networkCapturePatterns();
+assert.equal(literalFrom(bridgeSource, 'bodyPattern').source, expectedPatterns.body.source);
+assert.equal(literalFrom(bridgeSource, 'urlPattern').source, expectedPatterns.url.source);
+const injectedSources = injectedPatterns.map((pattern) => pattern.source);
+assert.ok(injectedSources.includes(expectedPatterns.body.source), 'injected body pattern drifted');
+assert.ok(injectedSources.includes(expectedPatterns.url.source), 'injected url pattern drifted');
 
 console.log('[5/5] Auditing package files, versions, and production hosts...');
 const out = path.join(root, 'dist', 'sourcecapsule-extension');

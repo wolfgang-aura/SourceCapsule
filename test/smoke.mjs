@@ -680,6 +680,19 @@ check('capture metadata normalizes tags and appears in the local library index',
   assert.ok(updated.includes('Saved because: Updated reason'));
 });
 
+check('library index update keeps $ sequences in a note literal', () => {
+  const entry = engine.libraryIndexEntry(
+    structuredClone(sampleModel),
+    engine.bundlePaths(structuredClone(sampleModel), { layout: 'date' }, '2026-07-02'),
+    { images: 0, videos: 0, incompleteMedia: 0, missingMedia: 0 }
+  );
+  const first = engine.updateLibraryIndexText('', entry);
+  const note = "Costs $& more, $$5, $' and $` too";
+  const updated = engine.updateLibraryIndexText(first, { ...entry, note });
+  assert.ok(updated.includes(`Saved because: ${note}`), updated);
+  assert.equal((updated.match(/<!-- sourcecapsule:item:/g) || []).length, 1);
+});
+
 check('capture note, tags, and thread metadata render in HTML, Markdown, and manifest', () => {
   const contextual = structuredClone(sampleModel);
   contextual.type = 'post';

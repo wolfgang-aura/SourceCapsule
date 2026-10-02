@@ -5,11 +5,31 @@
   const FOLDER_SOURCE = 'SourceCapsule:folder-picker';
   const FOLDER_REQUEST_EVENT = 'sourcecapsule:pick-directory';
   const MAX_BODY_CHARS = 6_000_000;
-  const MAX_MESSAGES = 200;
+  // Rate cap, not a lifetime cap: X is a long-lived SPA, and a cap that never resets
+  // silenced the bridge for the rest of the session. Responses over the cap are
+  // counted and reported on the next message. Keep identical to the other two tees
+  // (installUnsafeWindowNetworkCapture, networkCaptureBridgeSource).
+  const RATE_WINDOW_MS = 10000;
+  const MAX_PER_WINDOW = 100;
   if (window.__SourceCapsuleExtensionBridgeInstalled) return;
   window.__SourceCapsuleExtensionBridgeInstalled = true;
 
-  let sent = 0;
+  let windowStart = 0;
+  let inWindow = 0;
+  let dropped = 0;
+  const admit = () => {
+    const now = Date.now();
+    if (now - windowStart >= RATE_WINDOW_MS) {
+      windowStart = now;
+      inWindow = 0;
+    }
+    if (inWindow >= MAX_PER_WINDOW) {
+      dropped += 1;
+      return false;
+    }
+    inWindow += 1;
+    return true;
+  };
   // Must stay aligned with networkCapturePatterns() in sourcecapsule.user.js.
   // `conversation_id_str` is required for the reply archive: a page of plain
   // text replies matches none of the media/note/quote terms.
@@ -21,10 +41,10 @@
     /json|javascript|text/i.test(contentType || '') || urlPattern.test(url || '');
   const emit = (url, body, transport) => {
     try {
-      if (sent >= MAX_MESSAGES || !body) return;
+      if (!body) return;
       const text = String(body);
       if (!bodyPattern.test(text) && !/SearchTimeline|TweetDetail/i.test(url || '')) return;
-      sent += 1;
+      if (!admit()) return;
       window.postMessage(
         {
           source: SOURCE,
@@ -32,6 +52,7 @@
           type: 'response',
           url: String(url || '').slice(0, 4096),
           transport: `extension-main:${transport}`,
+          dropped,
           truncated: text.length > MAX_BODY_CHARS,
           body: text.slice(0, MAX_BODY_CHARS),
         },

@@ -84,13 +84,29 @@ function readChromeMessages(onMessage) {
 
 // ---- CLI side: named pipe -------------------------------------------------------
 
-const pending = new Map(); // id -> { socket, timer }
+// id -> { socket, timer, cliGone }. An entry is the capture lock: it lives until the
+// extension replies or the request timer fires, NOT until the CLI socket closes. The
+// extension keeps capturing after the CLI walks away, and dropping the entry then let a
+// second capture start on top of it and threw away the finished capsule's reply.
+const pending = new Map();
 
 function replyToCli(id, payload) {
   const entry = pending.get(id);
   if (!entry) return;
   clearTimeout(entry.timer);
   pending.delete(id);
+  if (entry.cliGone || entry.socket.destroyed) {
+    // Nobody to answer, but a published capsule must not vanish: keep its link in the log.
+    const link = payload && payload.viewUrl ? ` viewUrl=${payload.viewUrl}` : '';
+    log(
+      'reply for',
+      id,
+      'arrived after the CLI disconnected;',
+      `ok=${!!(payload && payload.ok)}`,
+      link
+    );
+    return;
+  }
   try {
     entry.socket.write(`${JSON.stringify(payload)}\n`);
     entry.socket.end();
@@ -102,6 +118,12 @@ function replyToCli(id, payload) {
 const server = net.createServer((socket) => {
   let buffer = '';
   socket.setEncoding('utf8');
+  socket.on('close', () => {
+    // Mark, never delete: the capture is still running and still owns the lock.
+    for (const entry of pending.values()) {
+      if (entry.socket === socket) entry.cliGone = true;
+    }
+  });
   socket.on('data', (chunk) => {
     buffer += chunk;
     let index;
@@ -120,23 +142,20 @@ const server = net.createServer((socket) => {
       const id = String(request.id || Date.now());
       if (pending.size > 0 && request.action !== 'ping') {
         socket.write(
-          `${JSON.stringify({ ok: false, error: 'busy', message: 'Another SourceCapsule capture is already running.' })}\n`
+          `${JSON.stringify({ ok: false, error: 'busy', message: 'Another SourceCapsule capture is already running.' })}
+`
         );
-        socket.end();
-        return;
+        // End this socket only if it has no request of its own still in flight, so a
+        // refusal can never cut off the capture it was refused because of.
+        const ownsPending = [...pending.values()].some((entry) => entry.socket === socket);
+        if (!ownsPending) socket.end();
+        continue;
       }
       const timeoutMs = Math.min(Number(request.timeoutMs) || REQUEST_MAX_MS, REQUEST_MAX_MS);
       const timer = setTimeout(() => {
         replyToCli(id, { ok: false, error: 'timeout', message: `No reply within ${timeoutMs}ms.` });
       }, timeoutMs);
-      pending.set(id, { socket, timer });
-      socket.on('close', () => {
-        const entry = pending.get(id);
-        if (entry) {
-          clearTimeout(entry.timer);
-          pending.delete(id);
-        }
-      });
+      pending.set(id, { socket, timer, cliGone: false });
       log('forwarding', id, request.action || 'unknown');
       sendToChrome({ ...request, id });
     }

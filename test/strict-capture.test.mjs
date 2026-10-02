@@ -165,6 +165,32 @@ await check('the CLI prints the refusal on its published contract', () => {
   assert.equal(parsed.error, 'needs_owner');
 });
 
+await check(
+  'an export arriving mid-export is refused instead of clearing shared media',
+  async () => {
+    const message = {
+      type: 'sourcecapsule:controller',
+      version: 1,
+      action: 'capture-share',
+      value: { expiryDays: 7 },
+    };
+    const first = engine.extensionControllerMessage(message);
+    // Automated capture arriving while the first export runs: a clear busy result.
+    const second = await engine.extensionControllerMessage(message);
+    assert.equal(second.ok, false);
+    assert.equal(second.error, 'busy', `expected busy, got: ${JSON.stringify(second)}`);
+    // A manual export gets a toast and no second run.
+    const manual = await engine.runExport('share', {});
+    assert.equal(manual, undefined);
+    const toast = document.getElementById('sourcecapsule-toast');
+    assert.match(toast.textContent, /still running/);
+    // The first export is unaffected and the guard is released afterwards.
+    assert.equal((await first).error, 'needs_owner');
+    const third = await engine.extensionControllerMessage(message);
+    assert.equal(third.error, 'needs_owner', 'the in-flight guard must release in finally');
+  }
+);
+
 await check('turning strict mode off is the only thing that changes the verdict', async () => {
   // Proves the refusal comes from the gate rather than from an unrelated crash: with
   // the same unrecoverable evidence and strict mode off, the run gets past the gate.

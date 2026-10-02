@@ -38,7 +38,11 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
    `capturedNoteTweets` and `<parentId, quotedId, quotedHandle>` triples into
    `capturedQuotedRefs`. Quote-only responses are included (the bridge body filter must always
    contain `quoted_status`), bodies are capped at 6 MB with explicit truncation diagnostics, and
-   full-body hashing prevents distinct same-envelope responses being deduplicated. Free source of
+   full-body hashing prevents distinct same-envelope responses being deduplicated. All three tee
+   copies (unsafeWindow, injected, `extension-src/page-bridge.js`) share one rate cap (100 per
+   10 s, never a lifetime cap) and report shed responses as `dropped`, surfaced in
+   `networkCaptureDiagnostics.bridgeDropped`; `test/extension.test.mjs` fails on pattern or cap
+   drift between them. Free source of
    truth — no extra network call, and it survives whatever the DOM later virtualizes away.
 3. **Syndication layer**: each embedded/quoted tweet is re-fetched by id from
    `cdn.syndication.twimg.com/tweet-result` (with retry + backoff; 404 stops early) and

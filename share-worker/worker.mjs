@@ -98,6 +98,18 @@ function mimeFromPath(path) {
   return '';
 }
 
+// The Worker decides how a stored file is served, never the uploader. Fixed paths get the
+// type for their name. Anything under media/ is served inline only when its extension is an
+// image or mp4 type; every other extension (.html, .svg, .bin, ...) comes back as an opaque
+// download.
+function servedType(path) {
+  const inferred = mimeFromPath(path);
+  if (path.startsWith('media/')) {
+    return /^(image\/(?!svg)|video\/mp4)/.test(inferred) ? inferred : '';
+  }
+  return inferred;
+}
+
 async function getMeta(env, id) {
   const object = await env.CAPSULES.get(metaKey(id));
   if (!object) return null;
@@ -266,9 +278,7 @@ async function uploadFile(request, env, id, path) {
     return json(request, { error: 'Capsule exceeds the 25 MB limit.' }, 413);
   }
   await env.CAPSULES.put(key, bytes, {
-    httpMetadata: {
-      contentType: request.headers.get('Content-Type') || 'application/octet-stream',
-    },
+    httpMetadata: { contentType: servedType(path) || 'application/octet-stream' },
   });
   return json(request, { ok: true, path, bytes: bytes.byteLength });
 }
@@ -303,7 +313,12 @@ function publicPath(pathname, id) {
   if (pathname === `${base}/manifest.json`) return 'manifest.json';
   const mediaPrefix = `${base}/media/`;
   if (pathname.startsWith(mediaPrefix)) {
-    const name = decodeURIComponent(pathname.slice(mediaPrefix.length));
+    let name;
+    try {
+      name = decodeURIComponent(pathname.slice(mediaPrefix.length));
+    } catch {
+      return '';
+    }
     return /^[-A-Za-z0-9._]{1,180}$/.test(name) ? `media/${name}` : '';
   }
   return '';
@@ -406,11 +421,10 @@ async function serveCapsule(request, env, ctx, id, path) {
   if (!object) return new Response('File not found.', { status: 404 });
   const headers = new Headers();
   object.writeHttpMetadata && object.writeHttpMetadata(headers);
-  const inferredType = mimeFromPath(path);
-  const storedType = headers.get('Content-Type') || '';
-  if (!storedType || storedType === 'application/octet-stream') {
-    if (inferredType) headers.set('Content-Type', inferredType);
-  }
+  // Ignore whatever type was stored with the object (older uploads kept the uploader's).
+  const type = servedType(path);
+  headers.set('Content-Type', type || 'application/octet-stream');
+  if (!type) headers.set('Content-Disposition', 'attachment');
   // R2's writeHttpMetadata omits Content-Length; without it, HEAD probes from
   // Slack, Discord, and Twitter link-preview crawlers can skip the asset (they
   // won't fetch an unknown-size body over their preview budget). Serve the size
@@ -426,12 +440,12 @@ async function serveCapsule(request, env, ctx, id, path) {
   headers.set('X-Robots-Tag', 'noindex, nofollow');
   headers.set('Referrer-Policy', 'no-referrer');
   headers.set('X-Content-Type-Options', 'nosniff');
-  if (path === 'content.html') {
-    headers.set(
-      'Content-Security-Policy',
-      "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"
-    );
-  }
+  headers.set(
+    'Content-Security-Policy',
+    path === 'content.html'
+      ? "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"
+      : "default-src 'none'; sandbox; frame-ancestors 'none'"
+  );
   return new Response(request.method === 'HEAD' ? null : object.body, { headers });
 }
 
@@ -446,7 +460,13 @@ async function createAllowed(request, env) {
 async function handleRequest(request, env, ctx) {
   if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders(request) });
   const url = new URL(request.url);
-  const segments = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+  let segments;
+  try {
+    segments = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+  } catch {
+    // A stray "%" or truncated escape is the caller's mistake, not a Worker failure.
+    return json(request, { error: 'Malformed path.' }, 400);
+  }
   if (request.method === 'POST' && url.pathname === '/api/capsules') {
     if (!(await createAllowed(request, env))) {
       return json(
@@ -493,25 +513,33 @@ async function cleanupExpired(env) {
     });
     const metaObjects = (page.objects || []).filter((object) => object.key.endsWith('/_meta.json'));
     for (const item of metaObjects) {
-      const custom = item.customMetadata || {};
-      if (custom.status === 'expired') {
-        // Second stage: a tombstone that has outlived its retention window is removed.
-        // Retention is measured from the capsule's original expiry, which is the moment
-        // its content was deleted.
-        if (tombstoneWornOut({ expiresAt: custom.expiresAt || '' }, now)) {
-          await deletePrefix(env, item.key.slice(0, -'_meta.json'.length));
+      // One bad capsule (a corrupt _meta.json, a failing delete) must not abort the sweep:
+      // it would stall on the same item every day and nothing behind it would ever expire.
+      try {
+        const custom = item.customMetadata || {};
+        if (custom.status === 'expired') {
+          // Second stage: a tombstone that has outlived its retention window is removed.
+          // Retention is measured from the capsule's original expiry, which is the moment
+          // its content was deleted.
+          if (tombstoneWornOut({ expiresAt: custom.expiresAt || '' }, now)) {
+            await deletePrefix(env, item.key.slice(0, -'_meta.json'.length));
+          }
+          continue;
         }
-        continue;
-      }
-      // Old objects written before expiresAt was mirrored into customMetadata still
-      // need a read; anything not yet due is skipped without one.
-      if (custom.expiresAt && Date.parse(custom.expiresAt) > now) continue;
-      const object = await env.CAPSULES.get(item.key);
-      if (!object) continue;
-      const meta = JSON.parse(await object.text());
-      meta._custom = object.customMetadata || {};
-      if (isExpired(meta)) {
-        await expireCapsule(env, { ...meta, expiredAt: new Date(now).toISOString() });
+        // Old objects written before expiresAt was mirrored into customMetadata still
+        // need a read; anything not yet due is skipped without one.
+        if (custom.expiresAt && Date.parse(custom.expiresAt) > now) continue;
+        const object = await env.CAPSULES.get(item.key);
+        if (!object) continue;
+        const meta = JSON.parse(await object.text());
+        meta._custom = object.customMetadata || {};
+        if (isExpired(meta)) {
+          await expireCapsule(env, { ...meta, expiredAt: new Date(now).toISOString() });
+        }
+      } catch (error) {
+        console.error(
+          `cleanupExpired: skipped ${item.key}: ${error && error.message ? error.message : error}`
+        );
       }
     }
     cursor = page.truncated ? page.cursor : undefined;

@@ -125,12 +125,16 @@ function handleMessage(message, _sender, sendResponse) {
       const headers = Array.from(response.headers.entries())
         .map(([name, value]) => `${name}: ${value}`)
         .join('\r\n');
+      // One representation only: sending both made a media response ~3x its size and
+      // could pass Chrome's 64 MiB message limit, which dropped the caller onto a
+      // CORS-blocked direct fetch.
       sendResponse({
         ok: true,
         status: response.status,
         responseHeaders: headers,
-        responseText: new TextDecoder().decode(bytes),
-        bodyBase64: bytesToBase64(bytes),
+        ...(request.responseType === 'arraybuffer'
+          ? { bodyBase64: bytesToBase64(bytes) }
+          : { responseText: new TextDecoder().decode(bytes) }),
       });
     })
     .catch((error) => sendResponse({ ok: false, error: error.message }))

@@ -165,7 +165,10 @@
     toastId: 'sourcecapsule-toast',
     styleId: 'sourcecapsule-style',
     debug: true,
-    debugEmbed: true,
+    // Page debug output (URL, text previews and raw HTML of every tweet in the column)
+    // is embedded in each local export when true. Off by default; a share upload never
+    // carries it regardless of this flag.
+    debugEmbed: false,
     // Scroll the page top-to-bottom before extracting so X's lazy/virtualized
     // media loads into the DOM. The #1 suspected cause of missing tweet images.
     forceLoad: true,
@@ -978,7 +981,8 @@
       'g'
     );
     const item = renderLibraryIndexItem(entry);
-    if (pattern.test(current)) return `${current.replace(pattern, item).trim()}\n`;
+    // Function replacer: a string replacement expands $$ $& $' $` found in a note.
+    if (pattern.test(current)) return `${current.replace(pattern, () => item).trim()}\n`;
     return `${current.trim()}\n\n${item}\n`;
   }
 
@@ -2691,13 +2695,18 @@
     const namePart = author.name || 'X post';
     const handlePart = author.handle ? ` (${author.handle})` : '';
 
+    // The exported post's OWN id, not the page's focused one: a reply that quotes the
+    // focused post carries that post's permalink in its quote card, and the default
+    // expected id would pick it.
+    const ownStatusId = tweetStatusId(tweetEl) || currentStatusId();
+    const ownSourceUrl = canonicalUrl(tweetEl, ownStatusId);
     const model = {
       type: 'post',
       title: `${namePart}${handlePart} on X`.trim(),
       heading: '',
       author,
-      sourceUrl: canonicalUrl(tweetEl),
-      publishedAt: publishedAtFromElement(tweetEl, statusIdFromSourceUrl(canonicalUrl(tweetEl))),
+      sourceUrl: ownSourceUrl,
+      publishedAt: publishedAtFromElement(tweetEl, statusIdFromSourceUrl(ownSourceUrl)),
       exportedAt: new Date().toISOString(),
       blocks,
     };
@@ -3116,7 +3125,27 @@
   }
 
   /** Decide inline-video vs poster fallback based on the size cap. */
+  async function inlineVideoPoster(block) {
+    if (!block.posterUrl) return;
+    try {
+      const { dataUri, size, mime, sha256 } = await fetchImageAsDataUri(block.posterUrl);
+      block.posterDataUri = dataUri;
+      block.posterSize = size;
+      block.posterMime = mime;
+      block.posterSha256 = sha256;
+    } catch (e) {
+      warn('poster inline failed:', e.message);
+    }
+  }
+
   async function inlineVideoBlock(block) {
+    // The MP4 is already inlined and only the poster is missing (rescue queued us for
+    // that). Retry the poster alone: re-downloading the MP4 could fail and downgrade a
+    // captured video to poster-only while its bytes were still sitting on the block.
+    if (block.dataUri && block.videoFileCaptured !== false) {
+      await inlineVideoPoster(block);
+      return;
+    }
     addVideoCandidatesToBlock(block, [
       videoCandidate(block.mp4Url, 'model:mp4Url'),
       videoCandidate(block.hlsUrl, 'model:hlsUrl'),
@@ -3124,17 +3153,7 @@
     if (block.mp4Url) applyVideoDimensions(block, videoDimensionsFromUrl(block.mp4Url));
     block.videoDownloadAttempts = [];
     // Always try to inline the poster image so there's something to show.
-    if (block.posterUrl) {
-      try {
-        const { dataUri, size, mime, sha256 } = await fetchImageAsDataUri(block.posterUrl);
-        block.posterDataUri = dataUri;
-        block.posterSize = size;
-        block.posterMime = mime;
-        block.posterSha256 = sha256;
-      } catch (e) {
-        warn('poster inline failed:', e.message);
-      }
-    }
+    await inlineVideoPoster(block);
 
     const candidates = sortVideoCandidates(block.videoCandidates || []).filter(
       (candidate) => candidate.kind === 'mp4'
@@ -5412,7 +5431,9 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
           if (response.status >= 200 && response.status < 300) {
             resolve(response.responseText || '');
           } else {
-            reject(new Error(`Share service returned HTTP ${response.status}.`));
+            const failure = new Error(`Share service returned HTTP ${response.status}.`);
+            failure.status = response.status;
+            reject(failure);
           }
         },
         onerror: (event) =>
@@ -5429,9 +5450,13 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       .join('/');
   }
 
+  // Returns a copy of the model whose media point at the shared capsule's URLs. The
+  // caller's model is left untouched: a local library save, or a retry after a failed
+  // share, still needs the real bytes, and the share URLs expire.
   function applySharedMediaUrls(model, urlById) {
-    const walk = (blocks) => {
-      (blocks || []).forEach((block) => {
+    const mapBlocks = (blocks) =>
+      (blocks || []).map((source) => {
+        const block = { ...source };
         const url = block._xaMediaId && urlById.get(block._xaMediaId);
         if (block.kind === 'image') {
           block.dataUri = url || '';
@@ -5441,12 +5466,11 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
           block.mode = url ? 'poster-only' : block.mode;
           block.posterDataUri = url || '';
         } else if (block.kind === 'quote' || block.kind === 'blockquote') {
-          walk(block.blocks);
+          block.blocks = mapBlocks(block.blocks);
         }
+        return block;
       });
-    };
-    walk(model.blocks);
-    return model;
+    return { ...model, blocks: mapBlocks(model.blocks) };
   }
 
   async function createShareLink(model, debugJson, expiryDays, onProgress) {
@@ -5500,13 +5524,16 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     pathById.forEach((path, mediaId) => {
       publicMedia.set(mediaId, `${created.viewUrl}/${path}`);
     });
-    applySharedMediaUrls(model, publicMedia);
-    const markdown = renderLlmMarkdown(model, debugJson, {
+    const sharedModel = applySharedMediaUrls(model, publicMedia);
+    // Never pass the page debug JSON to a share upload: it holds the page URL, previews of
+    // every tweet in the column (other people's replies included) and raw HTML. The
+    // manifest keeps only its non-page-content capture counters.
+    const markdown = renderLlmMarkdown(sharedModel, '', {
       mediaFiles: publicMedia,
       sharedLink: true,
     });
-    const html = assembleHtml(model, debugJson, { distribution: 'shared' });
-    const manifest = renderArchiveManifestJson(model, debugJson);
+    const html = assembleHtml(sharedModel, '', { distribution: 'shared' });
+    const manifest = renderArchiveManifestJson(sharedModel, '');
     const uploads = [
       { name: 'content.html', data: html, type: 'text/html;charset=utf-8' },
       { name: 'content.md', data: markdown, type: 'text/markdown;charset=utf-8' },
@@ -5696,6 +5723,9 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
           counts: (error.assessment && error.assessment.counts) || {},
         };
       }
+      if (error && error.code === 'busy') {
+        return { ok: false, error: 'busy', message: error.message };
+      }
       return { ok: false, error: 'capture_failed', message: error.message };
     }
   }
@@ -5845,11 +5875,21 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       forgetShareLink(record && record.id);
       return { remoteDeleted: false };
     }
-    await gmHttp({
-      method: 'DELETE',
-      url: record.deleteUrl,
-      headers: { Authorization: `Bearer ${record.deleteToken}` },
-    });
+    try {
+      await gmHttp({
+        method: 'DELETE',
+        url: record.deleteUrl,
+        headers: { Authorization: `Bearer ${record.deleteToken}` },
+      });
+    } catch (error) {
+      // 404/410 means the capsule is already gone (expired, swept, or deleted elsewhere).
+      // Keeping the local record would leave a "Delete link" button that can never succeed.
+      if (error && (error.status === 404 || error.status === 410)) {
+        forgetShareLink(record.id);
+        return { remoteDeleted: false, alreadyGone: true };
+      }
+      throw error;
+    }
     forgetShareLink(record.id);
     return { remoteDeleted: true };
   }
@@ -5890,24 +5930,95 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     };
   }
 
+  /**
+   * The `sourcecapsule` database is SHARED: the library folder handle lives in `handles`
+   * and the reply archive lives in `reply-archive`. Both openers must agree on the
+   * version, because a fixed-version open fails with VersionError once the other store
+   * has bumped it. So this opens at whatever version exists and upgrades (version + 1)
+   * only when a needed store is missing, creating every missing store in one upgrade.
+   * Installs already at version 2 or higher keep working untouched.
+   */
+  function openSharedIdb(factory) {
+    const idb =
+      factory ||
+      (typeof indexedDB !== 'undefined' && indexedDB) ||
+      (typeof window !== 'undefined' && window.indexedDB) ||
+      null;
+    if (!idb) return Promise.reject(new Error('indexedDB is not available'));
+    const required = [IDB_STORE, REPLY_ARCHIVE_TABLE];
+    const complete = (db) => required.every((name) => db.objectStoreNames.contains(name));
+    const openAt = (version) =>
+      new Promise((resolve, reject) => {
+        let request;
+        try {
+          request = version ? idb.open(IDB_NAME, version) : idb.open(IDB_NAME);
+        } catch (error) {
+          reject(error);
+          return;
+        }
+        request.onupgradeneeded = () => {
+          const db = request.result;
+          required.forEach((name) => {
+            if (!db.objectStoreNames.contains(name)) db.createObjectStore(name);
+          });
+        };
+        request.onsuccess = () => {
+          const db = request.result;
+          // Let another tab's upgrade proceed instead of blocking behind this connection.
+          db.onversionchange = () => db.close();
+          resolve(db);
+        };
+        request.onerror = () => reject(request.error || new Error('indexedDB open failed'));
+      });
+    return (async () => {
+      const db = await openAt();
+      if (complete(db)) return db;
+      const nextVersion = (Number(db.version) || 1) + 1;
+      db.close();
+      try {
+        return await openAt(nextVersion);
+      } catch (error) {
+        // Another tab upgraded between our two opens; its version already has the stores.
+        if (error && error.name === 'VersionError') {
+          const retry = await openAt();
+          if (complete(retry)) return retry;
+          retry.close();
+        }
+        throw error;
+      }
+    })();
+  }
+
   function idbOpen() {
-    return new Promise((resolve, reject) => {
-      const req = indexedDB.open(IDB_NAME, 1);
-      req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
+    return openSharedIdb();
   }
 
   function idbRun(mode, fn) {
     return idbOpen().then(
       (db) =>
         new Promise((resolve, reject) => {
-          const tx = db.transaction(IDB_STORE, mode);
-          const store = tx.objectStore(IDB_STORE);
-          const req = fn(store);
-          tx.oncomplete = () => resolve(req && req.result);
-          tx.onerror = () => reject(tx.error);
+          let tx;
+          let req;
+          try {
+            tx = db.transaction(IDB_STORE, mode);
+            req = fn(tx.objectStore(IDB_STORE));
+          } catch (error) {
+            db.close();
+            reject(error);
+            return;
+          }
+          tx.oncomplete = () => {
+            db.close();
+            resolve(req && req.result);
+          };
+          tx.onerror = () => {
+            db.close();
+            reject(tx.error);
+          };
+          tx.onabort = () => {
+            db.close();
+            reject(tx.error || new Error('indexedDB transaction aborted'));
+          };
         })
     );
   }
@@ -6818,6 +6929,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     searchTimelineReplies: 0,
     truncatedResponses: 0,
     lastTruncatedUrl: '',
+    // Responses the page-side tee shed over its rate cap (cumulative, reported by it).
+    bridgeDropped: 0,
     errors: [],
     lastUrls: [],
   };
@@ -7028,6 +7141,17 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * `t.quoted_status.user.screen_name`) and the GraphQL result shape
    * (`t.quoted_status_result.result.core.user_results.result.legacy.screen_name`).
    */
+  /**
+   * The handle of a GraphQL `user_results.result`. X moved screen_name from the user's
+   * `legacy` block to `result.core`; read the newest shape first and fall back.
+   */
+  function screenNameFromUserResult(userResult) {
+    const user = (userResult && (userResult.user || userResult)) || {};
+    return String(
+      (user.core && user.core.screen_name) || (user.legacy && user.legacy.screen_name) || ''
+    );
+  }
+
   function quotedRefsFromCapturedBody(body) {
     const raw = String(body || '').trim();
     if (!raw || (raw[0] !== '{' && raw[0] !== '[')) return [];
@@ -7068,25 +7192,21 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       if (gqResult) {
         const qLegacy = gqResult.legacy || {};
         const qId = gqResult.rest_id || qLegacy.id_str || '';
-        const userLegacy =
-          (gqResult.core &&
-            gqResult.core.user_results &&
-            gqResult.core.user_results.result &&
-            gqResult.core.user_results.result.legacy) ||
-          {};
-        record(parentId, qId, userLegacy.screen_name);
+        record(
+          parentId,
+          qId,
+          screenNameFromUserResult(gqResult.core && gqResult.core.user_results?.result)
+        );
       }
       // Legacy shape (syndication-ish): quoted_status_id_str + quoted_status.user.screen_name.
       if (legacy.quoted_status_id_str) {
-        const qUser =
-          (item.quoted_status && item.quoted_status.user) ||
-          (item.quoted_status &&
-            item.quoted_status.core &&
-            item.quoted_status.core.user_results &&
-            item.quoted_status.core.user_results.result &&
-            item.quoted_status.core.user_results.result.legacy) ||
-          {};
-        record(parentId, legacy.quoted_status_id_str, qUser.screen_name);
+        const quotedStatus = item.quoted_status;
+        const qHandle =
+          (quotedStatus && quotedStatus.user && quotedStatus.user.screen_name) ||
+          screenNameFromUserResult(
+            quotedStatus && quotedStatus.core && quotedStatus.core.user_results?.result
+          );
+        record(parentId, legacy.quoted_status_id_str, qHandle);
       }
       Object.keys(item).forEach((key) => walk(item[key]));
     };
@@ -7199,7 +7319,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         // `user_results.result.core`. Live capture returned empty handles for every
         // reply until this fallback existed; check both, newest shape first.
         const userCore = (userResult && userResult.core) || {};
-        const handle = String(userCore.screen_name || userLegacy.screen_name || '');
+        const handle = screenNameFromUserResult(userResult);
         const displayName = String(userCore.name || userLegacy.name || '');
         // GraphQL delivers reply bodies with &, <, > HTML-encoded, exactly like
         // syndication does. Live archive Markdown showed "-&gt;" inside real replies.
@@ -7215,25 +7335,27 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         const text = noteText || previewText;
         const unavailable = /Tombstone|Unavailable/i.test(String(value.__typename || ''));
         const existing = records.get(id);
-        if (
-          !existing ||
-          (!existing.handle && handle) ||
-          String(existing.text || '').length < text.length
-        ) {
+        // Same rule as mergeReplyArchiveRecords: longer text wins, and a field that
+        // already holds content is never replaced by an empty one.
+        const textWins = !existing || text.length > String(existing.text || '').length;
+        if (textWins || (!existing.handle && handle)) {
+          const prior = existing || {};
+          const bestHandle = handle || prior.handle || '';
           records.set(id, {
-            ...(existing || {}),
+            ...prior,
             id,
             conversationId,
-            handle,
-            displayName: displayName || (existing && existing.displayName) || '',
-            url: handle
-              ? `https://x.com/${handle}/status/${id}`
+            handle: bestHandle,
+            displayName: displayName || prior.displayName || '',
+            url: bestHandle
+              ? `https://x.com/${bestHandle}/status/${id}`
               : `https://x.com/i/web/status/${id}`,
-            text: text.slice(0, REPLY_ARCHIVE_TEXT_MAX),
-            truncated: !noteText && /[…]$/.test(previewText),
-            createdAt: safeIsoTime((legacy && legacy.created_at) || ''),
-            parentId: String((legacy && legacy.in_reply_to_status_id_str) || ''),
-            mediaLinks: replyMediaLinksFromLegacy(legacy),
+            text: textWins ? text.slice(0, REPLY_ARCHIVE_TEXT_MAX) : prior.text,
+            truncated: textWins ? !noteText && /[…]$/.test(previewText) : Boolean(prior.truncated),
+            createdAt: safeIsoTime((legacy && legacy.created_at) || '') || prior.createdAt || '',
+            parentId:
+              String((legacy && legacy.in_reply_to_status_id_str) || '') || prior.parentId || '',
+            mediaLinks: mergeReplyMediaLinks(prior.mediaLinks, replyMediaLinksFromLegacy(legacy)),
             unavailable,
             unavailableReason: unavailable ? String(value.__typename || 'unavailable') : '',
           });
@@ -7255,14 +7377,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     ) {
       capturedSearchTimelineReplies.delete(capturedSearchTimelineReplies.keys().next().value);
     }
-    capturedSearchTimelineReplies.set(key, {
-      ...existing,
-      ...record,
-      handle: record.handle || existing.handle || '',
-      url: record.url || existing.url || '',
-      text: record.text || existing.text || '',
-      seenAt: new Date().toISOString(),
-    });
+    // Merge by the archive's own rule: longer text wins and a populated field is never
+    // overwritten by an empty one (a later truncated preview must not clobber a note).
+    const [merged] = mergeReplyArchiveRecords(existing.id ? [existing] : [], [record]);
+    capturedSearchTimelineReplies.set(key, { ...merged, seenAt: new Date().toISOString() });
     networkCaptureDiagnostics.searchTimelineReplies = capturedSearchTimelineReplies.size;
   }
 
@@ -7362,6 +7480,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           : 'injected';
       return [];
     }
+    if (payload.type === 'response' && Number.isFinite(payload.dropped)) {
+      networkCaptureDiagnostics.bridgeDropped = Math.max(
+        networkCaptureDiagnostics.bridgeDropped,
+        payload.dropped
+      );
+    }
     const signature = networkCaptureSignature(payload);
     if (networkCapturePayloadSignatures.has(signature)) return [];
     networkCapturePayloadSignatures.add(signature);
@@ -7377,10 +7501,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     }
     const source = `network:${payload.transport || 'unknown'}`;
     const candidates = videoCandidatesFromCapturedBody(payload.body || '', source);
-    if (candidates.length) {
-      networkCaptureDiagnostics.interestingResponses += 1;
-      networkCaptureDiagnostics.candidates += candidates.length;
-    }
+    if (candidates.length) networkCaptureDiagnostics.candidates += candidates.length;
     candidates.forEach((candidate) =>
       rememberNetworkVideoCandidate(candidate, {
         url: payload.url || '',
@@ -7399,6 +7520,17 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (quotedRefs.length) {
       quotedRefs.forEach(rememberCapturedQuotedRef);
       log('captured quoted-post refs for', quotedRefs.length, 'parent(s) from', payload.url || '');
+    }
+    // "Interesting" is the signal that passive capture saw X's own data for this page,
+    // which the unattended wait and its warning rely on. A plain text post carries no
+    // video, note or quote, so a TweetDetail / TweetResultByRestId body counts by itself.
+    if (
+      candidates.length ||
+      notes.length ||
+      quotedRefs.length ||
+      /TweetDetail|TweetResultByRestId/i.test(payload.url || '')
+    ) {
+      networkCaptureDiagnostics.interestingResponses += 1;
     }
     if (/SearchTimeline|TweetDetail|TweetResult/i.test(payload.url || '')) {
       const replies = searchTimelineReplyRecordsFromCapturedBody(payload.body || '');
@@ -8540,6 +8672,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         (inlineParent && inlineParent.user && inlineParent.user.screen_name) ||
         '';
       let parentData = null;
+      // Only a 404 is X saying the parent is gone. Any other failure (5xx,
+      // timeout, network) says nothing about the parent, so it must not be
+      // reported as deleted.
+      let parentFetchInconclusive = false;
       try {
         // Full fetch first: the inline `parent` payload is a slimmer shape that
         // can lack media; fall back to it only when the id fetch fails.
@@ -8547,6 +8683,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       } catch (e) {
         warn('reply-context parent fetch failed for', parentId, '-', e.message);
         parentData = inlineParent;
+        parentFetchInconclusive = !(e && e.status === 404);
       }
       if (
         parentData &&
@@ -8562,13 +8699,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         model.blocks.unshift(card);
         log('reply context: prepended parent post', parentId);
       } else {
-        // We KNOW it is a reply (X said so), but the parent is gone on X.
+        // We KNOW it is a reply (X said so). Say "gone" only when X answered
+        // 404; otherwise be honest that the parent just could not be fetched.
+        const who = parentHandle ? `a post by @${parentHandle}` : 'a post';
         model.blocks.unshift({
           kind: 'quote-tombstone',
           replyContext: true,
-          notice: parentHandle
-            ? `This post replies to a post by @${parentHandle} that is no longer available on X.`
-            : 'This post replies to a post that is no longer available on X.',
+          notice: parentFetchInconclusive
+            ? `This post replies to ${who}, but that post could not be fetched when this was saved.`
+            : `This post replies to ${who} that is no longer available on X.`,
           sourceUrl: model.sourceUrl,
         });
       }
@@ -9189,7 +9328,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   }
 
   function csvCell(value) {
-    const text = String(value == null ? '' : value);
+    let text = String(value == null ? '' : value);
+    // Spreadsheet formula injection: a reply is attacker-controlled text, and a cell that
+    // starts with = + - @ tab or CR runs as a formula when the archive is opened in Excel
+    // or Sheets. A leading single quote makes it plain text (OWASP guidance). Numbers
+    // (counts) are ours and never start with a sign we did not write.
+    if (typeof value === 'string' && /^[=+\-@\t\r]/.test(text)) text = `'${text}`;
     return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   }
 
@@ -9285,7 +9429,6 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   // -------------------------------------------------------------------------
 
   const REPLY_ARCHIVE_KEY_PREFIX = 'sourcecapsule:reply-archive:';
-  const REPLY_ARCHIVE_DB = 'sourcecapsule';
   const REPLY_ARCHIVE_TABLE = 'reply-archive';
 
   /**
@@ -9438,39 +9581,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       (typeof window !== 'undefined' && window.indexedDB) ||
       null;
     if (!idb) return null;
-    const openAt = (version) =>
-      new Promise((resolve, reject) => {
-        let request;
-        try {
-          request = version ? idb.open(REPLY_ARCHIVE_DB, version) : idb.open(REPLY_ARCHIVE_DB);
-        } catch (error) {
-          reject(error);
-          return;
-        }
-        request.onupgradeneeded = () => {
-          const db = request.result;
-          if (!db.objectStoreNames.contains(REPLY_ARCHIVE_TABLE)) {
-            db.createObjectStore(REPLY_ARCHIVE_TABLE);
-          }
-        };
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error || new Error('indexedDB open failed'));
-      });
-    /**
-     * The `sourcecapsule` database is SHARED - the library root folder handle already
-     * lives in it under `handles`, created at version 1. Opening at a hard-coded
-     * version 1 therefore never fires onupgradeneeded on an existing install, the
-     * `reply-archive` store is never created, and every write dies with NotFoundError.
-     * So: open at whatever version exists, and only if our store is missing reopen at
-     * version+1 to add it (an upgrade preserves the stores already there).
-     */
-    const open = async () => {
-      const db = await openAt();
-      if (db.objectStoreNames.contains(REPLY_ARCHIVE_TABLE)) return db;
-      const nextVersion = (Number(db.version) || 1) + 1;
-      db.close();
-      return openAt(nextVersion);
-    };
+    // Shared with the library's handle store: one opener, so neither can strand the other.
+    const open = () => openSharedIdb(idb);
     const run = (mode, fn) =>
       open().then(
         (db) =>
@@ -9547,6 +9659,19 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         const root = String(rootStatusId || '');
         const prior = await store.load(root);
         const merged = mergeReplyArchiveRecords(prior.records, records || []);
+        if (prior.storageError) {
+          // load() answers an unreadable archive with `records: []`. Writing `merged` now
+          // would replace everything stored with just this pass, so refuse and report.
+          return {
+            ok: false,
+            backend: store.name,
+            records: merged,
+            replyCount: merged.length,
+            approxBytes: 0,
+            storageError: `existing archive could not be read, so nothing was overwritten: ${prior.storageError}`,
+            updatedAt: '',
+          };
+        }
         const payload = {
           contractVersion: 3,
           rootStatusId: root,
@@ -10981,6 +11106,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return count;
   }
 
+  // One export at a time. Every export calls resetMediaState(), which clears the shared
+  // harvested media and the syndication cache; a second export starting mid-run would pull
+  // those out from under the first and ship it with holes.
+  let exportInFlight = false;
+
   async function runExport(
     exportType,
     {
@@ -10998,6 +11128,18 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       showOpenPostFirstNotice(targetTweetEl, openFirstReason);
       return;
     }
+    if (exportInFlight) {
+      if (automation) {
+        const busy = new Error('Another SourceCapsule export is still running in this tab.');
+        busy.code = 'busy';
+        throw busy;
+      }
+      showToast('Another export is still running. Wait for it to finish, then try again.', {
+        error: true,
+      });
+      return;
+    }
+    exportInFlight = true;
     const restoreLabel = trigger ? trigger.textContent : '';
     const setBusy = (busy) => {
       if (!trigger) return;
@@ -11376,6 +11518,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       if (automation) throw e;
       showToast(`Export failed: ${e.message}`, { error: true });
     } finally {
+      exportInFlight = false;
       setBusy(false);
     }
   }
@@ -11581,16 +11724,38 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const patterns = networkCapturePatterns();
     const shouldRead = (url, contentType) =>
       patterns.contentType.test(contentType || '') || patterns.url.test(url || '');
+    // Rate cap, not a lifetime cap (see extension-src/page-bridge.js); keep identical.
+    const RATE_WINDOW_MS = 10000;
+    const MAX_PER_WINDOW = 100;
+    let windowStart = 0;
+    let inWindow = 0;
+    let dropped = 0;
+    const admit = () => {
+      const now = Date.now();
+      if (now - windowStart >= RATE_WINDOW_MS) {
+        windowStart = now;
+        inWindow = 0;
+      }
+      if (inWindow >= MAX_PER_WINDOW) {
+        dropped += 1;
+        return false;
+      }
+      inWindow += 1;
+      return true;
+    };
     const emit = (url, body, transport) => {
       try {
         if (!body) return;
         const text = String(body);
         if (!patterns.body.test(text) && !/SearchTimeline|TweetDetail/i.test(url || '')) return;
+        if (!admit()) return;
         handleNetworkCapturePayload({
           source: `${APP}:network-capture`,
+          contractVersion: 1,
           type: 'response',
           url: String(url || ''),
           transport: `${transport}:unsafeWindow`,
+          dropped,
           truncated: text.length > CONFIG.video.networkCaptureMaxChars,
           body: text.slice(0, CONFIG.video.networkCaptureMaxChars),
         });
@@ -11698,8 +11863,25 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const SOURCE = 'SourceCapsule:network-capture';
       if (window.__SourceCapsuleNetworkCaptureInstalled) return;
       window.__SourceCapsuleNetworkCaptureInstalled = true;
-      const MAX_MESSAGES = 200;
-      let sent = 0;
+      // Rate cap, not a lifetime cap (see extension-src/page-bridge.js); keep identical.
+      const RATE_WINDOW_MS = 10000;
+      const MAX_PER_WINDOW = 100;
+      let windowStart = 0;
+      let inWindow = 0;
+      let dropped = 0;
+      const admit = () => {
+        const now = Date.now();
+        if (now - windowStart >= RATE_WINDOW_MS) {
+          windowStart = now;
+          inWindow = 0;
+        }
+        if (inWindow >= MAX_PER_WINDOW) {
+          dropped += 1;
+          return false;
+        }
+        inWindow += 1;
+        return true;
+      };
       const bodyPattern = new RegExp(
         'video_info|variants|video\\.twimg\\.com|amplify_video|ext_tw_video|tweet_video|note_tweet|quoted_status|conversation_id_str',
         'i'
@@ -11714,16 +11896,18 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         /json|javascript|text/i.test(contentType || '') || interestingUrl(url);
       const emit = (url, body, transport) => {
         try {
-          if (sent >= MAX_MESSAGES || !body) return;
+          if (!body) return;
           const text = String(body);
           if (!interestingBody(text) && !/SearchTimeline|TweetDetail/i.test(url || '')) return;
-          sent += 1;
+          if (!admit()) return;
           window.postMessage(
             {
               source: SOURCE,
+              contractVersion: 1,
               type: 'response',
               url: String(url || ''),
               transport,
+              dropped,
               truncated: text.length > limit,
               body: text.slice(0, limit),
             },
@@ -11815,6 +11999,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         window.postMessage(
           {
             source: SOURCE,
+            contractVersion: 1,
             type: 'installed',
             transport: 'injected',
           },
@@ -11953,10 +12138,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       setShareLinks,
       rememberShareLink,
       forgetShareLink,
+      deleteSharedCapsule,
       shareLinkExpired,
       aiLinkReceiptText,
       showRecentShareLinks,
       renderArchiveManifestJson,
+      createShareLink,
       EXPORT_TYPES,
       POST_EXPORT_TYPES,
       THREAD_EXPORT_TYPES,
@@ -11986,6 +12173,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       replyArchiveCsv,
       replyMediaLinksFromLegacy,
       indexedDbReplyArchiveBackend,
+      openSharedIdb,
       loadReplyArchiveForPost,
       enrichReplyArchiveViaSyndication,
       downloadReplyArchive,
@@ -12008,6 +12196,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       buildDiagnosticBundle,
       confirmShipDespiteIncomplete,
       extensionControllerMessage,
+      runExport,
       folderPickerAvailable,
       pickDirectoryViaExtensionBridge,
       handleFromSourceUrl,
@@ -12026,6 +12215,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       validateNetworkCapturePayload,
       networkCapturePatterns,
       networkCaptureSignature,
+      networkCaptureBridgeSource,
+      installUnsafeWindowNetworkCapture,
+      networkCaptureDiagnostics,
       ensureButton,
       // Long-form (note) full-text recovery from passively captured GraphQL payloads.
       noteTweetsFromCapturedBody,

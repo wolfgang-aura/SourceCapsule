@@ -1049,6 +1049,30 @@ check('buildModelForPost uses the focused post permalink as sourceUrl', () => {
   assert.equal(model.publishedAt, '2026-06-25T12:00:00.000Z');
 });
 
+check('buildModelForPost keeps its own permalink when it quotes the focused post', () => {
+  const column = document.querySelector('[data-testid="primaryColumn"]');
+  const reply = document.createElement('article');
+  reply.setAttribute('data-testid', 'tweet');
+  reply.setAttribute('role', 'article');
+  reply.innerHTML = `
+    <div data-testid="User-Name"><a href="/replier"><span>Replier</span></a><a href="/replier"><span>@replier</span></a></div>
+    <div data-testid="tweetText" lang="en"><span>My reply quoting the focused post.</span></div>
+    <div role="link" tabindex="0">
+      <div data-testid="User-Name"><a href="/Vegahao"><span>Vega Hao</span></a><a href="/Vegahao"><span>@Vegahao</span></a></div>
+      <div data-testid="tweetText" lang="en"><span>Quoted focused text.</span></div>
+      <a href="/Vegahao/status/1790000000000000000"><time datetime="2026-06-25T12:00:00Z">Jun 25</time></a>
+    </div>
+    <a href="/replier/status/1790000000000009999"><time datetime="2026-06-26T08:00:00Z">Jun 26</time></a>`;
+  column.appendChild(reply);
+  try {
+    const replyModel = engine.buildModelForPost(reply);
+    assert.equal(replyModel.sourceUrl, 'https://x.com/replier/status/1790000000000009999');
+    assert.equal(replyModel.publishedAt, '2026-06-26T08:00:00.000Z');
+  } finally {
+    reply.remove();
+  }
+});
+
 check('buildModelForPost also captures the image', () => {
   const images = allBlocks(model.blocks).filter((b) => b.kind === 'image');
   const videos = allBlocks(model.blocks).filter((b) => b.kind === 'video');
@@ -2078,6 +2102,28 @@ check('noteTweetParagraphBlocks splits paragraphs, escapes, and linkifies t.co u
   );
 });
 
+check('a plain text TweetDetail body still counts as an interesting capture response', () => {
+  const diag = engine.networkCaptureDiagnostics;
+  const before = diag.interestingResponses;
+  engine.handleNetworkCapturePayload({
+    source: 'SourceCapsule:network-capture',
+    type: 'response',
+    url: 'https://x.com/i/api/graphql/abc/TweetDetail',
+    transport: 'fetch:test',
+    body: JSON.stringify({ data: { conversation_id_str: 'plain-1', note: 'text only post' } }),
+  });
+  assert.equal(diag.interestingResponses, before + 1);
+  // An unrelated endpoint with no video, note or quote stays uninteresting.
+  engine.handleNetworkCapturePayload({
+    source: 'SourceCapsule:network-capture',
+    type: 'response',
+    url: 'https://x.com/i/api/graphql/abc/HomeTimeline',
+    transport: 'fetch:test',
+    body: JSON.stringify({ data: { unrelated: 'plain-2' } }),
+  });
+  assert.equal(diag.interestingResponses, before + 1);
+});
+
 await checkAsync(
   'syndication pass swaps the note preview for network-captured full text',
   async () => {
@@ -2487,6 +2533,22 @@ check('quotedRefsFromCapturedBody harvests parent -> quoted refs from GraphQL bo
   // Non-JSON and refless bodies are ignored quietly.
   assert.equal(engine.quotedRefsFromCapturedBody('#EXTM3U\nvideo').length, 0);
   assert.equal(engine.quotedRefsFromCapturedBody('{"data":{"no":true}}').length, 0);
+});
+
+check('quotedRefsFromCapturedBody reads the quoted handle from X core.screen_name too', () => {
+  const body = JSON.stringify({
+    rest_id: '3000000000000000001',
+    legacy: { quoted_status_id_str: '3000000000000000002' },
+    quoted_status_result: {
+      result: {
+        rest_id: '3000000000000000002',
+        core: { user_results: { result: { core: { screen_name: 'new_shape_user' } } } },
+      },
+    },
+  });
+  const refs = engine.quotedRefsFromCapturedBody(body);
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0].quotedHandle, 'new_shape_user');
 });
 
 check('quotedRefsFromCapturedBody also accepts the legacy quoted_status.user shape', () => {
@@ -3205,6 +3267,83 @@ check('media rescue retries never-attempted avatars from repaired quote cards', 
   assert.equal(avatarTasks.length, 2, 'both the failed and the never-attempted avatar retried');
 });
 
+await checkAsync(
+  'media rescue retries only the poster of a video whose MP4 is inlined',
+  async () => {
+    const requested = [];
+    global.GM_xmlhttpRequest = (options) => {
+      requested.push(options.url);
+      options.onload({ status: 404, response: null, responseHeaders: '' });
+    };
+    const block = {
+      kind: 'video',
+      mode: 'offline-video',
+      url: 'https://video.twimg.com/v.mp4',
+      mp4Url: 'https://video.twimg.com/v.mp4',
+      dataUri: 'data:video/mp4;base64,AAAA',
+      videoFileCaptured: true,
+      posterUrl: 'https://pbs.twimg.com/ext_tw_video_thumb/1/img/p.jpg',
+    };
+    const model = { type: 'post', author: {}, blocks: [block] };
+    try {
+      await engine.rescueMissingMedia(model);
+    } finally {
+      delete global.GM_xmlhttpRequest;
+    }
+    assert.ok(requested.length > 0, 'the poster was retried');
+    assert.ok(
+      requested.every((url) => !url.includes('.mp4')),
+      'the inlined MP4 is not downloaded again'
+    );
+    assert.equal(block.mode, 'offline-video', 'an inlined video is never downgraded');
+    assert.equal(block.videoFileCaptured, true);
+    assert.equal(block.dataUri, 'data:video/mp4;base64,AAAA');
+  }
+);
+
+await checkAsync(
+  'deleting a shared capsule the Worker no longer has forgets the record',
+  async () => {
+    const created = (id) => ({
+      id,
+      viewUrl: `https://share.example/c/${id}`,
+      markdownUrl: `https://share.example/c/${id}.md`,
+      deleteUrl: `https://share.example/api/capsules/${id}`,
+      deleteToken: 'token',
+      expiresAt: '2030-01-01T00:00:00.000Z',
+    });
+    const status = { value: 404 };
+    global.GM_xmlhttpRequest = (options) =>
+      options.onload({
+        status: status.value,
+        responseText: '',
+        response: null,
+        responseHeaders: '',
+      });
+    try {
+      const gone = engine.rememberShareLink(created('a'.repeat(32)), { title: 'Gone' });
+      for (const code of [404, 410]) {
+        status.value = code;
+        engine.rememberShareLink(created('a'.repeat(32)), { title: 'Gone' });
+        await engine.deleteSharedCapsule(gone);
+        assert.ok(!engine.getShareLinks().some((r) => r.id === gone.id), `HTTP ${code} forgets it`);
+      }
+      // Any other failure keeps the record so the owner can retry.
+      const kept = engine.rememberShareLink(created('b'.repeat(32)), { title: 'Kept' });
+      status.value = 500;
+      await assert.rejects(() => engine.deleteSharedCapsule(kept), /HTTP 500/);
+      assert.ok(
+        engine.getShareLinks().some((r) => r.id === kept.id),
+        'HTTP 500 keeps the record'
+      );
+      status.value = 404;
+      await engine.deleteSharedCapsule(kept);
+    } finally {
+      delete global.GM_xmlhttpRequest;
+    }
+  }
+);
+
 // ---------------------------------------------------------------------------
 // Quoted-post tombstones: the quoted post is gone on X itself (banned/deleted).
 // Captured as an honest note, never a strict-gate blocker.
@@ -3467,6 +3606,37 @@ await checkAsync('reply context leaves an honest note when the parent is gone on
   // Never a blocker - the parent is gone on X itself.
   assert.equal(engine.assessExportCompleteness(model).verdict, 'clean');
 });
+
+await checkAsync(
+  'reply context does not claim the parent is gone when the fetch merely failed',
+  async () => {
+    for (const status of [500, undefined]) {
+      const model = {
+        type: 'post',
+        sourceUrl: 'https://x.com/replier/status/200',
+        blocks: [{ kind: 'paragraph', html: 'reply' }],
+      };
+      await engine.enrichReplyContextViaSyndication(model, null, async (id) => {
+        if (id === '200') {
+          return {
+            __typename: 'Tweet',
+            text: 'reply',
+            in_reply_to_status_id_str: '100',
+            in_reply_to_screen_name: 'someone',
+          };
+        }
+        const error = new Error(status ? `syndication: HTTP ${status}` : 'network timeout');
+        if (status) error.status = status;
+        throw error;
+      });
+      const note = model.blocks[0];
+      assert.equal(note.kind, 'quote-tombstone');
+      assert.doesNotMatch(note.notice, /no longer available/);
+      assert.match(note.notice, /could not be fetched/);
+      assert.match(note.notice, /@someone/);
+    }
+  }
+);
 
 await checkAsync('reply context skips a parent already captured in the thread', async () => {
   const model = {
@@ -3746,6 +3916,34 @@ await checkAsync(
   }
 );
 
+await checkAsync(
+  'reply archive save never overwrites a stored archive it failed to read',
+  async () => {
+    const memory = new Map();
+    let failReads = false;
+    const store = engine.createReplyArchiveStore({
+      async get(key) {
+        if (failReads) throw new Error('transient read failure');
+        return memory.get(key) || null;
+      },
+      async set(key, value) {
+        memory.set(key, value);
+      },
+      name: 'flaky',
+    });
+    const root = '2000000000000000000';
+    await store.save(root, [{ id: '2000000000000000101', text: 'Earlier archived reply.' }]);
+    failReads = true;
+    const saved = await store.save(root, [{ id: '2000000000000000102', text: 'New pass.' }]);
+    assert.equal(saved.ok, false);
+    assert.match(saved.storageError, /transient read failure/);
+    failReads = false;
+    const loaded = await store.load(root);
+    assert.equal(loaded.records.length, 1, 'the stored archive must be untouched');
+    assert.equal(loaded.records[0].id, '2000000000000000101');
+  }
+);
+
 check('reply archive exports the actual replies, threaded, with media links', () => {
   const archive = engine.buildReplyArchive({
     rootStatusId: '2000000000000000000',
@@ -3807,6 +4005,39 @@ check('reply archive exports the actual replies, threaded, with media links', ()
   assert.match(csv, /media_links/);
   // Full text, not a 500-char preview column.
   assert.match(csv, /"Nested answer, comma, ""quoted""\."/);
+});
+
+check('reply archive CSV neutralises cells a spreadsheet would run as formulas', () => {
+  const record = (id, text) => ({
+    id,
+    handle: 'replier',
+    url: `https://x.com/replier/status/${id}`,
+    text,
+    parentId: '2000000000000000000',
+    mediaLinks: [],
+    discoveredSurfaces: ['latest'],
+    provenance: 'dom-observed',
+  });
+  const archive = engine.buildReplyArchive({
+    rootStatusId: '2000000000000000000',
+    rootPost: { handle: 'author', url: 'https://x.com/author/status/2000000000000000000' },
+    records: [
+      record('2000000000000000301', '=HYPERLINK("http://example.test","x")'),
+      record('2000000000000000302', '+1+1'),
+      record('2000000000000000303', '-2+3'),
+      record('2000000000000000304', '@SUM(A1)'),
+      record('2000000000000000305', '\tTabbed'),
+      record('2000000000000000306', 'Plain = text is untouched'),
+    ],
+    gapReport: { knownGaps: [], knownConversationIds: 6, domObservedUnion: 6, surfaces: [] },
+  });
+  const csv = engine.replyArchiveCsv(archive);
+  assert.ok(csv.includes(`"'=HYPERLINK(""http://example.test"",""x"")"`), 'formula is quoted text');
+  assert.ok(csv.includes(",'+1+1,"));
+  assert.ok(csv.includes(",'-2+3,"));
+  assert.ok(csv.includes(",'@SUM(A1),"));
+  assert.ok(csv.includes(",'\tTabbed,"));
+  assert.ok(csv.includes(',Plain = text is untouched,'));
 });
 
 await checkAsync(
@@ -4007,6 +4238,14 @@ function fakeIndexedDbFactory(initialStores = ['handles'], initialVersion = 1) {
     open(_name, version) {
       const request = { onupgradeneeded: null, onsuccess: null, onerror: null, result: null };
       queueMicrotask(() => {
+        if (version && version < state.version) {
+          // Real IndexedDB refuses to open below the stored version.
+          const error = new Error('The requested version is less than the existing version.');
+          error.name = 'VersionError';
+          request.error = error;
+          if (request.onerror) request.onerror();
+          return;
+        }
         if (version && version > state.version) {
           state.version = version;
           request.result = makeDb();
@@ -4048,6 +4287,34 @@ await checkAsync(
     await store.save('2000000000000000000', [{ id: '2000000000000000102', text: 'Second write.' }]);
     assert.equal(factory.state.version, 2);
     assert.equal((await store.load('2000000000000000000')).records.length, 2);
+  }
+);
+
+await checkAsync(
+  'library handle store and reply archive share one IndexedDB opener, in either order',
+  async () => {
+    // Reply archive first bumps v1 -> v2; the library opener must still open afterwards.
+    const factory = fakeIndexedDbFactory(['handles'], 1);
+    const store = engine.createReplyArchiveStore(engine.indexedDbReplyArchiveBackend(factory));
+    await store.save('2000000000000000000', [{ id: '2000000000000000101', text: 'x' }]);
+    assert.equal(factory.state.version, 2);
+    const db = await engine.openSharedIdb(factory);
+    assert.equal(db.objectStoreNames.contains('handles'), true);
+    assert.equal(factory.state.version, 2, 'opening must not downgrade or re-bump');
+
+    // A fresh install gets both stores in a single upgrade.
+    const fresh = fakeIndexedDbFactory([], 0);
+    await engine.openSharedIdb(fresh);
+    assert.equal(fresh.state.stores.has('handles'), true);
+    assert.equal(fresh.state.stores.has('reply-archive'), true);
+
+    // An install already past v2 with only `handles` upgrades once and keeps working.
+    const old = fakeIndexedDbFactory(['handles'], 5);
+    await engine.openSharedIdb(old);
+    assert.equal(old.state.version, 6);
+    assert.equal(old.state.stores.has('reply-archive'), true);
+    await engine.openSharedIdb(old);
+    assert.equal(old.state.version, 6);
   }
 );
 
@@ -4710,6 +4977,184 @@ check('a capture pass never advances to a surface it does not understand', () =>
     ${e.message}`);
   }
 }
+
+await checkAsync(
+  'createShareLink leaves the live model alone, so local saves keep their media',
+  async () => {
+    const PNG =
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+    const model = {
+      type: 'post',
+      title: 'Share keeps model',
+      heading: 'Share keeps model',
+      sourceUrl: STATUS_URL,
+      author: { name: 'Vega Hao', handle: '@Vegahao' },
+      blocks: [
+        { kind: 'paragraph', html: 'Hello' },
+        { kind: 'image', url: 'https://pbs.twimg.com/media/Keep1.jpg', dataUri: PNG },
+        {
+          kind: 'video',
+          url: 'https://video.twimg.com/v.mp4',
+          mode: 'video-inline',
+          dataUri: 'data:video/mp4;base64,AAAA',
+          videoFileCaptured: true,
+          posterDataUri: PNG,
+        },
+      ],
+    };
+    const puts = [];
+    global.GM_xmlhttpRequest = (options) => {
+      if (options.method === 'POST' && options.url.endsWith('/api/capsules')) {
+        options.onload({
+          status: 200,
+          responseText: JSON.stringify({
+            uploadUrl: 'https://share.test/api/capsules/abc/files',
+            uploadToken: 't',
+            finalizeUrl: 'https://share.test/api/capsules/abc/finalize',
+            viewUrl: 'https://share.test/c/abc',
+          }),
+        });
+        return;
+      }
+      if (options.method === 'PUT') puts.push(options.url);
+      options.onload({ status: 200, responseText: '' });
+    };
+    try {
+      await engine.createShareLink(model, '', 7);
+    } finally {
+      delete global.GM_xmlhttpRequest;
+    }
+    assert.ok(
+      puts.some((url) => url.includes('/media/')),
+      'media was uploaded'
+    );
+    assert.match(model.blocks[1].dataUri, /^data:image\/png/, 'image bytes stay on the live model');
+    assert.equal(model.blocks[2].dataUri, 'data:video/mp4;base64,AAAA');
+    assert.equal(model.blocks[2].videoFileCaptured, true);
+    assert.match(model.blocks[2].posterDataUri, /^data:image\/png/);
+    const bundle = engine.collectBundleMediaFiles(model);
+    assert.equal(bundle.files.length, 2, 'a later local save still finds the media');
+  }
+);
+
+await checkAsync('share uploads never carry the page debug diagnostics', async () => {
+  const model = {
+    type: 'post',
+    title: 'No debug upload',
+    heading: 'No debug upload',
+    sourceUrl: STATUS_URL,
+    author: { name: 'Vega Hao', handle: '@Vegahao' },
+    blocks: [{ kind: 'paragraph', html: 'Hello' }],
+  };
+  const debugJson = JSON.stringify({
+    pageUrl: 'https://x.com/home?SECRET_PAGE_URL',
+    tweets: [{ textPreview: 'SECRET_OTHER_USER_REPLY', html: '<div>SECRET_OUTER_HTML</div>' }],
+  });
+  const bodies = [];
+  global.GM_xmlhttpRequest = (options) => {
+    if (options.method === 'POST' && options.url.endsWith('/api/capsules')) {
+      options.onload({
+        status: 200,
+        responseText: JSON.stringify({
+          uploadUrl: 'https://share.test/api/capsules/abc/files',
+          uploadToken: 't',
+          finalizeUrl: 'https://share.test/api/capsules/abc/finalize',
+          viewUrl: 'https://share.test/c/abc',
+        }),
+      });
+      return;
+    }
+    if (options.method === 'PUT' && typeof options.data === 'string') bodies.push(options.data);
+    options.onload({ status: 200, responseText: '' });
+  };
+  try {
+    await engine.createShareLink(model, debugJson, 7);
+  } finally {
+    delete global.GM_xmlhttpRequest;
+  }
+  assert.ok(bodies.length >= 3, 'content.html, content.md and manifest.json were uploaded');
+  bodies.forEach((body) => assert.ok(!body.includes('SECRET_'), 'no page debug in uploads'));
+  // The explicit "Copy diagnostic" bundle is a separate path and keeps working.
+  const bundle = engine.buildDiagnosticBundle(model, {
+    verdict: 'clean',
+    blockers: [],
+    counts: {},
+  });
+  assert.match(bundle, /"generator"/, 'diagnostic bundle still builds');
+});
+
+const replySighting = (id, root, legacy, extra = {}) => ({
+  rest_id: id,
+  core: { user_results: { result: { core: { screen_name: 'replier', name: 'Replier' } } } },
+  legacy: { conversation_id_str: root, ...legacy },
+  ...extra,
+});
+const replyPhoto = {
+  extended_entities: {
+    media: [{ type: 'photo', media_url_https: 'https://pbs.twimg.com/media/ReplyPic.jpg' }],
+  },
+};
+
+check('a later truncated sighting never clobbers captured full reply text', () => {
+  const root = '2100000000000000000';
+  const id = '2100000000000000001';
+  const send = (url, node) =>
+    engine.handleNetworkCapturePayload({
+      source: 'SourceCapsule:network-capture',
+      type: 'response',
+      url,
+      transport: 'fetch:test',
+      body: JSON.stringify(node),
+    });
+  const full = 'A long reply delivered in full note form. '.repeat(4).trim();
+  send(
+    'https://x.com/i/api/graphql/a/TweetDetail',
+    replySighting(
+      id,
+      root,
+      { full_text: 'A long reply delivered…', in_reply_to_status_id_str: root, ...replyPhoto },
+      { note_tweet: { note_tweet_results: { result: { text: full } } } }
+    )
+  );
+  send(
+    'https://x.com/i/api/graphql/b/SearchTimeline',
+    replySighting(id, root, { full_text: 'A long reply delivered…' })
+  );
+  const [record] = engine.getCapturedSearchTimelineReplies(root);
+  assert.equal(record.text, full);
+  assert.equal(record.truncated, false);
+  assert.equal(record.parentId, root);
+  assert.equal(record.mediaLinks.length, 1);
+});
+
+check('a longer sighting keeps the handle, time, parent and media an earlier one carried', () => {
+  const root = '2100000000000000100';
+  const id = '2100000000000000101';
+  const records = engine.searchTimelineReplyRecordsFromCapturedBody(
+    JSON.stringify([
+      replySighting(id, root, {
+        full_text: 'short',
+        created_at: 'Sun Aug 09 04:11:50 +0000 2026',
+        in_reply_to_status_id_str: root,
+        ...replyPhoto,
+      }),
+      {
+        rest_id: id,
+        legacy: { conversation_id_str: root, full_text: 'short and then a much longer text' },
+      },
+    ])
+  );
+  assert.equal(records.length, 1);
+  const [record] = records;
+  assert.equal(record.text, 'short and then a much longer text');
+  assert.equal(record.handle, 'replier');
+  assert.equal(record.url, `https://x.com/replier/status/${id}`);
+  assert.equal(record.createdAt, '2026-08-09T04:11:50.000Z');
+  assert.equal(record.parentId, root);
+  assert.equal(record.mediaLinks.length, 1);
+});
+
+// REVIEW-TESTS-END
 
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);

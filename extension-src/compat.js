@@ -74,6 +74,7 @@
         headers: details.headers || {},
         bodyText,
         bodyBase64,
+        responseType: details.responseType === 'arraybuffer' ? 'arraybuffer' : 'text',
         timeout: details.timeout || 30000,
         referrer: details.referrer,
         referrerPolicy: details.referrerPolicy,
@@ -84,7 +85,16 @@
       if (/timeout/i.test(message)) details.ontimeout && details.ontimeout();
       else details.onerror && details.onerror({ error: message, message });
     };
+    // The background answers every request through sendResponse, including refusals
+    // (unapproved host) and fetch failures or timeouts. A direct request is only for a
+    // messaging channel that could not carry the request at all, and then only for
+    // methods that are safe to repeat: re-sending a POST/PUT/DELETE could apply it twice.
+    const canRepeat = /^(GET|HEAD)$/i.test(details.method || 'GET');
     const fallback = (rawMessage) => {
+      if (!canRepeat) {
+        fail(rawMessage);
+        return;
+      }
       directHttpRequest(details)
         .then((result) => details.onload && details.onload(result))
         .catch((error) =>
@@ -93,11 +103,15 @@
     };
     try {
       chrome.runtime.sendMessage(request, (result) => {
-        if (chrome.runtime.lastError || !result || !result.ok) {
-          fallback(
-            (chrome.runtime.lastError && chrome.runtime.lastError.message) ||
-              (result && result.error)
-          );
+        if (chrome.runtime.lastError) {
+          // No receiver, context invalidated, port closed: the channel itself failed.
+          fallback(chrome.runtime.lastError.message);
+          return;
+        }
+        if (!result || !result.ok) {
+          // The background answered (refusal, timeout, fetch error) or said nothing.
+          // Either way the request must not be replayed around it.
+          fail((result && result.error) || 'SourceCapsule background returned no result.');
           return;
         }
         const response =
@@ -108,6 +122,7 @@
           details.onload({
             status: result.status,
             response,
+            // Absent for binary replies; callers that ask for an arraybuffer read `response`.
             responseText: result.responseText,
             responseHeaders: result.responseHeaders,
           });

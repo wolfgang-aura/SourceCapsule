@@ -26,6 +26,19 @@ const CONNECT_RETRY_DELAY_MS = 750;
 const CANONICAL_X_URL =
   /^https:\/\/(?:www\.|mobile\.)?(?:x|twitter)\.com\/([A-Za-z0-9_]{1,15})\/status\/(\d{1,25})(?:[/?#].*)?$/;
 
+// The extension clamps the capture to 900s, so a larger value would only promise more
+// than it can deliver. The Worker accepts exactly these expiries.
+const MAX_TIMEOUT_SECONDS = 900;
+const VALID_EXPIRY_DAYS = [1, 7, 30];
+
+function numericValue(flag, raw) {
+  // Number('') is 0 and Number('5m') is NaN, so check the text, not the conversion.
+  if (raw === undefined || !/^\d+(?:\.\d+)?$/.test(raw)) {
+    throw new Error(`${flag} needs a number, got ${raw === undefined ? 'nothing' : `"${raw}"`}.`);
+  }
+  return Number(raw);
+}
+
 function parseArgs(argv) {
   const args = { json: false, timeoutMs: DEFAULT_TIMEOUT_MS };
   for (let i = 0; i < argv.length; i++) {
@@ -33,9 +46,19 @@ function parseArgs(argv) {
     if (arg === '--json') args.json = true;
     else if (arg === '--url') args.url = argv[++i];
     else if (arg === '--ping') args.ping = true;
-    else if (arg === '--timeout') args.timeoutMs = Number(argv[++i]) * 1000;
-    else if (arg === '--expiry-days') args.expiryDays = Number(argv[++i]);
-    else throw new Error(`Unknown argument: ${arg}`);
+    else if (arg === '--timeout') {
+      const seconds = numericValue('--timeout', argv[++i]);
+      if (seconds < 1 || seconds > MAX_TIMEOUT_SECONDS) {
+        throw new Error(`--timeout must be between 1 and ${MAX_TIMEOUT_SECONDS} seconds.`);
+      }
+      args.timeoutMs = seconds * 1000;
+    } else if (arg === '--expiry-days') {
+      const days = numericValue('--expiry-days', argv[++i]);
+      if (!VALID_EXPIRY_DAYS.includes(days)) {
+        throw new Error(`--expiry-days must be one of ${VALID_EXPIRY_DAYS.join(', ')}.`);
+      }
+      args.expiryDays = days;
+    } else throw new Error(`Unknown argument: ${arg}`);
   }
   return args;
 }
@@ -136,6 +159,13 @@ async function request(payload, timeoutMs) {
     socket.on('error', (error) => {
       clearTimeout(timer);
       reject(error);
+    });
+    // The host dies with its browser. A clean close before any reply used to leave this
+    // promise pending until the timer, up to five minutes. Rejecting after the reply
+    // already resolved is a no-op, so the normal path is unaffected.
+    socket.on('close', () => {
+      clearTimeout(timer);
+      reject(new Error('The native host closed the connection before replying.'));
     });
     socket.write(`${JSON.stringify(payload)}\n`);
   });
