@@ -169,7 +169,77 @@ async function transportChecks() {
   }
 }
 
+function runCli(args, pipe) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const child = spawn(
+      process.execPath,
+      [path.join(root, 'scripts', 'sourcecapsule-capture.mjs'), ...args],
+      {
+        env: { ...process.env, SOURCECAPSULE_PIPE: pipe },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      }
+    );
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => (stdout += chunk));
+    child.stderr.on('data', (chunk) => (stderr += chunk));
+    // A hung CLI is the failure under test, so bound it instead of hanging the suite.
+    const guard = setTimeout(() => child.kill(), 8000);
+    child.on('close', (code) => {
+      clearTimeout(guard);
+      resolve({ code, stdout, stderr, ms: Date.now() - started });
+    });
+  });
+}
+
+async function cliChecks() {
+  // The host (or the browser behind it) can die after the CLI has connected. The CLI must
+  // report that at once, not sit out the capture timeout (up to five minutes).
+  const dropPipe = String.raw`\\.\pipe\sourcecapsule-drop-` + process.pid;
+  const server = net.createServer((socket) => {
+    socket.once('data', () => socket.destroy());
+  });
+  await new Promise((resolve) => server.listen(dropPipe, resolve));
+  try {
+    const dropped = await runCli(['--ping'], dropPipe);
+    assert.equal(dropped.code, 1, `CLI exit code (stderr: ${dropped.stderr})`);
+    assert.ok(dropped.ms < 6000, `CLI took ${dropped.ms}ms to notice the closed connection`);
+    assert.match(JSON.parse(dropped.stdout).message, /closed|reply/i);
+  } finally {
+    server.close();
+  }
+  console.log('ok  CLI fails fast when the host closes mid-request');
+
+  // Bad numeric flags are a usage error before any connection is attempted. Number('5m')
+  // is NaN, and a NaN timer fires immediately, so a typo used to look like a host timeout.
+  const noPipe = String.raw`\\.\pipe\sourcecapsule-absent-` + process.pid;
+  for (const args of [
+    ['--timeout', '5m'],
+    ['--timeout', '0'],
+    ['--timeout', '-3'],
+    ['--timeout'],
+    ['--expiry-days', 'soon'],
+    ['--expiry-days', '2'],
+    ['--expiry-days'],
+  ]) {
+    const result = await runCli(['--url', 'https://x.com/a/status/1', ...args], noPipe);
+    assert.equal(result.code, 1, args.join(' '));
+    assert.doesNotMatch(result.stderr, /not reachable/, `${args.join(' ')} reached the pipe`);
+    const out = JSON.parse(result.stdout);
+    assert.equal(out.ok, false);
+    assert.match(out.message, new RegExp(args[0].replace(/^--/, '')), args.join(' '));
+  }
+  const ok = await runCli(
+    ['--url', 'https://x.com/a/status/1', '--timeout', '30', '--expiry-days', '7'],
+    noPipe
+  );
+  assert.match(ok.stderr, /not reachable/, 'valid flags still proceed to connect');
+  console.log('ok  CLI rejects bad --timeout and --expiry-days before connecting');
+}
+
 canonicalUrlChecks();
 resultContractChecks();
 await transportChecks();
+await cliChecks();
 console.log('native-host transport tests passed');
