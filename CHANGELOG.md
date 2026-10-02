@@ -6,6 +6,34 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-10-03
+
+### Fixed
+
+- Using the reply archive no longer breaks the saved library folder: both features now open
+  the shared IndexedDB through one opener.
+- A reply-archive save never overwrites an archive it failed to read, and a later sighting of a
+  reply never erases its captured full text, handle, date, parent or media.
+- Creating a share link no longer strips images from the library copy saved alongside it.
+- Passive network capture keeps working past 200 responses on a long page session.
+- Large media no longer overruns the extension's message size limit.
+- Share links no longer carry page debug diagnostics. Local debug embedding is off by default.
+- An inlined video is never downgraded to poster-only by the media rescue pass.
+- Quoted-post handles are read from X's current GraphQL user shape as well as the old one.
+- A reply's context card says the parent could not be fetched on a transient error, and only
+  calls it gone on a 404.
+- A per-post export of a reply that quotes the focused post keeps its own link and date.
+- A second export started while one is running is refused instead of corrupting the first.
+- Reply archive CSV cells that begin with a formula character are neutralised.
+- Library index entries keep `$` sequences literally.
+- Deleting a share link the Worker no longer has removes it from the local list.
+- Unattended capture: the host keeps its capture lock until the extension answers, the
+  readiness wait counts any conversation response, and the CLI fails fast when the host exits.
+- The extension's direct HTTP fallback runs only when the background channel is unavailable,
+  and only for GET/HEAD.
+- The share Worker serves capsule files with a server-chosen content type and CSP, answers
+  malformed paths with 400, and keeps sweeping expired capsules past a bad one.
+
 ## [1.6.0] - 2026-09-13
 
 ### Changed
