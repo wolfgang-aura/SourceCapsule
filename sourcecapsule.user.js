@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SourceCapsule - Save X/Twitter Threads & Articles as Markdown for LLMs + Offline HTML
 // @namespace    https://github.com/wolfgang-aura/SourceCapsule
-// @version      1.6.3
+// @version      1.6.4
 // @description  One click saves an X (Twitter) thread, Article, or post as clean Markdown for LLM context (Claude, ChatGPT) plus a self-contained offline HTML archive - images, video, and quoted posts embedded, with honest completeness reporting. Local-first, with optional expiring AI readable links.
 // @author       wolfgang-aura
 // @license      MIT
@@ -210,7 +210,7 @@
   };
 
   const APP = 'SourceCapsule';
-  const VERSION = '1.6.3';
+  const VERSION = '1.6.4';
 
   // ===========================================================================
   // Small utilities
@@ -5862,6 +5862,27 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     return Number.isFinite(expires) && expires <= now;
   }
 
+  // "in 6 days" / "2 hours ago" for the link list; the exact UTC time stays in a tooltip.
+  function relativeTimeFromNow(value, now = Date.now()) {
+    const ms = Date.parse(value);
+    if (!Number.isFinite(ms)) return 'at an unknown time';
+    const diff = ms - now;
+    const abs = Math.abs(diff);
+    const hours = Math.round(abs / 3600000);
+    const days = Math.round(abs / 86400000);
+    let span = 'less than an hour';
+    if (hours >= 24) span = `${days} day${days === 1 ? '' : 's'}`;
+    else if (abs >= 3600000) span = `${hours} hour${hours === 1 ? '' : 's'}`;
+    return diff >= 0 ? `in ${span}` : `${span} ago`;
+  }
+
+  function shareSourceHandle(sourceUrl) {
+    const m = /^https:\/\/(?:mobile\.)?(?:x|twitter)\.com\/([A-Za-z0-9_]{1,15})\/status\//.exec(
+      sourceUrl || ''
+    );
+    return m ? `@${m[1]}` : '';
+  }
+
   function rememberShareLink(created, model) {
     const record = {
       id: created.id,
@@ -6313,15 +6334,23 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 .xa-modal input,.xa-modal textarea,.xa-modal select{box-sizing:border-box;width:100%;padding:10px 11px;
   border:1px solid #cfd9de;border-radius:9px;background:#fff;color:#0f1419;font:inherit}
 .xa-modal textarea{min-height:82px;resize:vertical}.xa-modal-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:18px}
-.xa-modal button{padding:9px 14px;border:0;border-radius:999px;font:650 14px/1 inherit;cursor:pointer}
+.xa-modal button{padding:9px 14px;border:0;border-radius:999px;font:inherit;font-weight:650;font-size:14px;line-height:1;cursor:pointer}
 .xa-modal-cancel{background:#eff3f4;color:#0f1419}.xa-modal-submit,.xa-modal-open{background:#1d9bf0;color:#fff}
 .xa-modal-open{display:inline-flex;align-items:center;padding:9px 14px;border-radius:999px;
   font:650 14px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;text-decoration:none}
 .xa-share-url{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.xa-share-status{min-height:20px}
-.xa-recent-links{display:flex;flex-direction:column;gap:10px;margin-top:12px}.xa-recent-link{padding:11px;border:1px solid #cfd9de;border-radius:8px}
-.xa-recent-link.expired{opacity:.58}.xa-recent-link-title{font-weight:750;overflow-wrap:anywhere}.xa-recent-link-meta{margin-top:4px;color:#536471;font-size:12px;overflow-wrap:anywhere}
-.xa-recent-link-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:9px}.xa-recent-link-actions button,.xa-recent-link-actions a{padding:7px 10px;border:0;border-radius:999px;background:#eff3f4;color:#0f1419;font:650 12px/1 inherit;text-decoration:none;cursor:pointer}
-.xa-recent-link-actions .danger{color:#b00020}
+.xa-recent-links{display:flex;flex-direction:column;gap:10px;margin-top:12px}.xa-recent-link{padding:12px;border:1px solid #cfd9de;border-radius:12px}
+.xa-recent-link-title{font-weight:700;font-size:15px;overflow-wrap:anywhere}.xa-recent-link-meta{margin-top:2px;color:#536471;font-size:13px;overflow-wrap:anywhere}
+.xa-recent-link-actions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:10px}.xa-recent-link-actions button,.xa-recent-link-actions a{padding:8px 12px;border:0;border-radius:999px;background:#eff3f4;color:#0f1419;font:inherit;font-weight:650;font-size:13px;line-height:1;text-decoration:none;cursor:pointer}
+.xa-recent-link-actions button:disabled{opacity:.5;cursor:default}.xa-recent-link-actions .primary{background:#1d9bf0;color:#fff}
+.xa-recent-link-actions .danger{margin-left:auto;background:transparent;color:#b00020}.xa-recent-link-actions .danger:hover{background:rgba(244,33,46,.1)}.xa-recent-link-actions .danger[data-armed]{background:#f4212e;color:#fff}
+.xa-recent-expired{margin-top:4px}.xa-recent-expired>summary{padding:6px 2px;color:#536471;font-weight:650;cursor:pointer}
+.xa-recent-expired-body{display:flex;flex-direction:column}.xa-recent-link.expired{display:flex;align-items:center;gap:12px;padding:9px 2px;border:0;border-top:1px solid #eff3f4;border-radius:0}
+.xa-recent-link.expired .xa-recent-link-text{flex:1;min-width:0}.xa-recent-link.expired .xa-recent-link-title{font-size:14px;font-weight:600;color:#536471;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.xa-recent-link.expired .xa-recent-link-meta{font-size:12px}.xa-recent-link.expired .xa-recent-link-actions{flex-wrap:nowrap;margin-top:0}
+.xa-recent-link-actions .xa-recent-remove,.xa-recent-link.expired .xa-recent-link-actions a{padding:6px 10px;background:transparent;color:#536471;font-size:12px}
+.xa-recent-link.expired .xa-recent-link-actions a{color:#1d9bf0}.xa-recent-link-actions button:hover,.xa-recent-link-actions a:hover{filter:brightness(.95)}
+.xa-recent-expired-body>.xa-recent-remove{align-self:flex-end;margin-top:6px;padding:6px 10px;background:transparent;color:#536471;font-size:12px}
 .xa-receipt-grid{display:grid;grid-template-columns:1fr auto;gap:6px 14px;margin:14px 0}.xa-receipt-grid dt{color:#536471}.xa-receipt-grid dd{margin:0;font-weight:700;text-align:right}
 .xa-receipt-location{padding:9px;border-radius:8px;background:#eff3f4;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere}
 .xa-receipt-status{font-weight:700}.xa-receipt-status.warning,.xa-receipt-action-status.error{color:#b00020}.xa-receipt-action-status.warning{color:#b00020}.xa-receipt-details{margin-top:10px}.xa-receipt-details[open]{max-height:min(42vh,360px);overflow:auto;overscroll-behavior:contain}.xa-receipt-actions{flex-wrap:wrap}
@@ -6332,7 +6361,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 @media (prefers-color-scheme:dark){.xa-modal{background:#15202b;color:#e7e9ea}.xa-modal p{color:#8b98a5}
   .xa-modal input,.xa-modal textarea,.xa-modal select{background:#1f2733;color:#e7e9ea;border-color:#536471}
   .xa-modal-cancel{background:#273340;color:#e7e9ea}.xa-receipt-location{background:#273340}.xa-receipt-grid dt{color:#8b98a5}
-  .xa-recent-link{border-color:#536471}.xa-recent-link-meta{color:#8b98a5}.xa-recent-link-actions button,.xa-recent-link-actions a{background:#273340;color:#e7e9ea}}
+  .xa-recent-link{border-color:#38444d}.xa-recent-link-meta{color:#8b98a5}.xa-recent-link-actions button,.xa-recent-link-actions a{background:#273340;color:#e7e9ea}
+  .xa-recent-link-actions .primary{background:#1d9bf0;color:#fff}.xa-recent-link-actions .danger{background:transparent;color:#f4212e}.xa-recent-link-actions .danger[data-armed]{background:#f4212e;color:#fff}
+  .xa-recent-expired>summary,.xa-recent-link.expired .xa-recent-link-title{color:#8b98a5}.xa-recent-link.expired{border-top-color:#38444d}
+  .xa-recent-link-actions .xa-recent-remove,.xa-recent-expired-body>.xa-recent-remove{background:transparent;color:#8b98a5}.xa-recent-link.expired .xa-recent-link-actions a{background:transparent;color:#1d9bf0}}
 `;
     (document.head || document.documentElement).appendChild(s);
   }
@@ -6475,10 +6507,136 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     title.textContent = 'Recent AI readable links';
     const intro = document.createElement('p');
     intro.textContent = records.length
-      ? 'Links are stored on this browser profile. Expired links stay visible but are greyed out.'
+      ? 'Links are stored on this browser profile.'
       : 'No AI readable links have been created from this browser profile yet.';
     const list = document.createElement('div');
     list.className = 'xa-recent-links';
+    let expiredOpen = false;
+
+    const button = (label, className, onClick) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      if (className) b.className = className;
+      b.addEventListener('click', onClick);
+      return b;
+    };
+
+    const activeRow = (record) => {
+      const viewUrl = safeUrl(record.viewUrl);
+      const markdownUrl = safeUrl(record.markdownUrl);
+      const item = document.createElement('article');
+      item.className = 'xa-recent-link';
+      const itemTitle = document.createElement('div');
+      itemTitle.className = 'xa-recent-link-title';
+      itemTitle.textContent = record.title || 'X capture';
+      const meta = document.createElement('div');
+      meta.className = 'xa-recent-link-meta';
+      meta.textContent = [
+        record.expiresAt ? `Expires ${relativeTimeFromNow(record.expiresAt)}` : 'Unknown expiry',
+        shareSourceHandle(record.sourceUrl),
+      ]
+        .filter(Boolean)
+        .join(' · ');
+      if (record.expiresAt) meta.title = `Expires ${readableUtcTime(record.expiresAt)}`;
+      const actions = document.createElement('div');
+      actions.className = 'xa-recent-link-actions';
+      const copy = button('Copy link', 'primary', async () => {
+        try {
+          await copyText(viewUrl);
+          showToast('AI readable link copied.');
+        } catch {
+          showToast('Copy blocked. Open the link and copy from the address bar.', {
+            error: true,
+          });
+        }
+      });
+      const open = document.createElement('a');
+      open.href = viewUrl || '#';
+      open.target = '_blank';
+      open.rel = 'noopener';
+      open.textContent = 'Open';
+      const copyMd = button('Copy .md link', '', async () => {
+        try {
+          await copyText(markdownUrl);
+          showToast('Markdown link copied.');
+        } catch {
+          showToast('Copy blocked.', { error: true });
+        }
+      });
+      copyMd.disabled = !markdownUrl;
+      let disarmTimer = null;
+      const del = button('Delete', 'danger', async () => {
+        // A second click confirms, not window.confirm: a native dialog raised from the
+        // extension's isolated world blocks the whole tab and no automation can answer it.
+        if (!del.dataset.armed) {
+          del.dataset.armed = '1';
+          del.textContent = 'Confirm delete';
+          disarmTimer = setTimeout(disarm, 5000);
+          return;
+        }
+        disarm();
+        del.disabled = true;
+        try {
+          await deleteSharedCapsule(record);
+          showToast('AI readable link deleted.');
+          render();
+        } catch (error) {
+          del.disabled = false;
+          showToast(`Delete failed: ${error.message}`, { error: true });
+        }
+      });
+      del.title = 'Deletes the link on the share server. This cannot be undone.';
+      const disarm = () => {
+        clearTimeout(disarmTimer);
+        delete del.dataset.armed;
+        del.textContent = 'Delete';
+      };
+      actions.append(copy, open, copyMd, del);
+      item.append(itemTitle, meta, actions);
+      return item;
+    };
+
+    // An expired link's content is already gone from the share server, so its copy/open
+    // actions only lead to a 410 notice. Offer the original post and a local remove instead.
+    const expiredRow = (record) => {
+      const item = document.createElement('article');
+      item.className = 'xa-recent-link expired';
+      const text = document.createElement('div');
+      text.className = 'xa-recent-link-text';
+      const itemTitle = document.createElement('div');
+      itemTitle.className = 'xa-recent-link-title';
+      itemTitle.textContent = record.title || 'X capture';
+      const meta = document.createElement('div');
+      meta.className = 'xa-recent-link-meta';
+      meta.textContent = [
+        `Expired ${relativeTimeFromNow(record.expiresAt)}`,
+        shareSourceHandle(record.sourceUrl),
+      ]
+        .filter(Boolean)
+        .join(' · ');
+      meta.title = `Expired ${readableUtcTime(record.expiresAt)}`;
+      text.append(itemTitle, meta);
+      const actions = document.createElement('div');
+      actions.className = 'xa-recent-link-actions';
+      const sourceUrl = safeUrl(record.sourceUrl);
+      if (sourceUrl) {
+        const original = document.createElement('a');
+        original.href = sourceUrl;
+        original.target = '_blank';
+        original.rel = 'noopener';
+        original.textContent = 'Original post';
+        actions.appendChild(original);
+      }
+      const remove = button('Remove', 'xa-recent-remove', () => {
+        forgetShareLink(record.id);
+        render();
+      });
+      remove.title = 'Removes it from this list. The share server already deleted the content.';
+      actions.appendChild(remove);
+      item.append(text, actions);
+      return item;
+    };
 
     const render = () => {
       list.textContent = '';
@@ -6490,88 +6648,32 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         list.appendChild(empty);
         return;
       }
-      current.forEach((record) => {
-        const expired = shareLinkExpired(record);
-        const viewUrl = safeUrl(record.viewUrl);
-        const markdownUrl = safeUrl(record.markdownUrl);
-        const item = document.createElement('article');
-        item.className = `xa-recent-link${expired ? ' expired' : ''}`;
-        const itemTitle = document.createElement('div');
-        itemTitle.className = 'xa-recent-link-title';
-        itemTitle.textContent = record.title || 'X capture';
-        const meta = document.createElement('div');
-        meta.className = 'xa-recent-link-meta';
-        const expires = record.expiresAt ? readableUtcTime(record.expiresAt) : 'unknown expiry';
-        meta.textContent = `${expired ? 'Expired' : 'Expires'}: ${expires}${
-          record.sourceUrl ? ` | Source: ${record.sourceUrl}` : ''
-        }`;
-        const actions = document.createElement('div');
-        actions.className = 'xa-recent-link-actions';
-        const copy = document.createElement('button');
-        copy.type = 'button';
-        copy.textContent = 'Copy link';
-        copy.addEventListener('click', async () => {
-          try {
-            await copyText(viewUrl);
-            showToast('AI readable link copied.');
-          } catch {
-            showToast('Copy blocked. Open the link and copy from the address bar.', {
-              error: true,
-            });
-          }
-        });
-        const open = document.createElement('a');
-        open.href = viewUrl || '#';
-        open.target = '_blank';
-        open.rel = 'noopener';
-        open.textContent = 'Open';
-        const copyMd = document.createElement('button');
-        copyMd.type = 'button';
-        copyMd.textContent = 'Copy Markdown link';
-        copyMd.disabled = !markdownUrl;
-        copyMd.addEventListener('click', async () => {
-          try {
-            await copyText(markdownUrl);
-            showToast('Markdown link copied.');
-          } catch {
-            showToast('Copy blocked.', { error: true });
-          }
-        });
-        const del = document.createElement('button');
-        del.type = 'button';
-        del.className = 'danger';
-        del.textContent = 'Delete link';
-        del.title = 'Deletes the link on the share server. This cannot be undone.';
-        let disarmTimer = null;
-        const disarm = () => {
-          clearTimeout(disarmTimer);
-          delete del.dataset.armed;
-          del.textContent = 'Delete link';
-        };
-        del.addEventListener('click', async () => {
-          // A second click confirms, not window.confirm: a native dialog raised from the
-          // extension's isolated world blocks the whole tab and no automation can answer it.
-          if (!del.dataset.armed) {
-            del.dataset.armed = '1';
-            del.textContent = 'Click again to delete';
-            disarmTimer = setTimeout(disarm, 5000);
-            return;
-          }
-          disarm();
-          del.disabled = true;
-          try {
-            await deleteSharedCapsule(record);
-            showToast('AI readable link deleted.');
-            render();
-          } catch (error) {
-            del.disabled = false;
-            showToast(`Delete failed: ${error.message}`, { error: true });
-          }
-        });
-        actions.append(copy, open, copyMd, del);
-        item.append(itemTitle, meta, actions);
-        list.appendChild(item);
+      const active = current.filter((record) => !shareLinkExpired(record));
+      const expired = current.filter((record) => shareLinkExpired(record));
+      if (!active.length) {
+        const none = document.createElement('p');
+        none.textContent = 'No active links. Create one from any post.';
+        list.appendChild(none);
+      }
+      active.forEach((record) => list.appendChild(activeRow(record)));
+      if (!expired.length) return;
+      const section = document.createElement('details');
+      section.className = 'xa-recent-expired';
+      section.open = expiredOpen || !active.length;
+      section.addEventListener('toggle', () => {
+        expiredOpen = section.open;
       });
+      const summary = document.createElement('summary');
+      summary.textContent = `Expired (${expired.length})`;
+      const clear = button('Remove all expired', 'xa-recent-remove', () => {
+        setShareLinks(getShareLinks().filter((record) => !shareLinkExpired(record)));
+        render();
+      });
+      const body = document.createElement('div');
+      body.className = 'xa-recent-expired-body';
+      body.append(...expired.map(expiredRow), clear);
+      section.append(summary, body);
+      list.appendChild(section);
     };
 
     const actions = document.createElement('div');
