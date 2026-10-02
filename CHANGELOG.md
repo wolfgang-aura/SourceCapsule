@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-10-03
+
+### Fixed
+
+- Export manifests, including those published in AI links, no longer embed the request URLs
+  X's app fetched during the browsing session. They held search terms and other pages the
+  reader had visited. The Copy diagnostic bundle still has them.
+
 ## [1.6.1] - 2026-10-03
 
 ### Fixed
