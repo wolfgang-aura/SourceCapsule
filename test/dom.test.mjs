@@ -3205,6 +3205,40 @@ check('media rescue retries never-attempted avatars from repaired quote cards', 
   assert.equal(avatarTasks.length, 2, 'both the failed and the never-attempted avatar retried');
 });
 
+await checkAsync(
+  'media rescue retries only the poster of a video whose MP4 is inlined',
+  async () => {
+    const requested = [];
+    global.GM_xmlhttpRequest = (options) => {
+      requested.push(options.url);
+      options.onload({ status: 404, response: null, responseHeaders: '' });
+    };
+    const block = {
+      kind: 'video',
+      mode: 'offline-video',
+      url: 'https://video.twimg.com/v.mp4',
+      mp4Url: 'https://video.twimg.com/v.mp4',
+      dataUri: 'data:video/mp4;base64,AAAA',
+      videoFileCaptured: true,
+      posterUrl: 'https://pbs.twimg.com/ext_tw_video_thumb/1/img/p.jpg',
+    };
+    const model = { type: 'post', author: {}, blocks: [block] };
+    try {
+      await engine.rescueMissingMedia(model);
+    } finally {
+      delete global.GM_xmlhttpRequest;
+    }
+    assert.ok(requested.length > 0, 'the poster was retried');
+    assert.ok(
+      requested.every((url) => !url.includes('.mp4')),
+      'the inlined MP4 is not downloaded again'
+    );
+    assert.equal(block.mode, 'offline-video', 'an inlined video is never downgraded');
+    assert.equal(block.videoFileCaptured, true);
+    assert.equal(block.dataUri, 'data:video/mp4;base64,AAAA');
+  }
+);
+
 // ---------------------------------------------------------------------------
 // Quoted-post tombstones: the quoted post is gone on X itself (banned/deleted).
 // Captured as an honest note, never a strict-gate blocker.

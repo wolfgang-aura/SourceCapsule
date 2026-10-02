@@ -3119,7 +3119,27 @@
   }
 
   /** Decide inline-video vs poster fallback based on the size cap. */
+  async function inlineVideoPoster(block) {
+    if (!block.posterUrl) return;
+    try {
+      const { dataUri, size, mime, sha256 } = await fetchImageAsDataUri(block.posterUrl);
+      block.posterDataUri = dataUri;
+      block.posterSize = size;
+      block.posterMime = mime;
+      block.posterSha256 = sha256;
+    } catch (e) {
+      warn('poster inline failed:', e.message);
+    }
+  }
+
   async function inlineVideoBlock(block) {
+    // The MP4 is already inlined and only the poster is missing (rescue queued us for
+    // that). Retry the poster alone: re-downloading the MP4 could fail and downgrade a
+    // captured video to poster-only while its bytes were still sitting on the block.
+    if (block.dataUri && block.videoFileCaptured !== false) {
+      await inlineVideoPoster(block);
+      return;
+    }
     addVideoCandidatesToBlock(block, [
       videoCandidate(block.mp4Url, 'model:mp4Url'),
       videoCandidate(block.hlsUrl, 'model:hlsUrl'),
@@ -3127,17 +3147,7 @@
     if (block.mp4Url) applyVideoDimensions(block, videoDimensionsFromUrl(block.mp4Url));
     block.videoDownloadAttempts = [];
     // Always try to inline the poster image so there's something to show.
-    if (block.posterUrl) {
-      try {
-        const { dataUri, size, mime, sha256 } = await fetchImageAsDataUri(block.posterUrl);
-        block.posterDataUri = dataUri;
-        block.posterSize = size;
-        block.posterMime = mime;
-        block.posterSha256 = sha256;
-      } catch (e) {
-        warn('poster inline failed:', e.message);
-      }
-    }
+    await inlineVideoPoster(block);
 
     const candidates = sortVideoCandidates(block.videoCandidates || []).filter(
       (candidate) => candidate.kind === 'mp4'
