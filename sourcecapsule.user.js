@@ -9315,7 +9315,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   }
 
   function csvCell(value) {
-    const text = String(value == null ? '' : value);
+    let text = String(value == null ? '' : value);
+    // Spreadsheet formula injection: a reply is attacker-controlled text, and a cell that
+    // starts with = + - @ tab or CR runs as a formula when the archive is opened in Excel
+    // or Sheets. A leading single quote makes it plain text (OWASP guidance). Numbers
+    // (counts) are ours and never start with a sign we did not write.
+    if (typeof value === 'string' && /^[=+\-@\t\r]/.test(text)) text = `'${text}`;
     return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
   }
 

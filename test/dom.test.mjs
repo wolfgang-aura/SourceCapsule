@@ -3964,6 +3964,39 @@ check('reply archive exports the actual replies, threaded, with media links', ()
   assert.match(csv, /"Nested answer, comma, ""quoted""\."/);
 });
 
+check('reply archive CSV neutralises cells a spreadsheet would run as formulas', () => {
+  const record = (id, text) => ({
+    id,
+    handle: 'replier',
+    url: `https://x.com/replier/status/${id}`,
+    text,
+    parentId: '2000000000000000000',
+    mediaLinks: [],
+    discoveredSurfaces: ['latest'],
+    provenance: 'dom-observed',
+  });
+  const archive = engine.buildReplyArchive({
+    rootStatusId: '2000000000000000000',
+    rootPost: { handle: 'author', url: 'https://x.com/author/status/2000000000000000000' },
+    records: [
+      record('2000000000000000301', '=HYPERLINK("http://example.test","x")'),
+      record('2000000000000000302', '+1+1'),
+      record('2000000000000000303', '-2+3'),
+      record('2000000000000000304', '@SUM(A1)'),
+      record('2000000000000000305', '\tTabbed'),
+      record('2000000000000000306', 'Plain = text is untouched'),
+    ],
+    gapReport: { knownGaps: [], knownConversationIds: 6, domObservedUnion: 6, surfaces: [] },
+  });
+  const csv = engine.replyArchiveCsv(archive);
+  assert.ok(csv.includes(`"'=HYPERLINK(""http://example.test"",""x"")"`), 'formula is quoted text');
+  assert.ok(csv.includes(",'+1+1,"));
+  assert.ok(csv.includes(",'-2+3,"));
+  assert.ok(csv.includes(",'@SUM(A1),"));
+  assert.ok(csv.includes(",'\tTabbed,"));
+  assert.ok(csv.includes(',Plain = text is untouched,'));
+});
+
 await checkAsync(
   'two probe runs on different surfaces accumulate reply text instead of replacing it',
   async () => {
