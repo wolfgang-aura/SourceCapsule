@@ -5,7 +5,9 @@
 // It proves the round trip (CLI -> pipe -> host -> "extension" -> host -> CLI), the
 // one-at-a-time lock, and the request timeout, with no browser involved.
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
@@ -164,6 +166,31 @@ async function transportChecks() {
     assert.equal(busy.error, 'busy');
     console.log('ok  one capture at a time');
     await held;
+
+    // The CLI can disconnect while the extension is still capturing. The lock must hold
+    // until the extension answers, and the late reply's link must reach the host log.
+    const captureAsk = received.length;
+    const gone = net.connect(PIPE);
+    await new Promise((resolve) => gone.on('connect', resolve));
+    gone.write(`${JSON.stringify({ id: 'a5', action: 'capture-share', timeoutMs: 20000 })}
+`);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(received.length, captureAsk + 1, 'extension received the capture');
+    gone.destroy();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const stillBusy = await sendOverPipe({ id: 'a6', action: 'capture-share', timeoutMs: 3000 });
+    assert.equal(stillBusy.error, 'busy', 'a closed CLI socket must not release the lock');
+    const viewUrl = `https://share.test/c/late-${process.pid}`;
+    host.stdin.write(encode({ id: 'a5', ok: true, viewUrl }));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const hostLog = fs.readFileSync(
+      path.join(os.tmpdir(), 'sourcecapsule-native-host.log'),
+      'utf8'
+    );
+    assert.ok(hostLog.includes(viewUrl), 'late reply viewUrl is logged when the CLI is gone');
+    const free = await sendOverPipe({ id: 'a7', action: 'ping', timeoutMs: 5000 });
+    assert.equal(free.ok, true, 'lock is released once the extension has replied');
+    console.log('ok  lock survives a closed CLI socket and the late reply is logged');
   } finally {
     host.kill();
   }
