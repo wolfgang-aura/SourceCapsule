@@ -239,7 +239,7 @@ check('share success remains visible when automatic clipboard copy is blocked', 
 });
 
 await checkAsync(
-  'recent AI readable links modal keeps expired links greyed out and removable',
+  'recent AI readable links modal folds expired links away with remove-only actions',
   async () => {
     const active = {
       id: 'active',
@@ -256,28 +256,39 @@ await checkAsync(
       sourceUrl: STATUS_URL,
       expiresAt: new Date(Date.now() - 86400000).toISOString(),
     };
-    engine.setShareLinks([active, expired]);
+    engine.setShareLinks([expired, active]);
     window.confirm = () => {
       throw new Error('Delete link must not raise a native dialog');
     };
     engine.showRecentShareLinks();
     const modal = document.querySelector('.xa-recent-links-modal');
     assert.ok(modal, 'recent links modal should be visible');
-    const rows = Array.from(modal.querySelectorAll('.xa-recent-link'));
-    assert.equal(rows.length, 2);
-    assert.ok(rows[1].classList.contains('expired'), 'expired link should be greyed out');
-    assert.match(rows[1].textContent, /Expired:/);
-    const del = rows[1].querySelector('.danger');
+    const section = modal.querySelector('details.xa-recent-expired');
+    assert.ok(section && !section.open, 'expired links start folded while active links exist');
+    assert.match(section.querySelector('summary').textContent, /Expired \(1\)/);
+    const expiredRow = section.querySelector('.xa-recent-link.expired');
+    assert.match(expiredRow.textContent, /Expired 1 day ago/);
+    assert.equal(expiredRow.querySelector('.danger'), null, 'no server delete on an expired row');
+    assert.equal(expiredRow.querySelector('a').href, STATUS_URL, 'expired row links the post');
+
+    const activeRow = modal.querySelector('.xa-recent-link:not(.expired)');
+    assert.equal(activeRow.previousElementSibling, null, 'active links come first');
+    const del = activeRow.querySelector('.danger');
     del.click();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(engine.getShareLinks().length, 2, 'one click only arms the delete');
-    assert.match(del.textContent, /click again/i);
+    assert.match(del.textContent, /confirm delete/i);
     del.click();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.deepEqual(
       engine.getShareLinks().map((item) => item.id),
-      ['active']
+      ['expired']
     );
+
+    const reopened = modal.querySelector('details.xa-recent-expired');
+    assert.ok(reopened.open, 'with no active links left, the expired list is shown');
+    reopened.querySelector('.xa-recent-link .xa-recent-remove').click();
+    assert.deepEqual(engine.getShareLinks(), [], 'Remove forgets the expired link in one click');
     modal.querySelector('.xa-modal-cancel').click();
   }
 );

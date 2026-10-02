@@ -6,6 +6,19 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.4] - 2026-10-03
+
+### Changed
+
+- The Recent AI readable links list now treats expired links differently from live ones. Live
+  links show "Expires in 6 days · @handle" with Copy link, Open, Copy .md link and Delete.
+  Expired links fold into a collapsed "Expired (N)" section that offers the original X post and
+  a one-click Remove, because the share server already deleted their content. "Remove all
+  expired" clears them in one go.
+- Delete on a live link confirms by turning into a red "Confirm delete" button for five seconds.
+- Buttons in SourceCapsule dialogs use the page font again. The old `font` shorthand contained
+  `inherit`, so browsers dropped the whole declaration.
+
 ## [1.6.3] - 2026-10-03
 
 ### Fixed
