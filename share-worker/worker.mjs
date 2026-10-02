@@ -513,25 +513,33 @@ async function cleanupExpired(env) {
     });
     const metaObjects = (page.objects || []).filter((object) => object.key.endsWith('/_meta.json'));
     for (const item of metaObjects) {
-      const custom = item.customMetadata || {};
-      if (custom.status === 'expired') {
-        // Second stage: a tombstone that has outlived its retention window is removed.
-        // Retention is measured from the capsule's original expiry, which is the moment
-        // its content was deleted.
-        if (tombstoneWornOut({ expiresAt: custom.expiresAt || '' }, now)) {
-          await deletePrefix(env, item.key.slice(0, -'_meta.json'.length));
+      // One bad capsule (a corrupt _meta.json, a failing delete) must not abort the sweep:
+      // it would stall on the same item every day and nothing behind it would ever expire.
+      try {
+        const custom = item.customMetadata || {};
+        if (custom.status === 'expired') {
+          // Second stage: a tombstone that has outlived its retention window is removed.
+          // Retention is measured from the capsule's original expiry, which is the moment
+          // its content was deleted.
+          if (tombstoneWornOut({ expiresAt: custom.expiresAt || '' }, now)) {
+            await deletePrefix(env, item.key.slice(0, -'_meta.json'.length));
+          }
+          continue;
         }
-        continue;
-      }
-      // Old objects written before expiresAt was mirrored into customMetadata still
-      // need a read; anything not yet due is skipped without one.
-      if (custom.expiresAt && Date.parse(custom.expiresAt) > now) continue;
-      const object = await env.CAPSULES.get(item.key);
-      if (!object) continue;
-      const meta = JSON.parse(await object.text());
-      meta._custom = object.customMetadata || {};
-      if (isExpired(meta)) {
-        await expireCapsule(env, { ...meta, expiredAt: new Date(now).toISOString() });
+        // Old objects written before expiresAt was mirrored into customMetadata still
+        // need a read; anything not yet due is skipped without one.
+        if (custom.expiresAt && Date.parse(custom.expiresAt) > now) continue;
+        const object = await env.CAPSULES.get(item.key);
+        if (!object) continue;
+        const meta = JSON.parse(await object.text());
+        meta._custom = object.customMetadata || {};
+        if (isExpired(meta)) {
+          await expireCapsule(env, { ...meta, expiredAt: new Date(now).toISOString() });
+        }
+      } catch (error) {
+        console.error(
+          `cleanupExpired: skipped ${item.key}: ${error && error.message ? error.message : error}`
+        );
       }
     }
     cursor = page.truncated ? page.cursor : undefined;

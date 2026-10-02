@@ -465,6 +465,43 @@ const past = new Date(Date.now() - 86400000).toISOString();
 }
 
 {
+  // One corrupt _meta.json or one failing delete must not stop the sweep: the capsules
+  // behind it still expire, and the failure is logged rather than thrown.
+  const store = new MemoryR2();
+  const sweepEnv = { CAPSULES: store };
+  const corrupt = await publishCapsule(store);
+  const wornOut = await publishCapsule(store);
+  const overdue = await publishCapsule(store);
+  forceExpiry(store, corrupt.id, past);
+  store.objects.get(`capsules/${corrupt.id}/_meta.json`).bytes = new TextEncoder().encode('{nope');
+  forceExpiry(store, wornOut.id, new Date(Date.now() - 200 * 86400000).toISOString());
+  const wornKey = `capsules/${wornOut.id}/_meta.json`;
+  store.objects.get(wornKey).customMetadata.status = 'expired';
+  forceExpiry(store, overdue.id, past);
+  const realDelete = store.delete.bind(store);
+  store.delete = async (keys) => {
+    if ((Array.isArray(keys) ? keys : [keys]).includes(wornKey))
+      throw new Error('R2 delete failed');
+    return realDelete(keys);
+  };
+  const logged = [];
+  const realError = console.error;
+  console.error = (...args) => logged.push(args.join(' '));
+  try {
+    await cleanupExpired(sweepEnv);
+  } finally {
+    console.error = realError;
+  }
+  assert.equal(
+    store.objects.has(`capsules/${overdue.id}/content.html`),
+    false,
+    'a capsule after the broken ones still expires'
+  );
+  assert.equal(logged.length, 2, `both failures are logged: ${logged.join(' | ')}`);
+  assert.ok(logged.some((line) => line.includes(corrupt.id)));
+}
+
+{
   // Uploaded files are never trusted to choose how they are served. A capsule holder
   // controls the bytes, the Content-Type header and (under media/) the extension, and
   // all of it is served from the Worker's own origin.
