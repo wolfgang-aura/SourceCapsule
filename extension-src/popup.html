@@ -119,6 +119,19 @@
             <input id="floating-button" type="checkbox" role="switch" />
           </label>
         </section>
+
+        <section class="settings-card" aria-labelledby="links-heading">
+          <div class="section-heading">
+            <div>
+              <h2 id="links-heading" data-i18n="linksHeading">AI links</h2>
+              <p data-i18n="linksDesc">Copy, open, or delete the links this browser created.</p>
+            </div>
+          </div>
+          <button id="show-links" class="secondary-action" type="button" data-i18n="showLinks">
+            Show recent AI links
+          </button>
+          <p id="links-help" class="inline-feedback" role="status" hidden></p>
+        </section>
         <p id="save-feedback" class="save-feedback" role="status" aria-live="polite"></p>
       </form>
 
