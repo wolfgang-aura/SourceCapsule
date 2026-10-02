@@ -74,6 +74,7 @@
         headers: details.headers || {},
         bodyText,
         bodyBase64,
+        responseType: details.responseType === 'arraybuffer' ? 'arraybuffer' : 'text',
         timeout: details.timeout || 30000,
         referrer: details.referrer,
         referrerPolicy: details.referrerPolicy,
@@ -108,6 +109,7 @@
           details.onload({
             status: result.status,
             response,
+            // Absent for binary replies; callers that ask for an arraybuffer read `response`.
             responseText: result.responseText,
             responseHeaders: result.responseHeaders,
           });

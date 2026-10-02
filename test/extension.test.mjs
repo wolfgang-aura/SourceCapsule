@@ -65,6 +65,54 @@ assert.equal(directResult.status, 200);
 assert.deepEqual(Array.from(new Uint8Array(directResult.response)), [1, 2, 3, 4]);
 assert.match(directResult.responseHeaders, /content-type: image\/jpeg/);
 
+// The proxy must send ONE representation of the body. Sending decoded text plus base64
+// roughly triples a media response and can pass Chrome's 64 MiB message limit.
+const proxyBytes = Uint8Array.from([0, 255, 128, 7]);
+const realProxyFetch = globalThis.fetch;
+globalThis.fetch = async () => ({
+  status: 200,
+  headers: new Map([['content-type', 'image/jpeg']]),
+  arrayBuffer: async () => proxyBytes.buffer.slice(0),
+});
+const proxyThroughBackground = (extra) =>
+  new Promise((resolve) =>
+    background.handleMessage(
+      {
+        type: 'sourcecapsule:http',
+        request: { url: 'https://pbs.twimg.com/media/a.jpg', bodyText: null, ...extra },
+      },
+      null,
+      resolve
+    )
+  );
+const proxiedBinary = await proxyThroughBackground({ responseType: 'arraybuffer' });
+assert.equal(proxiedBinary.ok, true);
+assert.equal(typeof proxiedBinary.bodyBase64, 'string');
+assert.equal(proxiedBinary.responseText, undefined, 'binary replies carry base64 only');
+const proxiedText = await proxyThroughBackground({ responseType: 'text' });
+assert.equal(typeof proxiedText.responseText, 'string');
+assert.equal(proxiedText.bodyBase64, undefined, 'text replies carry text only');
+// End to end through compat.js: each caller gets the field it reads.
+globalThis.chrome = {
+  runtime: { sendMessage: (request, done) => background.handleMessage(request, null, done) },
+};
+const viaCompat = (responseType) =>
+  new Promise((resolve, reject) =>
+    globalThis.GM_xmlhttpRequest({
+      url: 'https://pbs.twimg.com/media/a.jpg',
+      responseType,
+      onload: resolve,
+      onerror: reject,
+    })
+  );
+const compatBinary = await viaCompat('arraybuffer');
+assert.deepEqual(Array.from(new Uint8Array(compatBinary.response)), [0, 255, 128, 7]);
+const compatText = await viaCompat('text');
+assert.equal(typeof compatText.responseText, 'string');
+assert.equal(compatText.response, compatText.responseText);
+delete globalThis.chrome;
+globalThis.fetch = realProxyFetch;
+
 console.log('[4/5] Checking passive bridge validation, caps, and duplicate suppression...');
 const engine = require(path.join(root, 'sourcecapsule.user.js'));
 const payload = {
