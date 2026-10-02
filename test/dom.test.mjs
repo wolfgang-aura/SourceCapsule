@@ -4770,6 +4770,77 @@ await checkAsync(
   }
 );
 
+const replySighting = (id, root, legacy, extra = {}) => ({
+  rest_id: id,
+  core: { user_results: { result: { core: { screen_name: 'replier', name: 'Replier' } } } },
+  legacy: { conversation_id_str: root, ...legacy },
+  ...extra,
+});
+const replyPhoto = {
+  extended_entities: {
+    media: [{ type: 'photo', media_url_https: 'https://pbs.twimg.com/media/ReplyPic.jpg' }],
+  },
+};
+
+check('a later truncated sighting never clobbers captured full reply text', () => {
+  const root = '2100000000000000000';
+  const id = '2100000000000000001';
+  const send = (url, node) =>
+    engine.handleNetworkCapturePayload({
+      source: 'SourceCapsule:network-capture',
+      type: 'response',
+      url,
+      transport: 'fetch:test',
+      body: JSON.stringify(node),
+    });
+  const full = 'A long reply delivered in full note form. '.repeat(4).trim();
+  send(
+    'https://x.com/i/api/graphql/a/TweetDetail',
+    replySighting(
+      id,
+      root,
+      { full_text: 'A long reply delivered…', in_reply_to_status_id_str: root, ...replyPhoto },
+      { note_tweet: { note_tweet_results: { result: { text: full } } } }
+    )
+  );
+  send(
+    'https://x.com/i/api/graphql/b/SearchTimeline',
+    replySighting(id, root, { full_text: 'A long reply delivered…' })
+  );
+  const [record] = engine.getCapturedSearchTimelineReplies(root);
+  assert.equal(record.text, full);
+  assert.equal(record.truncated, false);
+  assert.equal(record.parentId, root);
+  assert.equal(record.mediaLinks.length, 1);
+});
+
+check('a longer sighting keeps the handle, time, parent and media an earlier one carried', () => {
+  const root = '2100000000000000100';
+  const id = '2100000000000000101';
+  const records = engine.searchTimelineReplyRecordsFromCapturedBody(
+    JSON.stringify([
+      replySighting(id, root, {
+        full_text: 'short',
+        created_at: 'Sun Aug 09 04:11:50 +0000 2026',
+        in_reply_to_status_id_str: root,
+        ...replyPhoto,
+      }),
+      {
+        rest_id: id,
+        legacy: { conversation_id_str: root, full_text: 'short and then a much longer text' },
+      },
+    ])
+  );
+  assert.equal(records.length, 1);
+  const [record] = records;
+  assert.equal(record.text, 'short and then a much longer text');
+  assert.equal(record.handle, 'replier');
+  assert.equal(record.url, `https://x.com/replier/status/${id}`);
+  assert.equal(record.createdAt, '2026-08-09T04:11:50.000Z');
+  assert.equal(record.parentId, root);
+  assert.equal(record.mediaLinks.length, 1);
+});
+
 // REVIEW-TESTS-END
 
 if (failures) {

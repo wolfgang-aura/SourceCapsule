@@ -7218,25 +7218,27 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         const text = noteText || previewText;
         const unavailable = /Tombstone|Unavailable/i.test(String(value.__typename || ''));
         const existing = records.get(id);
-        if (
-          !existing ||
-          (!existing.handle && handle) ||
-          String(existing.text || '').length < text.length
-        ) {
+        // Same rule as mergeReplyArchiveRecords: longer text wins, and a field that
+        // already holds content is never replaced by an empty one.
+        const textWins = !existing || text.length > String(existing.text || '').length;
+        if (textWins || (!existing.handle && handle)) {
+          const prior = existing || {};
+          const bestHandle = handle || prior.handle || '';
           records.set(id, {
-            ...(existing || {}),
+            ...prior,
             id,
             conversationId,
-            handle,
-            displayName: displayName || (existing && existing.displayName) || '',
-            url: handle
-              ? `https://x.com/${handle}/status/${id}`
+            handle: bestHandle,
+            displayName: displayName || prior.displayName || '',
+            url: bestHandle
+              ? `https://x.com/${bestHandle}/status/${id}`
               : `https://x.com/i/web/status/${id}`,
-            text: text.slice(0, REPLY_ARCHIVE_TEXT_MAX),
-            truncated: !noteText && /[…]$/.test(previewText),
-            createdAt: safeIsoTime((legacy && legacy.created_at) || ''),
-            parentId: String((legacy && legacy.in_reply_to_status_id_str) || ''),
-            mediaLinks: replyMediaLinksFromLegacy(legacy),
+            text: textWins ? text.slice(0, REPLY_ARCHIVE_TEXT_MAX) : prior.text,
+            truncated: textWins ? !noteText && /[…]$/.test(previewText) : Boolean(prior.truncated),
+            createdAt: safeIsoTime((legacy && legacy.created_at) || '') || prior.createdAt || '',
+            parentId:
+              String((legacy && legacy.in_reply_to_status_id_str) || '') || prior.parentId || '',
+            mediaLinks: mergeReplyMediaLinks(prior.mediaLinks, replyMediaLinksFromLegacy(legacy)),
             unavailable,
             unavailableReason: unavailable ? String(value.__typename || 'unavailable') : '',
           });
@@ -7258,14 +7260,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     ) {
       capturedSearchTimelineReplies.delete(capturedSearchTimelineReplies.keys().next().value);
     }
-    capturedSearchTimelineReplies.set(key, {
-      ...existing,
-      ...record,
-      handle: record.handle || existing.handle || '',
-      url: record.url || existing.url || '',
-      text: record.text || existing.text || '',
-      seenAt: new Date().toISOString(),
-    });
+    // Merge by the archive's own rule: longer text wins and a populated field is never
+    // overwritten by an empty one (a later truncated preview must not clobber a note).
+    const [merged] = mergeReplyArchiveRecords(existing.id ? [existing] : [], [record]);
+    capturedSearchTimelineReplies.set(key, { ...merged, seenAt: new Date().toISOString() });
     networkCaptureDiagnostics.searchTimelineReplies = capturedSearchTimelineReplies.size;
   }
 
