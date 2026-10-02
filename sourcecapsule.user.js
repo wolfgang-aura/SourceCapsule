@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SourceCapsule - Save X/Twitter Threads & Articles as Markdown for LLMs + Offline HTML
 // @namespace    https://github.com/wolfgang-aura/SourceCapsule
-// @version      1.6.1
+// @version      1.6.2
 // @description  One click saves an X (Twitter) thread, Article, or post as clean Markdown for LLM context (Claude, ChatGPT) plus a self-contained offline HTML archive - images, video, and quoted posts embedded, with honest completeness reporting. Local-first, with optional expiring AI readable links.
 // @author       wolfgang-aura
 // @license      MIT
@@ -210,7 +210,7 @@
   };
 
   const APP = 'SourceCapsule';
-  const VERSION = '1.6.1';
+  const VERSION = '1.6.2';
 
   // ===========================================================================
   // Small utilities
@@ -4218,8 +4218,14 @@
       }
     }
     diagnostics = diagnostics || {};
+    // Counters only. The request URLs X's app fetched describe the reader's session (search
+    // terms, bookmarks, other profiles), not this post, and a manifest can be published as an
+    // AI link. They stay in memory for the opt-in Copy diagnostic bundle.
+    const captureCounters = { ...networkCaptureDiagnostics };
+    delete captureCounters.lastUrls;
+    delete captureCounters.lastTruncatedUrl;
     diagnostics.networkCapture = {
-      ...networkCaptureDiagnostics,
+      ...captureCounters,
       bufferedCandidates: capturedNetworkVideoCandidates.length,
     };
     const manifest = {

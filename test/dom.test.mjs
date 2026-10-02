@@ -5083,6 +5083,31 @@ await checkAsync('share uploads never carry the page debug diagnostics', async (
   assert.match(bundle, /"generator"/, 'diagnostic bundle still builds');
 });
 
+check('export manifests never carry the request URLs of the browsing session', () => {
+  engine.handleNetworkCapturePayload({
+    source: 'SourceCapsule:network-capture',
+    type: 'response',
+    url: 'https://x.com/i/api/graphql/abc/SearchTimeline?variables=SECRET_SEARCH_TERMS',
+    transport: 'fetch:test',
+    truncated: true,
+    body: JSON.stringify({ data: { conversation_id_str: 'session-url-1' } }),
+  });
+  assert.ok(engine.networkCaptureDiagnostics.lastUrls.length > 0, 'the session URL was recorded');
+  const model = {
+    type: 'post',
+    title: 'Session URLs',
+    heading: 'Session URLs',
+    sourceUrl: STATUS_URL,
+    author: { name: 'Vega Hao', handle: '@Vegahao' },
+    blocks: [{ kind: 'paragraph', html: 'Hello' }],
+  };
+  const manifest = engine.renderArchiveManifestJson(model);
+  assert.ok(!manifest.includes('SECRET_SEARCH_TERMS'), 'manifest.json has no session URL');
+  assert.equal(JSON.parse(manifest).diagnostics.networkCapture.truncatedResponses > 0, true);
+  assert.ok(!engine.assembleHtml(model).includes('SECRET_SEARCH_TERMS'), 'HTML has no session URL');
+  assert.ok(!engine.renderLlmMarkdown(model).includes('SECRET_SEARCH_TERMS'), 'Markdown neither');
+});
+
 const replySighting = (id, root, legacy, extra = {}) => ({
   rest_id: id,
   core: { user_results: { result: { core: { screen_name: 'replier', name: 'Replier' } } } },
