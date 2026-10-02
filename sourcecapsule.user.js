@@ -6821,6 +6821,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     searchTimelineReplies: 0,
     truncatedResponses: 0,
     lastTruncatedUrl: '',
+    // Responses the page-side tee shed over its rate cap (cumulative, reported by it).
+    bridgeDropped: 0,
     errors: [],
     lastUrls: [],
   };
@@ -7362,6 +7364,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           ? 'unsafeWindow+injected'
           : 'injected';
       return [];
+    }
+    if (payload.type === 'response' && Number.isFinite(payload.dropped)) {
+      networkCaptureDiagnostics.bridgeDropped = Math.max(
+        networkCaptureDiagnostics.bridgeDropped,
+        payload.dropped
+      );
     }
     const signature = networkCaptureSignature(payload);
     if (networkCapturePayloadSignatures.has(signature)) return [];
@@ -11582,16 +11590,38 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const patterns = networkCapturePatterns();
     const shouldRead = (url, contentType) =>
       patterns.contentType.test(contentType || '') || patterns.url.test(url || '');
+    // Rate cap, not a lifetime cap (see extension-src/page-bridge.js); keep identical.
+    const RATE_WINDOW_MS = 10000;
+    const MAX_PER_WINDOW = 100;
+    let windowStart = 0;
+    let inWindow = 0;
+    let dropped = 0;
+    const admit = () => {
+      const now = Date.now();
+      if (now - windowStart >= RATE_WINDOW_MS) {
+        windowStart = now;
+        inWindow = 0;
+      }
+      if (inWindow >= MAX_PER_WINDOW) {
+        dropped += 1;
+        return false;
+      }
+      inWindow += 1;
+      return true;
+    };
     const emit = (url, body, transport) => {
       try {
         if (!body) return;
         const text = String(body);
         if (!patterns.body.test(text) && !/SearchTimeline|TweetDetail/i.test(url || '')) return;
+        if (!admit()) return;
         handleNetworkCapturePayload({
           source: `${APP}:network-capture`,
+          contractVersion: 1,
           type: 'response',
           url: String(url || ''),
           transport: `${transport}:unsafeWindow`,
+          dropped,
           truncated: text.length > CONFIG.video.networkCaptureMaxChars,
           body: text.slice(0, CONFIG.video.networkCaptureMaxChars),
         });
@@ -11699,8 +11729,25 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const SOURCE = 'SourceCapsule:network-capture';
       if (window.__SourceCapsuleNetworkCaptureInstalled) return;
       window.__SourceCapsuleNetworkCaptureInstalled = true;
-      const MAX_MESSAGES = 200;
-      let sent = 0;
+      // Rate cap, not a lifetime cap (see extension-src/page-bridge.js); keep identical.
+      const RATE_WINDOW_MS = 10000;
+      const MAX_PER_WINDOW = 100;
+      let windowStart = 0;
+      let inWindow = 0;
+      let dropped = 0;
+      const admit = () => {
+        const now = Date.now();
+        if (now - windowStart >= RATE_WINDOW_MS) {
+          windowStart = now;
+          inWindow = 0;
+        }
+        if (inWindow >= MAX_PER_WINDOW) {
+          dropped += 1;
+          return false;
+        }
+        inWindow += 1;
+        return true;
+      };
       const bodyPattern = new RegExp(
         'video_info|variants|video\\.twimg\\.com|amplify_video|ext_tw_video|tweet_video|note_tweet|quoted_status|conversation_id_str',
         'i'
@@ -11715,16 +11762,18 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         /json|javascript|text/i.test(contentType || '') || interestingUrl(url);
       const emit = (url, body, transport) => {
         try {
-          if (sent >= MAX_MESSAGES || !body) return;
+          if (!body) return;
           const text = String(body);
           if (!interestingBody(text) && !/SearchTimeline|TweetDetail/i.test(url || '')) return;
-          sent += 1;
+          if (!admit()) return;
           window.postMessage(
             {
               source: SOURCE,
+              contractVersion: 1,
               type: 'response',
               url: String(url || ''),
               transport,
+              dropped,
               truncated: text.length > limit,
               body: text.slice(0, limit),
             },
@@ -11816,6 +11865,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         window.postMessage(
           {
             source: SOURCE,
+            contractVersion: 1,
             type: 'installed',
             transport: 'injected',
           },
@@ -12028,6 +12078,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       validateNetworkCapturePayload,
       networkCapturePatterns,
       networkCaptureSignature,
+      networkCaptureBridgeSource,
+      installUnsafeWindowNetworkCapture,
+      networkCaptureDiagnostics,
       ensureButton,
       // Long-form (note) full-text recovery from passively captured GraphQL payloads.
       noteTweetsFromCapturedBody,

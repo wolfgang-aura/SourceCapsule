@@ -212,6 +212,115 @@ const folderResult = await bridgeResult;
 assert.equal(folderResult.ok, true);
 assert.equal(folderResult.handle.name, 'Bridge Folder');
 
+console.log('[4b/5] Checking the three network tees stay aligned and never starve the page...');
+// The fetch/XHR tee exists three times: the unsafeWindow copy, the stringified copy the
+// userscript injects, and extension-src/page-bridge.js. They must agree on patterns and
+// on the rate cap, and none may go silent for the life of a long SPA session.
+const bridgeBodyFor = (n) =>
+  JSON.stringify({
+    rest_id: String(n),
+    legacy: { conversation_id_str: '100', full_text: `reply ${n}` },
+  });
+const stubBridgeFetch = (win) => {
+  win.fetch = async (url) => ({
+    url,
+    headers: { get: () => 'application/json' },
+    clone: () => ({ text: async () => bridgeBodyFor(String(url).split('n=')[1]) }),
+  });
+};
+const settle = () => new Promise((resolve) => setTimeout(resolve, 30));
+const fireBridgeResponses = async (win, count, from) => {
+  for (let i = 0; i < count; i++) {
+    await win.fetch(`https://x.com/i/api/graphql/test/TweetDetail?n=${from + i}`);
+  }
+  await settle();
+};
+const newBridgeWindow = (patternSink) => {
+  const dom = new JSDOM('<!doctype html><title>Tee</title>', {
+    url: 'https://x.com/test/status/1',
+    runScripts: 'outside-only',
+  });
+  if (patternSink) {
+    const NativeRegExp = dom.window.RegExp;
+    dom.window.RegExp = class extends NativeRegExp {
+      constructor(pattern, flags) {
+        super(pattern, flags);
+        patternSink.push(this);
+      }
+    };
+  }
+  stubBridgeFetch(dom.window);
+  return dom.window;
+};
+const realNow = Date.now;
+let fakeNow = 5_000_000;
+const withFakeClock = async (win, fn) => {
+  Date.now = () => fakeNow;
+  win.Date.now = () => fakeNow;
+  try {
+    await fn();
+  } finally {
+    Date.now = realNow;
+  }
+};
+// Both MAIN-world copies post messages; run the identical scenario against each.
+const injectedPatterns = [];
+const messageBridges = {
+  'page-bridge.js': (win) => win.eval(bridgeSource),
+  'networkCaptureBridgeSource()': (win) => win.eval(engine.networkCaptureBridgeSource(6_000_000)),
+};
+for (const [name, install] of Object.entries(messageBridges)) {
+  const win = newBridgeWindow(name.startsWith('network') ? injectedPatterns : null);
+  const messages = [];
+  win.addEventListener('message', (event) => {
+    if (event.data && event.data.type === 'response') messages.push(event.data);
+  });
+  await withFakeClock(win, async () => {
+    install(win);
+    await fireBridgeResponses(win, 250, 0);
+    assert.equal(messages.length, 100, `${name}: one rate window admits at most 100 responses`);
+    fakeNow += 11_000;
+    await fireBridgeResponses(win, 1, 1000);
+    assert.equal(messages.length, 101, `${name}: the page is not silenced for good`);
+    const last = messages[messages.length - 1];
+    assert.equal(last.dropped, 150, `${name}: drops are reported to the userscript`);
+    assert.equal(last.contractVersion, 1, `${name}: every message carries contractVersion`);
+  });
+}
+// The userscript-side copy hands payloads straight to handleNetworkCapturePayload.
+{
+  const win = newBridgeWindow(null);
+  const diag = engine.networkCaptureDiagnostics;
+  const seenBefore = diag.responsesSeen;
+  const realLog = console.log;
+  console.log = () => {}; // the engine logs once per captured response
+  try {
+    await withFakeClock(win, async () => {
+      assert.equal(engine.installUnsafeWindowNetworkCapture(win), true);
+      await fireBridgeResponses(win, 250, 2000);
+      assert.equal(diag.responsesSeen - seenBefore, 100, 'unsafeWindow copy honours the same cap');
+      fakeNow += 11_000;
+      await fireBridgeResponses(win, 1, 3000);
+      assert.equal(diag.responsesSeen - seenBefore, 101);
+      assert.equal(diag.bridgeDropped, 150, 'drops surface in networkCaptureDiagnostics');
+    });
+  } finally {
+    console.log = realLog;
+  }
+}
+// Pattern drift fails here instead of silently in production.
+const literalFrom = (source, name) => {
+  const match = source.match(new RegExp(`const ${name} =\\s*(/.+/[a-z]*);`));
+  assert.ok(match, `page-bridge.js declares ${name}`);
+  return new Function(`return ${match[1]}`)();
+};
+const expectedPatterns = engine.networkCapturePatterns();
+assert.equal(literalFrom(bridgeSource, 'bodyPattern').source, expectedPatterns.body.source);
+assert.equal(literalFrom(bridgeSource, 'urlPattern').source, expectedPatterns.url.source);
+const injectedSources = injectedPatterns.map((pattern) => pattern.source);
+assert.ok(injectedSources.includes(expectedPatterns.body.source), 'injected body pattern drifted');
+assert.ok(injectedSources.includes(expectedPatterns.url.source), 'injected url pattern drifted');
+
 console.log('[5/5] Auditing package files, versions, and production hosts...');
 const out = path.join(root, 'dist', 'sourcecapsule-extension');
 const manifest = JSON.parse(fs.readFileSync(path.join(out, 'manifest.json'), 'utf8'));
