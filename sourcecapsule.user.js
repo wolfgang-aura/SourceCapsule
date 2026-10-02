@@ -165,7 +165,10 @@
     toastId: 'sourcecapsule-toast',
     styleId: 'sourcecapsule-style',
     debug: true,
-    debugEmbed: true,
+    // Page debug output (URL, text previews and raw HTML of every tweet in the column)
+    // is embedded in each local export when true. Off by default; a share upload never
+    // carries it regardless of this flag.
+    debugEmbed: false,
     // Scroll the page top-to-bottom before extracting so X's lazy/virtualized
     // media loads into the DOM. The #1 suspected cause of missing tweet images.
     forceLoad: true,
@@ -5504,12 +5507,15 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       publicMedia.set(mediaId, `${created.viewUrl}/${path}`);
     });
     const sharedModel = applySharedMediaUrls(model, publicMedia);
-    const markdown = renderLlmMarkdown(sharedModel, debugJson, {
+    // Never pass the page debug JSON to a share upload: it holds the page URL, previews of
+    // every tweet in the column (other people's replies included) and raw HTML. The
+    // manifest keeps only its non-page-content capture counters.
+    const markdown = renderLlmMarkdown(sharedModel, '', {
       mediaFiles: publicMedia,
       sharedLink: true,
     });
-    const html = assembleHtml(sharedModel, debugJson, { distribution: 'shared' });
-    const manifest = renderArchiveManifestJson(sharedModel, debugJson);
+    const html = assembleHtml(sharedModel, '', { distribution: 'shared' });
+    const manifest = renderArchiveManifestJson(sharedModel, '');
     const uploads = [
       { name: 'content.html', data: html, type: 'text/html;charset=utf-8' },
       { name: 'content.md', data: markdown, type: 'text/markdown;charset=utf-8' },

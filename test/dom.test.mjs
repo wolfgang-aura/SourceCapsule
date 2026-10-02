@@ -4834,6 +4834,52 @@ await checkAsync(
   }
 );
 
+await checkAsync('share uploads never carry the page debug diagnostics', async () => {
+  const model = {
+    type: 'post',
+    title: 'No debug upload',
+    heading: 'No debug upload',
+    sourceUrl: STATUS_URL,
+    author: { name: 'Vega Hao', handle: '@Vegahao' },
+    blocks: [{ kind: 'paragraph', html: 'Hello' }],
+  };
+  const debugJson = JSON.stringify({
+    pageUrl: 'https://x.com/home?SECRET_PAGE_URL',
+    tweets: [{ textPreview: 'SECRET_OTHER_USER_REPLY', html: '<div>SECRET_OUTER_HTML</div>' }],
+  });
+  const bodies = [];
+  global.GM_xmlhttpRequest = (options) => {
+    if (options.method === 'POST' && options.url.endsWith('/api/capsules')) {
+      options.onload({
+        status: 200,
+        responseText: JSON.stringify({
+          uploadUrl: 'https://share.test/api/capsules/abc/files',
+          uploadToken: 't',
+          finalizeUrl: 'https://share.test/api/capsules/abc/finalize',
+          viewUrl: 'https://share.test/c/abc',
+        }),
+      });
+      return;
+    }
+    if (options.method === 'PUT' && typeof options.data === 'string') bodies.push(options.data);
+    options.onload({ status: 200, responseText: '' });
+  };
+  try {
+    await engine.createShareLink(model, debugJson, 7);
+  } finally {
+    delete global.GM_xmlhttpRequest;
+  }
+  assert.ok(bodies.length >= 3, 'content.html, content.md and manifest.json were uploaded');
+  bodies.forEach((body) => assert.ok(!body.includes('SECRET_'), 'no page debug in uploads'));
+  // The explicit "Copy diagnostic" bundle is a separate path and keeps working.
+  const bundle = engine.buildDiagnosticBundle(model, {
+    verdict: 'clean',
+    blockers: [],
+    counts: {},
+  });
+  assert.match(bundle, /"generator"/, 'diagnostic bundle still builds');
+});
+
 const replySighting = (id, root, legacy, extra = {}) => ({
   rest_id: id,
   core: { user_results: { result: { core: { screen_name: 'replier', name: 'Replier' } } } },
