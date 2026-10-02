@@ -4711,6 +4711,67 @@ check('a capture pass never advances to a surface it does not understand', () =>
   }
 }
 
+await checkAsync(
+  'createShareLink leaves the live model alone, so local saves keep their media',
+  async () => {
+    const PNG =
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+    const model = {
+      type: 'post',
+      title: 'Share keeps model',
+      heading: 'Share keeps model',
+      sourceUrl: STATUS_URL,
+      author: { name: 'Vega Hao', handle: '@Vegahao' },
+      blocks: [
+        { kind: 'paragraph', html: 'Hello' },
+        { kind: 'image', url: 'https://pbs.twimg.com/media/Keep1.jpg', dataUri: PNG },
+        {
+          kind: 'video',
+          url: 'https://video.twimg.com/v.mp4',
+          mode: 'video-inline',
+          dataUri: 'data:video/mp4;base64,AAAA',
+          videoFileCaptured: true,
+          posterDataUri: PNG,
+        },
+      ],
+    };
+    const puts = [];
+    global.GM_xmlhttpRequest = (options) => {
+      if (options.method === 'POST' && options.url.endsWith('/api/capsules')) {
+        options.onload({
+          status: 200,
+          responseText: JSON.stringify({
+            uploadUrl: 'https://share.test/api/capsules/abc/files',
+            uploadToken: 't',
+            finalizeUrl: 'https://share.test/api/capsules/abc/finalize',
+            viewUrl: 'https://share.test/c/abc',
+          }),
+        });
+        return;
+      }
+      if (options.method === 'PUT') puts.push(options.url);
+      options.onload({ status: 200, responseText: '' });
+    };
+    try {
+      await engine.createShareLink(model, '', 7);
+    } finally {
+      delete global.GM_xmlhttpRequest;
+    }
+    assert.ok(
+      puts.some((url) => url.includes('/media/')),
+      'media was uploaded'
+    );
+    assert.match(model.blocks[1].dataUri, /^data:image\/png/, 'image bytes stay on the live model');
+    assert.equal(model.blocks[2].dataUri, 'data:video/mp4;base64,AAAA');
+    assert.equal(model.blocks[2].videoFileCaptured, true);
+    assert.match(model.blocks[2].posterDataUri, /^data:image\/png/);
+    const bundle = engine.collectBundleMediaFiles(model);
+    assert.equal(bundle.files.length, 2, 'a later local save still finds the media');
+  }
+);
+
+// REVIEW-TESTS-END
+
 if (failures) {
   console.error(`\n${failures} check(s) failed.`);
   process.exit(1);

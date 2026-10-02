@@ -5429,9 +5429,13 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       .join('/');
   }
 
+  // Returns a copy of the model whose media point at the shared capsule's URLs. The
+  // caller's model is left untouched: a local library save, or a retry after a failed
+  // share, still needs the real bytes, and the share URLs expire.
   function applySharedMediaUrls(model, urlById) {
-    const walk = (blocks) => {
-      (blocks || []).forEach((block) => {
+    const mapBlocks = (blocks) =>
+      (blocks || []).map((source) => {
+        const block = { ...source };
         const url = block._xaMediaId && urlById.get(block._xaMediaId);
         if (block.kind === 'image') {
           block.dataUri = url || '';
@@ -5441,12 +5445,11 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
           block.mode = url ? 'poster-only' : block.mode;
           block.posterDataUri = url || '';
         } else if (block.kind === 'quote' || block.kind === 'blockquote') {
-          walk(block.blocks);
+          block.blocks = mapBlocks(block.blocks);
         }
+        return block;
       });
-    };
-    walk(model.blocks);
-    return model;
+    return { ...model, blocks: mapBlocks(model.blocks) };
   }
 
   async function createShareLink(model, debugJson, expiryDays, onProgress) {
@@ -5500,13 +5503,13 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     pathById.forEach((path, mediaId) => {
       publicMedia.set(mediaId, `${created.viewUrl}/${path}`);
     });
-    applySharedMediaUrls(model, publicMedia);
-    const markdown = renderLlmMarkdown(model, debugJson, {
+    const sharedModel = applySharedMediaUrls(model, publicMedia);
+    const markdown = renderLlmMarkdown(sharedModel, debugJson, {
       mediaFiles: publicMedia,
       sharedLink: true,
     });
-    const html = assembleHtml(model, debugJson, { distribution: 'shared' });
-    const manifest = renderArchiveManifestJson(model, debugJson);
+    const html = assembleHtml(sharedModel, debugJson, { distribution: 'shared' });
+    const manifest = renderArchiveManifestJson(sharedModel, debugJson);
     const uploads = [
       { name: 'content.html', data: html, type: 'text/html;charset=utf-8' },
       { name: 'content.md', data: markdown, type: 'text/markdown;charset=utf-8' },
@@ -11957,6 +11960,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       aiLinkReceiptText,
       showRecentShareLinks,
       renderArchiveManifestJson,
+      createShareLink,
       EXPORT_TYPES,
       POST_EXPORT_TYPES,
       THREAD_EXPORT_TYPES,
