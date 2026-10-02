@@ -5893,24 +5893,95 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     };
   }
 
+  /**
+   * The `sourcecapsule` database is SHARED: the library folder handle lives in `handles`
+   * and the reply archive lives in `reply-archive`. Both openers must agree on the
+   * version, because a fixed-version open fails with VersionError once the other store
+   * has bumped it. So this opens at whatever version exists and upgrades (version + 1)
+   * only when a needed store is missing, creating every missing store in one upgrade.
+   * Installs already at version 2 or higher keep working untouched.
+   */
+  function openSharedIdb(factory) {
+    const idb =
+      factory ||
+      (typeof indexedDB !== 'undefined' && indexedDB) ||
+      (typeof window !== 'undefined' && window.indexedDB) ||
+      null;
+    if (!idb) return Promise.reject(new Error('indexedDB is not available'));
+    const required = [IDB_STORE, REPLY_ARCHIVE_TABLE];
+    const complete = (db) => required.every((name) => db.objectStoreNames.contains(name));
+    const openAt = (version) =>
+      new Promise((resolve, reject) => {
+        let request;
+        try {
+          request = version ? idb.open(IDB_NAME, version) : idb.open(IDB_NAME);
+        } catch (error) {
+          reject(error);
+          return;
+        }
+        request.onupgradeneeded = () => {
+          const db = request.result;
+          required.forEach((name) => {
+            if (!db.objectStoreNames.contains(name)) db.createObjectStore(name);
+          });
+        };
+        request.onsuccess = () => {
+          const db = request.result;
+          // Let another tab's upgrade proceed instead of blocking behind this connection.
+          db.onversionchange = () => db.close();
+          resolve(db);
+        };
+        request.onerror = () => reject(request.error || new Error('indexedDB open failed'));
+      });
+    return (async () => {
+      const db = await openAt();
+      if (complete(db)) return db;
+      const nextVersion = (Number(db.version) || 1) + 1;
+      db.close();
+      try {
+        return await openAt(nextVersion);
+      } catch (error) {
+        // Another tab upgraded between our two opens; its version already has the stores.
+        if (error && error.name === 'VersionError') {
+          const retry = await openAt();
+          if (complete(retry)) return retry;
+          retry.close();
+        }
+        throw error;
+      }
+    })();
+  }
+
   function idbOpen() {
-    return new Promise((resolve, reject) => {
-      const req = indexedDB.open(IDB_NAME, 1);
-      req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE);
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
+    return openSharedIdb();
   }
 
   function idbRun(mode, fn) {
     return idbOpen().then(
       (db) =>
         new Promise((resolve, reject) => {
-          const tx = db.transaction(IDB_STORE, mode);
-          const store = tx.objectStore(IDB_STORE);
-          const req = fn(store);
-          tx.oncomplete = () => resolve(req && req.result);
-          tx.onerror = () => reject(tx.error);
+          let tx;
+          let req;
+          try {
+            tx = db.transaction(IDB_STORE, mode);
+            req = fn(tx.objectStore(IDB_STORE));
+          } catch (error) {
+            db.close();
+            reject(error);
+            return;
+          }
+          tx.oncomplete = () => {
+            db.close();
+            resolve(req && req.result);
+          };
+          tx.onerror = () => {
+            db.close();
+            reject(tx.error);
+          };
+          tx.onabort = () => {
+            db.close();
+            reject(tx.error || new Error('indexedDB transaction aborted'));
+          };
         })
     );
   }
@@ -9294,7 +9365,6 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   // -------------------------------------------------------------------------
 
   const REPLY_ARCHIVE_KEY_PREFIX = 'sourcecapsule:reply-archive:';
-  const REPLY_ARCHIVE_DB = 'sourcecapsule';
   const REPLY_ARCHIVE_TABLE = 'reply-archive';
 
   /**
@@ -9447,39 +9517,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       (typeof window !== 'undefined' && window.indexedDB) ||
       null;
     if (!idb) return null;
-    const openAt = (version) =>
-      new Promise((resolve, reject) => {
-        let request;
-        try {
-          request = version ? idb.open(REPLY_ARCHIVE_DB, version) : idb.open(REPLY_ARCHIVE_DB);
-        } catch (error) {
-          reject(error);
-          return;
-        }
-        request.onupgradeneeded = () => {
-          const db = request.result;
-          if (!db.objectStoreNames.contains(REPLY_ARCHIVE_TABLE)) {
-            db.createObjectStore(REPLY_ARCHIVE_TABLE);
-          }
-        };
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error || new Error('indexedDB open failed'));
-      });
-    /**
-     * The `sourcecapsule` database is SHARED - the library root folder handle already
-     * lives in it under `handles`, created at version 1. Opening at a hard-coded
-     * version 1 therefore never fires onupgradeneeded on an existing install, the
-     * `reply-archive` store is never created, and every write dies with NotFoundError.
-     * So: open at whatever version exists, and only if our store is missing reopen at
-     * version+1 to add it (an upgrade preserves the stores already there).
-     */
-    const open = async () => {
-      const db = await openAt();
-      if (db.objectStoreNames.contains(REPLY_ARCHIVE_TABLE)) return db;
-      const nextVersion = (Number(db.version) || 1) + 1;
-      db.close();
-      return openAt(nextVersion);
-    };
+    // Shared with the library's handle store: one opener, so neither can strand the other.
+    const open = () => openSharedIdb(idb);
     const run = (mode, fn) =>
       open().then(
         (db) =>
@@ -12038,6 +12077,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       replyArchiveCsv,
       replyMediaLinksFromLegacy,
       indexedDbReplyArchiveBackend,
+      openSharedIdb,
       loadReplyArchiveForPost,
       enrichReplyArchiveViaSyndication,
       downloadReplyArchive,

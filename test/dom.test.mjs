@@ -4007,6 +4007,14 @@ function fakeIndexedDbFactory(initialStores = ['handles'], initialVersion = 1) {
     open(_name, version) {
       const request = { onupgradeneeded: null, onsuccess: null, onerror: null, result: null };
       queueMicrotask(() => {
+        if (version && version < state.version) {
+          // Real IndexedDB refuses to open below the stored version.
+          const error = new Error('The requested version is less than the existing version.');
+          error.name = 'VersionError';
+          request.error = error;
+          if (request.onerror) request.onerror();
+          return;
+        }
         if (version && version > state.version) {
           state.version = version;
           request.result = makeDb();
@@ -4048,6 +4056,34 @@ await checkAsync(
     await store.save('2000000000000000000', [{ id: '2000000000000000102', text: 'Second write.' }]);
     assert.equal(factory.state.version, 2);
     assert.equal((await store.load('2000000000000000000')).records.length, 2);
+  }
+);
+
+await checkAsync(
+  'library handle store and reply archive share one IndexedDB opener, in either order',
+  async () => {
+    // Reply archive first bumps v1 -> v2; the library opener must still open afterwards.
+    const factory = fakeIndexedDbFactory(['handles'], 1);
+    const store = engine.createReplyArchiveStore(engine.indexedDbReplyArchiveBackend(factory));
+    await store.save('2000000000000000000', [{ id: '2000000000000000101', text: 'x' }]);
+    assert.equal(factory.state.version, 2);
+    const db = await engine.openSharedIdb(factory);
+    assert.equal(db.objectStoreNames.contains('handles'), true);
+    assert.equal(factory.state.version, 2, 'opening must not downgrade or re-bump');
+
+    // A fresh install gets both stores in a single upgrade.
+    const fresh = fakeIndexedDbFactory([], 0);
+    await engine.openSharedIdb(fresh);
+    assert.equal(fresh.state.stores.has('handles'), true);
+    assert.equal(fresh.state.stores.has('reply-archive'), true);
+
+    // An install already past v2 with only `handles` upgrades once and keeps working.
+    const old = fakeIndexedDbFactory(['handles'], 5);
+    await engine.openSharedIdb(old);
+    assert.equal(old.state.version, 6);
+    assert.equal(old.state.stores.has('reply-archive'), true);
+    await engine.openSharedIdb(old);
+    assert.equal(old.state.version, 6);
   }
 );
 
