@@ -192,6 +192,20 @@ await checkAsync('extension folder bridge returns a validated directory handle',
   delete globalThis.__SOURCECAPSULE_EXTENSION__;
 });
 
+check('extension controller opens the recent AI links list', () => {
+  engine.setShareLinks([{ id: 'one', title: 'One', viewUrl: 'http://127.0.0.1:8787/c/one' }]);
+  const result = engine.extensionControllerMessage({
+    type: 'sourcecapsule:controller',
+    version: 1,
+    action: 'show-share-links',
+  });
+  assert.deepEqual(result, { ok: true, count: 1 });
+  const modal = document.querySelector('.xa-recent-links-modal');
+  assert.ok(modal, 'the popup action must open the list an extension user deletes links from');
+  modal.querySelector('.xa-modal-cancel').click();
+  engine.setShareLinks([]);
+});
+
 check('extension capability handshake selects ZIP fallback when the picker is unavailable', () => {
   globalThis.__SOURCECAPSULE_EXTENSION__ = true;
   engine.handleNetworkCapturePayload({
@@ -243,7 +257,9 @@ await checkAsync(
       expiresAt: new Date(Date.now() - 86400000).toISOString(),
     };
     engine.setShareLinks([active, expired]);
-    window.confirm = () => true;
+    window.confirm = () => {
+      throw new Error('Delete link must not raise a native dialog');
+    };
     engine.showRecentShareLinks();
     const modal = document.querySelector('.xa-recent-links-modal');
     assert.ok(modal, 'recent links modal should be visible');
@@ -251,7 +267,12 @@ await checkAsync(
     assert.equal(rows.length, 2);
     assert.ok(rows[1].classList.contains('expired'), 'expired link should be greyed out');
     assert.match(rows[1].textContent, /Expired:/);
-    rows[1].querySelector('.danger').click();
+    const del = rows[1].querySelector('.danger');
+    del.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(engine.getShareLinks().length, 2, 'one click only arms the delete');
+    assert.match(del.textContent, /click again/i);
+    del.click();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.deepEqual(
       engine.getShareLinks().map((item) => item.id),

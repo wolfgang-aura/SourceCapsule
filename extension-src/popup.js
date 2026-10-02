@@ -44,6 +44,10 @@ const STRINGS = {
     settingSaved: 'Setting saved',
     folderPickerSuccess: 'Finish choosing the folder in the SourceCapsule prompt on the X page.',
     folderPickerError: 'Could not open the folder prompt. Refresh X and try again.',
+    linksHeading: 'AI links',
+    linksDesc: 'Copy, open, or delete the links this browser created.',
+    showLinks: 'Show recent AI links',
+    linksError: 'Could not open the link list. Refresh X and try again.',
   },
   zh: {
     tagline: '存档 X，保留来源。',
@@ -86,6 +90,10 @@ const STRINGS = {
     settingSaved: '设置已保存',
     folderPickerSuccess: '请在 X 页面上的 SourceCapsule 提示中完成文件夹选择。',
     folderPickerError: '无法打开文件夹提示。请刷新 X 后重试。',
+    linksHeading: 'AI 链接',
+    linksDesc: '复制、打开或删除此浏览器创建的链接。',
+    showLinks: '查看最近的 AI 链接',
+    linksError: '无法打开链接列表。请刷新 X 后重试。',
   },
 };
 
@@ -310,6 +318,21 @@ async function initPopup() {
       result && result.ok
         ? t('folderPickerSuccess')
         : (result && result.error) || t('folderPickerError');
+  });
+  const showLinks = document.querySelector('#show-links');
+  showLinks.addEventListener('click', async () => {
+    showLinks.disabled = true;
+    const result = await sendToController(tab.id, 'show-share-links');
+    showLinks.disabled = false;
+    if (result && result.ok) {
+      // The list opens on the X page; closing the popup puts it in front.
+      window.close();
+      return;
+    }
+    const help = document.querySelector('#links-help');
+    help.hidden = false;
+    help.classList.add('error');
+    help.textContent = (result && result.error) || t('linksError');
   });
 }
 

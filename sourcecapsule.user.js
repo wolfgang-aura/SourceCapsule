@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SourceCapsule - Save X/Twitter Threads & Articles as Markdown for LLMs + Offline HTML
 // @namespace    https://github.com/wolfgang-aura/SourceCapsule
-// @version      1.6.2
+// @version      1.6.3
 // @description  One click saves an X (Twitter) thread, Article, or post as clean Markdown for LLM context (Claude, ChatGPT) plus a self-contained offline HTML archive - images, video, and quoted posts embedded, with honest completeness reporting. Local-first, with optional expiring AI readable links.
 // @author       wolfgang-aura
 // @license      MIT
@@ -210,7 +210,7 @@
   };
 
   const APP = 'SourceCapsule';
-  const VERSION = '1.6.2';
+  const VERSION = '1.6.3';
 
   // ===========================================================================
   // Small utilities
@@ -5775,6 +5775,12 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       showFolderPickerPrompt();
       return { ok: true, requiresPageAction: true };
     }
+    if (message.action === 'show-share-links') {
+      // The userscript opens this list from a manager menu command, which the extension
+      // stubs out; without this action an extension user had no way to delete a link.
+      showRecentShareLinks();
+      return { ok: true, count: getShareLinks().length };
+    }
     if (message.action === 'capture-share') {
       return runAutomatedShareCapture(message.value || {});
     }
@@ -6535,8 +6541,23 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         del.type = 'button';
         del.className = 'danger';
         del.textContent = 'Delete link';
+        del.title = 'Deletes the link on the share server. This cannot be undone.';
+        let disarmTimer = null;
+        const disarm = () => {
+          clearTimeout(disarmTimer);
+          delete del.dataset.armed;
+          del.textContent = 'Delete link';
+        };
         del.addEventListener('click', async () => {
-          if (!window.confirm('Delete this AI readable link? This cannot be undone.')) return;
+          // A second click confirms, not window.confirm: a native dialog raised from the
+          // extension's isolated world blocks the whole tab and no automation can answer it.
+          if (!del.dataset.armed) {
+            del.dataset.armed = '1';
+            del.textContent = 'Click again to delete';
+            disarmTimer = setTimeout(disarm, 5000);
+            return;
+          }
+          disarm();
           del.disabled = true;
           try {
             await deleteSharedCapsule(record);

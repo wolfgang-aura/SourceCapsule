@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.3] - 2026-10-03
+
+### Fixed
+
+- The browser extension can now open "Recent AI readable links" from its popup, so an AI link
+  made in the extension can be deleted. The list was only reachable through a userscript-manager
+  menu command, which the extension does not have.
+- "Delete link" now asks for a second click instead of a native browser dialog. The dialog
+  blocked the whole tab.
+
 ## [1.6.2] - 2026-10-03
 
 ### Fixed
