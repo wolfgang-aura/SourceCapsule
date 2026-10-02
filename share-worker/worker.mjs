@@ -313,7 +313,12 @@ function publicPath(pathname, id) {
   if (pathname === `${base}/manifest.json`) return 'manifest.json';
   const mediaPrefix = `${base}/media/`;
   if (pathname.startsWith(mediaPrefix)) {
-    const name = decodeURIComponent(pathname.slice(mediaPrefix.length));
+    let name;
+    try {
+      name = decodeURIComponent(pathname.slice(mediaPrefix.length));
+    } catch {
+      return '';
+    }
     return /^[-A-Za-z0-9._]{1,180}$/.test(name) ? `media/${name}` : '';
   }
   return '';
@@ -455,7 +460,13 @@ async function createAllowed(request, env) {
 async function handleRequest(request, env, ctx) {
   if (request.method === 'OPTIONS') return new Response(null, { headers: corsHeaders(request) });
   const url = new URL(request.url);
-  const segments = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+  let segments;
+  try {
+    segments = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+  } catch {
+    // A stray "%" or truncated escape is the caller's mistake, not a Worker failure.
+    return json(request, { error: 'Malformed path.' }, 400);
+  }
   if (request.method === 'POST' && url.pathname === '/api/capsules') {
     if (!(await createAllowed(request, env))) {
       return json(

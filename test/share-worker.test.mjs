@@ -516,4 +516,27 @@ const past = new Date(Date.now() - 86400000).toISOString();
   assert.equal(md.headers.get('Content-Type'), 'text/markdown;charset=utf-8');
 }
 
+{
+  // A malformed percent-escape is a bad request, not a Worker exception (a 500).
+  const store = new MemoryR2();
+  const capsule = await publishCapsule(store);
+  for (const [method, path] of [
+    ['GET', `/c/${capsule.id}/media/%E0`],
+    ['GET', `/c/${capsule.id}/media/%`],
+    ['PUT', `/api/capsules/${capsule.id}/files/media/%E0`],
+    ['GET', '/%E0'],
+  ]) {
+    const res = await worker.fetch(
+      new Request(`https://share.example${path}`, {
+        method,
+        headers: { Authorization: `Bearer ${capsule.uploadToken}` },
+        body: method === 'PUT' ? new Uint8Array([1]) : undefined,
+      }),
+      { CAPSULES: store },
+      ctx
+    );
+    assert.ok([400, 404].includes(res.status), `${method} ${path} answered ${res.status}`);
+  }
+}
+
 console.log('SourceCapsule share worker test passed.');
