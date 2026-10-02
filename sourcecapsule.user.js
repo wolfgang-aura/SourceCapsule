@@ -9595,6 +9595,19 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         const root = String(rootStatusId || '');
         const prior = await store.load(root);
         const merged = mergeReplyArchiveRecords(prior.records, records || []);
+        if (prior.storageError) {
+          // load() answers an unreadable archive with `records: []`. Writing `merged` now
+          // would replace everything stored with just this pass, so refuse and report.
+          return {
+            ok: false,
+            backend: store.name,
+            records: merged,
+            replyCount: merged.length,
+            approxBytes: 0,
+            storageError: `existing archive could not be read, so nothing was overwritten: ${prior.storageError}`,
+            updatedAt: '',
+          };
+        }
         const payload = {
           contractVersion: 3,
           rootStatusId: root,

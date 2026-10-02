@@ -3746,6 +3746,34 @@ await checkAsync(
   }
 );
 
+await checkAsync(
+  'reply archive save never overwrites a stored archive it failed to read',
+  async () => {
+    const memory = new Map();
+    let failReads = false;
+    const store = engine.createReplyArchiveStore({
+      async get(key) {
+        if (failReads) throw new Error('transient read failure');
+        return memory.get(key) || null;
+      },
+      async set(key, value) {
+        memory.set(key, value);
+      },
+      name: 'flaky',
+    });
+    const root = '2000000000000000000';
+    await store.save(root, [{ id: '2000000000000000101', text: 'Earlier archived reply.' }]);
+    failReads = true;
+    const saved = await store.save(root, [{ id: '2000000000000000102', text: 'New pass.' }]);
+    assert.equal(saved.ok, false);
+    assert.match(saved.storageError, /transient read failure/);
+    failReads = false;
+    const loaded = await store.load(root);
+    assert.equal(loaded.records.length, 1, 'the stored archive must be untouched');
+    assert.equal(loaded.records[0].id, '2000000000000000101');
+  }
+);
+
 check('reply archive exports the actual replies, threaded, with media links', () => {
   const archive = engine.buildReplyArchive({
     rootStatusId: '2000000000000000000',
