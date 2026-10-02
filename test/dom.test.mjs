@@ -2489,6 +2489,22 @@ check('quotedRefsFromCapturedBody harvests parent -> quoted refs from GraphQL bo
   assert.equal(engine.quotedRefsFromCapturedBody('{"data":{"no":true}}').length, 0);
 });
 
+check('quotedRefsFromCapturedBody reads the quoted handle from X core.screen_name too', () => {
+  const body = JSON.stringify({
+    rest_id: '3000000000000000001',
+    legacy: { quoted_status_id_str: '3000000000000000002' },
+    quoted_status_result: {
+      result: {
+        rest_id: '3000000000000000002',
+        core: { user_results: { result: { core: { screen_name: 'new_shape_user' } } } },
+      },
+    },
+  });
+  const refs = engine.quotedRefsFromCapturedBody(body);
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0].quotedHandle, 'new_shape_user');
+});
+
 check('quotedRefsFromCapturedBody also accepts the legacy quoted_status.user shape', () => {
   const body = JSON.stringify({
     tweets: [

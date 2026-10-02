@@ -7120,6 +7120,17 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * `t.quoted_status.user.screen_name`) and the GraphQL result shape
    * (`t.quoted_status_result.result.core.user_results.result.legacy.screen_name`).
    */
+  /**
+   * The handle of a GraphQL `user_results.result`. X moved screen_name from the user's
+   * `legacy` block to `result.core`; read the newest shape first and fall back.
+   */
+  function screenNameFromUserResult(userResult) {
+    const user = (userResult && (userResult.user || userResult)) || {};
+    return String(
+      (user.core && user.core.screen_name) || (user.legacy && user.legacy.screen_name) || ''
+    );
+  }
+
   function quotedRefsFromCapturedBody(body) {
     const raw = String(body || '').trim();
     if (!raw || (raw[0] !== '{' && raw[0] !== '[')) return [];
@@ -7160,25 +7171,21 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       if (gqResult) {
         const qLegacy = gqResult.legacy || {};
         const qId = gqResult.rest_id || qLegacy.id_str || '';
-        const userLegacy =
-          (gqResult.core &&
-            gqResult.core.user_results &&
-            gqResult.core.user_results.result &&
-            gqResult.core.user_results.result.legacy) ||
-          {};
-        record(parentId, qId, userLegacy.screen_name);
+        record(
+          parentId,
+          qId,
+          screenNameFromUserResult(gqResult.core && gqResult.core.user_results?.result)
+        );
       }
       // Legacy shape (syndication-ish): quoted_status_id_str + quoted_status.user.screen_name.
       if (legacy.quoted_status_id_str) {
-        const qUser =
-          (item.quoted_status && item.quoted_status.user) ||
-          (item.quoted_status &&
-            item.quoted_status.core &&
-            item.quoted_status.core.user_results &&
-            item.quoted_status.core.user_results.result &&
-            item.quoted_status.core.user_results.result.legacy) ||
-          {};
-        record(parentId, legacy.quoted_status_id_str, qUser.screen_name);
+        const quotedStatus = item.quoted_status;
+        const qHandle =
+          (quotedStatus && quotedStatus.user && quotedStatus.user.screen_name) ||
+          screenNameFromUserResult(
+            quotedStatus && quotedStatus.core && quotedStatus.core.user_results?.result
+          );
+        record(parentId, legacy.quoted_status_id_str, qHandle);
       }
       Object.keys(item).forEach((key) => walk(item[key]));
     };
@@ -7291,7 +7298,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         // `user_results.result.core`. Live capture returned empty handles for every
         // reply until this fallback existed; check both, newest shape first.
         const userCore = (userResult && userResult.core) || {};
-        const handle = String(userCore.screen_name || userLegacy.screen_name || '');
+        const handle = screenNameFromUserResult(userResult);
         const displayName = String(userCore.name || userLegacy.name || '');
         // GraphQL delivers reply bodies with &, <, > HTML-encoded, exactly like
         // syndication does. Live archive Markdown showed "-&gt;" inside real replies.
