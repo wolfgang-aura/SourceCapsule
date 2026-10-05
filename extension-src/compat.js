@@ -43,13 +43,13 @@
       const responseHeaders = Array.from(response.headers.entries())
         .map(([name, value]) => `${name}: ${value}`)
         .join('\r\n');
-      return {
-        status: response.status,
-        response:
-          details.responseType === 'arraybuffer' ? buffer : new TextDecoder().decode(buffer),
-        responseText: new TextDecoder().decode(buffer),
-        responseHeaders,
-      };
+      // Same contract as the proxy path: a binary reply carries no responseText. This
+      // fallback is what large videos take, so a decoded copy would double their memory.
+      if (details.responseType === 'arraybuffer') {
+        return { status: response.status, response: buffer, responseHeaders };
+      }
+      const text = new TextDecoder().decode(buffer);
+      return { status: response.status, response: text, responseText: text, responseHeaders };
     } finally {
       clearTimeout(timer);
     }

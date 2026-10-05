@@ -64,6 +64,9 @@ const directResult = await compat.directHttpRequest(
 assert.equal(directResult.status, 200);
 assert.deepEqual(Array.from(new Uint8Array(directResult.response)), [1, 2, 3, 4]);
 assert.match(directResult.responseHeaders, /content-type: image\/jpeg/);
+// A binary fallback must not also decode the body into text: for a 50 MB video that is
+// a second, unused copy of the whole file. The proxy path omits it too.
+assert.equal(directResult.responseText, undefined);
 
 // The proxy must send ONE representation of the body. Sending decoded text plus base64
 // roughly triples a media response and can pass Chrome's 64 MiB message limit.
