@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.6] - 2026-10-05
+
+### Added
+
+- Every capsule states up front whether it is complete. The `.llm.md` opens with a
+  `## Completeness` section (`Status: COMPLETE` or `Status: INCOMPLETE` with counts) and asks
+  any reader, person or AI, to say so and name what is missing. An incomplete HTML capsule shows
+  the same status as a visible banner. Informational lines move from Warnings to a new Notes list.
+- `node scripts/sourcecapsule-capture.mjs --reload` reloads the extension after
+  `npm run build:extension`, so a rebuilt `dist/` loads without a browser restart.
+
 ### Fixed
 
 - Unattended capture works with Windows Smart App Control on. The native host installer used to
