@@ -344,6 +344,14 @@ The alternative is a one-time **Load unpacked** of `dist\sourcecapsule-extension
 without any launcher. It is a manual UI step, and it cannot coexist with the command-line copy:
 same `key`, same extension ID.
 
+**Google Chrome needs Load unpacked.** Since Chrome 137, branded Google Chrome
+[ignores `--load-extension`](https://groups.google.com/a/chromium.org/g/chromium-extensions/c/1-g8EFx2BBY/m/S0ET5wPjCAAJ).
+The launcher picks Brave, then Edge, then Chrome. When it ends up on Chrome, it leaves out
+`--load-extension`, says so, and still passes the occlusion flag. Load the extension once from
+`chrome://extensions` (Developer mode, **Load unpacked**, select `dist\sourcecapsule-extension`).
+Then start Chrome from the shortcut. `-Status` cannot see an unpacked extension on a command
+line, so on Chrome confirm with `--ping`. Chromium and Chrome for Testing still honor the flag.
+
 ### How it fits together
 
 The browser spawns native messaging hosts; nothing outside can dial into the browser. So the
@@ -359,7 +367,7 @@ capture at a time. Timeouts are bounded at every hop and the URL is validated ag
   means starting it from the launcher above.
 - If the extension is not actually running, the bridge reports
   `Specified native messaging host not found`. That is almost always a start without
-  `--load-extension`, not a bad registration.
+  `--load-extension` (or, on Google Chrome, a missing Load unpacked), not a bad registration.
 - The capture window is visible but never focused. A hidden tab has `requestAnimationFrame`
   paused and timers throttled, which starves the media force-load pass and manufactures
   strict-mode blockers.

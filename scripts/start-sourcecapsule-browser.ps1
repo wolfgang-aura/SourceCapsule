@@ -15,6 +15,10 @@
 #     which records location 4 and survives restarts on its own. That is a manual UI step
 #     and cannot coexist with the command-line copy: same `key`, same extension ID.
 #
+# Google Chrome is the exception (#44). Its branded builds ignore `--load-extension` since
+# Chrome 137, so on Chrome Load unpacked is the only way in. For Chrome this script still
+# manages the occlusion flag below and the shortcut, but never passes `--load-extension`.
+#
 #   powershell -ExecutionPolicy Bypass -File scripts\start-sourcecapsule-browser.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts\start-sourcecapsule-browser.ps1 -Restart -Verify
 #   powershell -ExecutionPolicy Bypass -File scripts\start-sourcecapsule-browser.ps1 -InstallShortcut -InstallStartup
@@ -22,7 +26,7 @@
 
 [CmdletBinding()]
 param(
-    # Path to the browser executable. Brave first, then Chrome, then Edge.
+    # Path to the browser executable. Brave first, then Edge, then Chrome.
     [string]$BrowserPath,
     # Unpacked extension directory. Defaults to <repo>\dist\sourcecapsule-extension.
     [string]$ExtensionDir,
@@ -39,7 +43,9 @@ param(
     # Report what is running and whether the flag is present; change nothing.
     [switch]$Status,
     # Seconds to wait for -Verify to see a healthy bridge.
-    [int]$VerifyTimeoutSeconds = 90
+    [int]$VerifyTimeoutSeconds = 90,
+    # Print the browser and the arguments this script would start it with; change nothing.
+    [switch]$ShowLaunchArgs
 )
 
 $ErrorActionPreference = 'Stop'
@@ -60,15 +66,24 @@ function Resolve-BrowserPath {
         "$env:ProgramFiles\BraveSoftware\Brave-Browser\Application\brave.exe",
         "${env:ProgramFiles(x86)}\BraveSoftware\Brave-Browser\Application\brave.exe",
         "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\Application\brave.exe",
+        # Edge before Chrome: Edge honors --load-extension, so it needs no manual step.
+        "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
+        "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
         "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
         "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
-        "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe",
-        "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+        "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
     )
     foreach ($candidate in $candidates) {
         if ($candidate -and (Test-Path $candidate)) { return $candidate }
     }
-    throw 'No Brave, Chrome, or Edge executable found. Pass -BrowserPath explicitly.'
+    throw 'No Brave, Edge, or Chrome executable found. Pass -BrowserPath explicitly.'
+}
+
+# Branded Google Chrome 137+ ignores --load-extension. Chromium and Chrome for Testing also
+# ship a chrome.exe and still honor it, so tell them apart by product name, not file name.
+function Test-IgnoresLoadExtension([string]$exePath) {
+    $product = (Get-Item $exePath).VersionInfo.ProductName
+    return ($product -and $product.Trim() -eq 'Google Chrome')
 }
 
 # Only the browser's main process carries the user's command line. Every renderer, GPU,
@@ -100,6 +115,14 @@ function Test-HasExtensionFlag($proc, [string]$extensionDir) {
     return $proc.CommandLine.Replace('/', '\') -like "*$normalized*"
 }
 
+# What "started correctly" means depends on the browser. Where --load-extension works, it
+# must be on the command line. On Chrome the extension comes from Load unpacked, which no
+# command line shows, so the occlusion flag is the only thing this script can check.
+function Test-HasLaunchFlags($proc) {
+    if ($loadUnpacked) { return Test-HasOcclusionFlag $proc }
+    return Test-HasExtensionFlag $proc $extensionFull
+}
+
 function Get-ShortcutTargets {
     $desktop = [Environment]::GetFolderPath('Desktop')
     $startMenu = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'
@@ -111,14 +134,14 @@ function Get-ShortcutTargets {
     }
 }
 
-function New-BrowserShortcut([string]$path, [string]$exePath, [string]$extensionDir) {
+function New-BrowserShortcut([string]$path, [string]$exePath) {
     $shell = New-Object -ComObject WScript.Shell
     $link = $shell.CreateShortcut($path)
     $link.TargetPath = $exePath
-    $link.Arguments = "--load-extension=`"$extensionDir`" $occlusionFlag --restore-last-session"
+    $link.Arguments = $launchArgs
     $link.WorkingDirectory = Split-Path -Parent $exePath
     $link.IconLocation = "$exePath,0"
-    $link.Description = 'Brave with the SourceCapsule extension loaded (unattended capture bridge)'
+    $link.Description = 'Browser with the SourceCapsule extension loaded (unattended capture bridge)'
     $link.Save()
     Write-Host "Installed $path"
 }
@@ -126,6 +149,10 @@ function New-BrowserShortcut([string]$path, [string]$exePath, [string]$extension
 $browser = Resolve-BrowserPath
 $extensionFull = $ExtensionDir
 if (Test-Path $extensionFull) { $extensionFull = (Resolve-Path $extensionFull).Path }
+$loadUnpacked = Test-IgnoresLoadExtension $browser
+$launchArgs = "$occlusionFlag --restore-last-session"
+if (-not $loadUnpacked) { $launchArgs = "--load-extension=`"$extensionFull`" $launchArgs" }
+$loadUnpackedHelp = "Google Chrome ignores --load-extension, so load SourceCapsule once by hand: open chrome://extensions, turn on Developer mode, choose Load unpacked, and select $extensionFull. It stays loaded across restarts."
 
 if ($UninstallShortcut) {
     foreach ($entry in (Get-ShortcutTargets).GetEnumerator()) {
@@ -142,18 +169,26 @@ if (-not (Test-Path (Join-Path $extensionFull 'manifest.json'))) {
     throw "No unpacked extension at $extensionFull. Build it first: npm run build:extension"
 }
 
+if ($loadUnpacked) { Write-Host $loadUnpackedHelp }
+
+if ($ShowLaunchArgs) {
+    Write-Host "Browser: $browser"
+    Write-Host "Arguments: $launchArgs"
+    exit 0
+}
+
 # @() around the call as well: PowerShell unrolls a single-element return, and a scalar
 # has no .Count in 5.1, which silently prints a blank instead of "1".
 $running = @(Get-BrowserMainProcesses $browser)
-$withFlag = @($running | Where-Object { Test-HasExtensionFlag $_ $extensionFull })
-$withoutFlag = @($running | Where-Object { -not (Test-HasExtensionFlag $_ $extensionFull) })
+$withFlag = @($running | Where-Object { Test-HasLaunchFlags $_ })
+$withoutFlag = @($running | Where-Object { -not (Test-HasLaunchFlags $_) })
 
 if ($Status) {
     Write-Host "Browser:   $browser"
     Write-Host "Extension: $extensionFull"
     Write-Host "Running main processes: $($running.Count)"
-    Write-Host "  with the extension flag:    $($withFlag.Count)"
-    Write-Host "  without the extension flag: $($withoutFlag.Count)"
+    Write-Host "  with the launch flags:    $($withFlag.Count)"
+    Write-Host "  without the launch flags: $($withoutFlag.Count)"
     $occluded = @($withFlag | Where-Object { -not (Test-HasOcclusionFlag $_) })
     foreach ($entry in (Get-ShortcutTargets).GetEnumerator()) {
         $state = 'missing'
@@ -169,7 +204,12 @@ if ($Status) {
         exit 0
     }
     if ($withoutFlag.Count -gt 0) {
-        Write-Warning 'The browser is running WITHOUT the extension. Unattended capture will fail.'
+        if ($loadUnpacked) {
+            Write-Warning ('Chrome is running without ' + $occlusionFlag + '. Captures will still publish, but a thread will come back as its root post alone. Repair with -Restart -Verify.')
+        }
+        else {
+            Write-Warning 'The browser is running WITHOUT the extension. Unattended capture will fail.'
+        }
         exit 2
     }
     Write-Host 'The browser is not running.'
@@ -179,11 +219,11 @@ if ($Status) {
 if ($InstallShortcut -or $InstallStartup) {
     $targets = Get-ShortcutTargets
     if ($InstallShortcut) {
-        New-BrowserShortcut $targets.Desktop $browser $extensionFull
-        New-BrowserShortcut $targets.StartMenu $browser $extensionFull
+        New-BrowserShortcut $targets.Desktop $browser
+        New-BrowserShortcut $targets.StartMenu $browser
     }
     if ($InstallStartup) {
-        New-BrowserShortcut $targets.Startup $browser $extensionFull
+        New-BrowserShortcut $targets.Startup $browser
     }
     Write-Host ''
     Write-Host 'Start the browser from this shortcut and the capture bridge is always present.'
@@ -199,7 +239,7 @@ else {
     # would merely hand the URL to the process already running and drop the flag.
     if ($running.Count -gt 0) {
         if (-not $Restart) {
-            Write-Warning 'The browser is already running WITHOUT the SourceCapsule extension.'
+            Write-Warning 'The browser is already running WITHOUT the SourceCapsule launch flags.'
             Write-Warning 'Launching it again would only open a tab in that process; the flag would be ignored.'
             Write-Warning 'Re-run with -Restart to close it and start it with the extension.'
             exit 2
@@ -235,12 +275,8 @@ else {
                 Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
             }
     }
-    Write-Host "Starting $browser with $extensionFull"
-    Start-Process -FilePath $browser -ArgumentList @(
-        "--load-extension=$extensionFull",
-        $occlusionFlag,
-        '--restore-last-session'
-    )
+    Write-Host "Starting $browser $launchArgs"
+    Start-Process -FilePath $browser -ArgumentList $launchArgs
 }
 
 if (-not $Verify) {
@@ -268,5 +304,6 @@ while ((Get-Date) -lt $deadline) {
     }
 }
 Write-Warning "The bridge did not answer within $VerifyTimeoutSeconds seconds."
-Write-Warning 'Open brave://extensions and confirm SourceCapsule is listed and enabled.'
+if ($loadUnpacked) { Write-Warning $loadUnpackedHelp }
+else { Write-Warning 'Open the browser''s extensions page and confirm SourceCapsule is listed and enabled.' }
 exit 1

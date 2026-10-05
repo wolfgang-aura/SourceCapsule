@@ -14,6 +14,10 @@ All notable changes to this project are documented here. The format is based on
 - The native host installer exits with an error when it runs inside a packaged app's container.
   There its files and registry keys go to a private copy that a normally started browser cannot
   see, and it used to report success anyway.
+- The browser launcher no longer relies on `--load-extension` for Google Chrome, which ignores
+  the flag since Chrome 137. Its shortcut used to look healthy while Chrome never loaded the
+  extension. On Chrome the launcher now asks for a one-time Load unpacked and still passes the
+  occlusion flag. It prefers Edge over Chrome, and `-ShowLaunchArgs` prints what it would run.
 
 ## [1.6.5] - 2026-10-05
 
