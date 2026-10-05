@@ -357,6 +357,38 @@ check('includes structured provenance and capture manifest', () => {
   assert.ok(html.includes('Archive provenance'));
 });
 
+check('states capture completeness at the top of both capsule files', () => {
+  const status =
+    'Status: INCOMPLETE. Not captured: 2 quoted posts, 1 image, 2 videos (no file or poster), 1 video poster. Possibly truncated: 1 embedded post (only preview text was available).';
+  assert.ok(markdown.includes(status));
+  assert.ok(
+    markdown.indexOf('## Completeness') < markdown.indexOf('## What This File Is'),
+    'completeness must come before the body'
+  );
+  assert.ok(markdown.includes('tell the user it is incomplete'));
+  assert.ok(html.includes('<aside class="xa-completeness"'));
+  assert.ok(html.indexOf('xa-completeness') < html.indexOf('<article class="xa-body">'));
+
+  const warnings = markdown.slice(markdown.indexOf('- Warnings:'), markdown.indexOf('- Notes:'));
+  assert.ok(!warnings.includes('bytes are embedded in the companion'), 'note listed as a gap');
+  assert.ok(!warnings.includes('duplicate media hash group'), 'note listed as a gap');
+  const video003 = 'Video video-003 was detected, but the video file was not preserved offline.';
+  assert.equal(warnings.split(video003).length - 1, 1, 'warning repeated');
+
+  const clean = {
+    type: 'post',
+    title: 'Clean',
+    author: { name: 'Ada', handle: '@ada' },
+    sourceUrl: 'https://x.com/ada/status/1',
+    exportedAt: new Date('2026-06-26T00:00:00Z').toISOString(),
+    blocks: [{ kind: 'paragraph', html: 'Everything arrived.' }],
+  };
+  assert.ok(
+    engine.renderLlmMarkdown(clean).includes('Status: COMPLETE. No capture gaps were detected.')
+  );
+  assert.ok(!engine.assembleHtml(clean).includes('<aside class="xa-completeness"'));
+});
+
 check('renders clean LLM Markdown from the archive model', () => {
   assert.ok(markdown.startsWith('# How we built a self-contained exporter'));
   assert.ok(markdown.includes(`Exporter: SourceCapsule v${engine.VERSION}`));

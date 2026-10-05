@@ -3786,8 +3786,15 @@
       sourceLinks: new Set(model.sourceUrl ? [model.sourceUrl] : []),
       mediaUrls: new Map(),
       warnings: [],
+      // Subset of warnings that describe the capture rather than a gap in it. They stay in
+      // `warnings` (the manifest contract) and the .llm.md lists them separately.
+      notes: [],
       missing: [],
       incomplete: [],
+    };
+    const addNote = (note) => {
+      stats.warnings.push(note);
+      stats.notes.push(note);
     };
     const addMissing = (record, warning) => {
       stats.missing.push(missingRecord(record.type, record));
@@ -3833,7 +3840,7 @@
           // Informational, never missing/incomplete: the quoted post was gone on
           // X itself, so "complete" stays true - but the reader is told why.
           stats.quoteTombstones += 1;
-          stats.warnings.push(
+          addNote(
             b.replyContext
               ? 'The post this reply answers was already unavailable on X at capture time. Nothing was capturable.'
               : `A quoted post was already unavailable on X at capture time (${
@@ -3970,9 +3977,9 @@
     if (stats.missingMedia)
       stats.warnings.push(`${stats.missingMedia} item(s) were unavailable at export time.`);
     if (media.some((item) => item.embedded && !item.sha256))
-      stats.warnings.push('Some embedded media could not be content-hashed in this browser.');
+      addNote('Some embedded media could not be content-hashed in this browser.');
     if (duplicateMedia.length)
-      stats.warnings.push(`${duplicateMedia.length} duplicate media hash group(s) were detected.`);
+      addNote(`${duplicateMedia.length} duplicate media hash group(s) were detected.`);
     return {
       ...stats,
       sourceLinks: stats.sourceLinks.size,
@@ -4561,10 +4568,11 @@
 
   function llmVideoWarnings(videoMedia) {
     const warnings = [];
+    const notes = [];
     videoMedia.forEach((item) => {
       if (item.offlinePlayable) {
         const posterPath = llmMediaFiles && llmMediaFiles.get(item.id);
-        warnings.push(
+        notes.push(
           llmMediaFiles
             ? `Video ${item.id} full video is NOT included in this bundle (an LLM cannot watch video); ${posterPath ? `its poster frame is ${posterPath}` : 'no poster frame was captured'} and the source link is provided (no transcript or visual description).`
             : llmCompanionHtml
@@ -4577,10 +4585,10 @@
             item.posterCaptured ? 'Only the poster' : 'No poster'
           } and ${item.sourceLinkPreserved ? 'source link were' : 'no source link was'} preserved.`
         );
-        warnings.push(`Video ${item.id} has no transcript or visual description in llm.md.`);
+        notes.push(`Video ${item.id} has no transcript or visual description in llm.md.`);
       }
     });
-    return warnings;
+    return { warnings, notes };
   }
 
   function llmTruncationWarnings(model) {
@@ -4593,6 +4601,42 @@
           ? `${quoteLabel(quote)} is a long-form post; only its preview text was available at export (full text not included).`
           : `${quoteLabel(quote)} text may be truncated because only preview text may have been available at export time.`
       );
+  }
+
+  // The reader-facing completeness verdict shared by the .llm.md and the HTML. Only real capture
+  // gaps count: a video kept as poster + source link is not one (no export carries raw video for
+  // an LLM, and shared capsules never upload it), quote tombstones are gone on X itself, and a
+  // missing avatar does not change what the post says.
+  function captureGaps(model, stats) {
+    const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+    const count = (type) => stats.missing.filter((record) => record.type === type).length;
+    const missing = [];
+    if (!stats.mainTextCaptured) missing.push('the main text');
+    const quotes = count('quoted-post');
+    if (quotes) missing.push(plural(quotes, 'quoted post', 'quoted posts'));
+    const images = count('image');
+    if (images) missing.push(plural(images, 'image', 'images'));
+    const videos = count('video');
+    if (videos) missing.push(`${plural(videos, 'video', 'videos')} (no file or poster)`);
+    const posters = count('video-poster');
+    if (posters) missing.push(plural(posters, 'video poster', 'video posters'));
+    const truncated = allLlmQuotes(model.blocks).filter(
+      (quote) => quote.truncated || (!quote.noteRecovered && isPossiblyTruncatedPost(quote))
+    ).length;
+    const parts = [];
+    if (missing.length) parts.push(`Not captured: ${missing.join(', ')}.`);
+    if (truncated)
+      parts.push(
+        `Possibly truncated: ${plural(truncated, 'embedded post', 'embedded posts')} (only preview text was available).`
+      );
+    return { complete: !parts.length, summary: parts.join(' ') };
+  }
+
+  function renderCompletenessBanner(gaps) {
+    if (gaps.complete) return '';
+    return `<aside class="xa-completeness" role="note" aria-label="Incomplete capture"><strong>Incomplete capture</strong><p>${escapeHtml(
+      gaps.summary
+    )}</p><p>Anyone summarizing or quoting this page, person or AI, should say it is incomplete and name what is missing.</p></aside>`;
   }
 
   function renderDuplicateMediaSummary(duplicates) {
@@ -4929,11 +4973,18 @@
     const imageMedia = media.filter((item) => item.type === 'image');
     const videoMedia = media.filter((item) => item.type === 'video');
     const quoteCounts = llmQuoteCounts(model);
+    const videoLines = llmVideoWarnings(videoMedia);
+    // Gaps and informational notes used to share one list, with repeats, so a reader could not
+    // tell "image-002 is missing" from "video-004 lives in the companion file".
     const llmWarnings = [
-      ...stats.warnings,
-      ...llmVideoWarnings(videoMedia),
-      ...llmTruncationWarnings(model),
+      ...new Set([
+        ...stats.warnings.filter((warning) => !stats.notes.includes(warning)),
+        ...videoLines.warnings,
+        ...llmTruncationWarnings(model),
+      ]),
     ];
+    const llmNotes = [...new Set([...stats.notes, ...videoLines.notes])];
+    const gaps = captureGaps(model, stats);
     const lines = [
       markdownHeading(1, title),
       '',
@@ -4978,6 +5029,15 @@
     lines.push(
       'Capture note: This file preserves content visible to the logged-in user at export time. It may not include unavailable, private, deleted, failed, or unloaded content.',
       '',
+      '## Completeness',
+      '',
+      ...(gaps.complete
+        ? ['Status: COMPLETE. No capture gaps were detected.']
+        : [
+            `Status: INCOMPLETE. ${gaps.summary}`,
+            'If you are summarizing or answering questions from this file, tell the user it is incomplete and which items are missing. Details are under "Missing / Incomplete Content" below.',
+          ]),
+      '',
       '## What This File Is',
       '',
       'This is the text + metadata companion (a .llm.md file). Reading only this file, an agent or LLM has access to:',
@@ -5012,6 +5072,10 @@
       llmWarnings.forEach((warning) => lines.push(`  - ${markdownLineText(warning)}`));
     } else {
       lines.push('  - None');
+    }
+    if (llmNotes.length) {
+      lines.push('- Notes:');
+      llmNotes.forEach((note) => lines.push(`  - ${markdownLineText(note)}`));
     }
 
     const mainContentHeading = model.thread
@@ -5165,6 +5229,7 @@ ${READER_CSS}
     </div>
 ${savedContextHtml ? `\n${savedContextHtml}` : ''}${shareContextHtml ? `\n${shareContextHtml}` : ''}
   </header>
+  ${renderCompletenessBanner(captureGaps(model, stats))}
   ${renderCaptureSummary(stats)}
   <article class="xa-body">
 ${body}
@@ -5332,6 +5397,9 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
   border-radius:12px;background:color-mix(in srgb,var(--accent) 10%,var(--bg));font-size:14px}
 .xa-ai-link strong{display:block;font-size:15px}.xa-ai-link p{margin:5px 0 0;color:var(--muted)}
 .xa-ai-link a{color:var(--accent);font-weight:700;word-break:break-all}
+.xa-completeness{margin:0 0 16px;padding:12px 16px;border:1px solid #d97706;border-left-width:4px;
+  border-radius:12px;background:color-mix(in srgb,#d97706 10%,var(--bg));font-size:14px}
+.xa-completeness strong{display:block;font-size:15px}.xa-completeness p{margin:5px 0 0;color:var(--fg)}
 .xa-footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
 .xa-footer h2{font-size:15px;line-height:1.3;margin:0 0 10px;color:var(--fg)}
 .xa-footer dl{display:grid;gap:8px;margin:0 0 14px}

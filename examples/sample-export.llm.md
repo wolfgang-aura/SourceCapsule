@@ -2,11 +2,16 @@
 
 Source: https://x.com/ada/article/12345
 Exported at: 2026-06-25 10:00:00 UTC
-Exporter: SourceCapsule v1.5.0
+Exporter: SourceCapsule v1.6.5
 Language: en
 Published at: 2026-06-24 09:30:00 UTC
 Author: Ada Lovelace @ada
 Capture note: This file preserves content visible to the logged-in user at export time. It may not include unavailable, private, deleted, failed, or unloaded content.
+
+## Completeness
+
+Status: INCOMPLETE. Not captured: 2 quoted posts, 1 image, 2 videos (no file or poster), 1 video poster. Possibly truncated: 1 embedded post (only preview text was available).
+If you are summarizing or answering questions from this file, tell the user it is incomplete and which items are missing. Details are under "Missing / Incomplete Content" below.
 
 ## What This File Is
 
@@ -43,16 +48,14 @@ The media bytes are embedded (base64) inside the companion file sample-export.ht
   - Quoted post 7 was unavailable at export time.
   - Quoted post 8 was unavailable at export time.
   - 6 item(s) were unavailable at export time.
+  - Embedded Post 1 text may be truncated because only preview text may have been available at export time.
+- Notes:
   - 1 duplicate media hash group(s) were detected.
-  - Video video-003 was detected, but the video file was not preserved offline. Only the poster and source link were preserved.
   - Video video-003 has no transcript or visual description in llm.md.
   - Video video-004 bytes are embedded in the companion file sample-export.html; this markdown holds only metadata (no video bytes, transcript, or visual description).
-  - Video video-005 was detected, but the video file was not preserved offline. No poster and source link were preserved.
   - Video video-005 has no transcript or visual description in llm.md.
   - Video video-006 bytes are embedded in the companion file sample-export.html; this markdown holds only metadata (no video bytes, transcript, or visual description).
-  - Video video-007 was detected, but the video file was not preserved offline. No poster and source link were preserved.
   - Video video-007 has no transcript or visual description in llm.md.
-  - Embedded Post 1 text may be truncated because only preview text may have been available at export time.
 
 ---
 
