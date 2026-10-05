@@ -230,6 +230,11 @@ the finished AI readable link as JSON, with no clicks, prompts, or clipboard use
   arguments to the existing process and the flag is dropped. A one-time Load unpacked records
   `UNPACKED` instead and needs no launcher, but it is a manual UI step and cannot coexist with
   the command-line copy (same `key`, same ID).
+- **Branded Google Chrome 137+ ignores `--load-extension`** (#44). The launcher detects it by
+  `VersionInfo.ProductName -eq 'Google Chrome'` (Chromium and Chrome for Testing also ship a
+  `chrome.exe` and still honor the flag), leaves the flag out, and asks for Load unpacked. On
+  Chrome, `-Status` checks only the occlusion flag; `--ping` is the real check.
+  `test/native-host.test.mjs` covers this with stand-in exes, through `-ShowLaunchArgs`.
 - **The host must not outlive its browser.** Node inherits the browser's stdio through the
   `.cmd`, and the host exits on stdin end/close/error or a failed stdout write
   (`test/native-host.test.mjs` covers the stdin case). Without that, a killed browser left an

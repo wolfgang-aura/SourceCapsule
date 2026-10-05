@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -286,8 +286,85 @@ async function cliChecks() {
   console.log('ok  CLI rejects bad --timeout and --expiry-days before connecting');
 }
 
+// Branded Google Chrome 137+ ignores --load-extension, so a launcher that hands it that flag
+// produces a shortcut that looks healthy while the extension never loads (#44). The stand-in
+// browsers are empty executables carrying only the version resource the launcher reads.
+function launcherChecks() {
+  if (process.platform !== 'win32') {
+    console.log('skip launcher browser selection (Windows only)');
+    return;
+  }
+  const csc = path.join(
+    process.env.WINDIR,
+    'Microsoft.NET',
+    'Framework64',
+    'v4.0.30319',
+    'csc.exe'
+  );
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sourcecapsule-launcher-'));
+  try {
+    const extensionDir = path.join(tmp, 'ext');
+    fs.mkdirSync(extensionDir);
+    fs.writeFileSync(path.join(extensionDir, 'manifest.json'), '{}');
+    // Windows resets ProgramFiles for every 64-bit process, so auto-detection cannot be
+    // pointed at stand-ins. Each one is passed explicitly with -BrowserPath instead.
+    const fakeBrowser = (relative, product) => {
+      const exe = path.join(tmp, relative);
+      fs.mkdirSync(path.dirname(exe), { recursive: true });
+      const source = path.join(tmp, `${path.basename(exe)}.cs`);
+      fs.writeFileSync(
+        source,
+        `using System.Reflection;\n[assembly: AssemblyProduct("${product}")]\n` +
+          '[assembly: AssemblyFileVersion("141.0.0.0")]\nclass P { static void Main() {} }\n'
+      );
+      const built = spawnSync(csc, ['/nologo', `/out:${exe}`, source], { encoding: 'utf8' });
+      assert.equal(built.status, 0, built.stdout);
+      return exe;
+    };
+    const launchArgs = (browser) => {
+      const run = spawnSync(
+        'powershell',
+        [
+          '-NoProfile',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          path.join(root, 'scripts', 'start-sourcecapsule-browser.ps1'),
+          '-ShowLaunchArgs',
+          '-BrowserPath',
+          browser,
+          '-ExtensionDir',
+          extensionDir,
+        ],
+        { encoding: 'utf8' }
+      );
+      assert.equal(run.status, 0, run.stdout + run.stderr);
+      const args = run.stdout.match(/^Arguments: (.*)$/m);
+      assert.ok(args, run.stdout);
+      return { args: args[1], output: run.stdout };
+    };
+
+    const chrome = launchArgs(fakeBrowser(path.join('chrome', 'chrome.exe'), 'Google Chrome'));
+    assert.doesNotMatch(chrome.args, /--load-extension/, 'Chrome must not get --load-extension');
+    assert.match(chrome.args, /CalculateNativeWinOcclusion/, 'Chrome still needs occlusion off');
+    assert.match(chrome.output, /Load unpacked/, 'Chrome users are told to load it once');
+
+    // Chrome for Testing ships a chrome.exe too, and still honors the flag.
+    const testing = launchArgs(
+      fakeBrowser(path.join('cft', 'chrome.exe'), 'Google Chrome for Testing')
+    );
+    assert.match(testing.args, /--load-extension=/);
+    const edge = launchArgs(fakeBrowser(path.join('edge', 'msedge.exe'), 'Microsoft Edge'));
+    assert.match(edge.args, /--load-extension=/);
+    console.log('ok  launcher never relies on --load-extension for Google Chrome');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
 canonicalUrlChecks();
 resultContractChecks();
+launcherChecks();
 await transportChecks();
 await cliChecks();
 console.log('native-host transport tests passed');
