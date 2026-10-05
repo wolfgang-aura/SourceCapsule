@@ -266,6 +266,13 @@ async function handleAutomationRequest(request) {
       extensionId: chrome.runtime.id,
     };
   }
+  if (request.action === 'reload') {
+    // Reply first: chrome.runtime.reload() tears down this worker and its native port, and
+    // the fresh worker reconnects to a new host on start. Loads a rebuilt dist/ without a
+    // browser restart.
+    setTimeout(() => chrome.runtime.reload(), 500);
+    return { ok: true, reloading: true, extensionVersion: chrome.runtime.getManifest().version };
+  }
   if (request.action === 'capture-share') return captureShare(request);
   return { ok: false, error: 'unknown_action', message: `Unsupported action: ${request.action}` };
 }
