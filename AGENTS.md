@@ -175,12 +175,20 @@ the finished AI readable link as JSON, with no clicks, prompts, or clipboard use
   `\\.\pipe\sourcecapsule-capture`, and the CLI connects to that pipe. One host owns the
   pipe, which is also what enforces one capture at a time. `SOURCECAPSULE_PIPE` overrides the
   name so tests never fight the host a running browser already owns.
-- **The registered host must be a real `.exe`.** Chromium is unreliable about launching
-  `.bat`/`.cmd` native hosts. `scripts/install-native-host.ps1` compiles
-  `native-host/launcher.cs` with the .NET compiler already on Windows, installs everything to
-  `%LOCALAPPDATA%\SourceCapsule\native-host`, and registers it under HKCU only. Two traps it
-  handles: PowerShell 5.1 writes a UTF-8 BOM that Chromium rejects outright, and a running
-  host holds its own exe open so a reinstall must stop it first.
+- **The registered host is a two-line `.cmd` that runs the signed `node.exe`.** An earlier
+  version compiled an unsigned launcher exe, and Smart App Control blocks unsigned binaries
+  with no per-file allowlist ([#8](https://github.com/wolfgang-aura/SourceCapsule/issues/8)).
+  The old claim that Chromium is unreliable with `.cmd` hosts was never verified: the `.cmd`
+  of that time was registered through a manifest with a UTF-8 BOM, which Chromium rejects
+  outright. `scripts/install-native-host.ps1` installs to
+  `%LOCALAPPDATA%\SourceCapsule\native-host`, registers under HKCU only, writes the manifest
+  without a BOM and the `.cmd` as ASCII. Do not reintroduce an unsigned exe.
+- **Agent shells run inside the Claude desktop app's MSIX container.** Writes to
+  `%LOCALAPPDATA%` and HKCU from that shell land in the app's private copy
+  (`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Local\...`). A browser the agent starts sees
+  that copy; a browser the owner starts from the desktop does not. The installer detects the
+  redirected copy and exits nonzero, so a real install has to run from an ordinary PowerShell
+  window.
 - **The extension ID is pinned** by a `key` in `extension-src/manifest.json`, because the host
   manifest has to name a fixed `chrome-extension://` origin. Do not regenerate it.
 - **Capture reuses `runExport('share')`.** `runAutomatedShareCapture` only waits for the page
@@ -222,9 +230,10 @@ the finished AI readable link as JSON, with no clicks, prompts, or clipboard use
   arguments to the existing process and the flag is dropped. A one-time Load unpacked records
   `UNPACKED` instead and needs no launcher, but it is a manual UI step and cannot coexist with
   the command-line copy (same `key`, same ID).
-- **The host must not outlive its browser.** `launcher.cs` closes the Node child's stdin once
-  the browser's stream ends, and the host exits on stdin end/close/error or a failed stdout
-  write. Without both, a killed browser left an orphan holding
+- **The host must not outlive its browser.** Node inherits the browser's stdio through the
+  `.cmd`, and the host exits on stdin end/close/error or a failed stdout write
+  (`test/native-host.test.mjs` covers the stdin case). Without that, a killed browser left an
+  orphan holding
   `\\.\pipe\sourcecapsule-capture`, and every later CLI request was answered by a host whose
   extension was gone - a full-timeout hang that reads exactly like "the host is unreachable".
 
