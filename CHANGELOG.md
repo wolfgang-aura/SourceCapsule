@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.7] - 2026-10-05
+
+### Fixed
+
+- The post options button gets a valid font rule. `inherit` inside the `font` shorthand made
+  browsers drop the whole declaration.
+- Unattended capture no longer warns that a thread was dropped when a single post has replies
+  from other accounts. It warns only when the author's own follow-ups were on the page.
+
 ## [1.6.6] - 2026-10-05
 
 ### Added
