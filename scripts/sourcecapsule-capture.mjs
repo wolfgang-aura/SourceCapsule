@@ -2,6 +2,7 @@
 // Unattended SourceCapsule capture.
 //
 //   node scripts/sourcecapsule-capture.mjs --url "https://x.com/handle/status/123" --json
+//   node scripts/sourcecapsule-capture.mjs --reload   (load a rebuilt dist/ without a restart)
 //
 // Structured JSON goes to stdout, progress and diagnostics to stderr, nonzero exit on
 // failure. The CLI never touches X itself: it hands the URL to the extension through the
@@ -20,6 +21,8 @@ const PIPE = process.env.SOURCECAPSULE_PIPE || DEFAULT_PIPE;
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 const CONNECT_RETRIES = 3;
 const CONNECT_RETRY_DELAY_MS = 750;
+// A reloaded worker reconnects at start; the 30s reconnect alarm is the backstop.
+const RELOAD_WAIT_MS = 45000;
 
 // Only a canonical post permalink is accepted. Anything else (search pages, profiles,
 // redirect shorteners) would either fail downstream or capture the wrong thing.
@@ -46,6 +49,7 @@ function parseArgs(argv) {
     if (arg === '--json') args.json = true;
     else if (arg === '--url') args.url = argv[++i];
     else if (arg === '--ping') args.ping = true;
+    else if (arg === '--reload') args.reload = true;
     else if (arg === '--timeout') {
       const seconds = numericValue('--timeout', argv[++i]);
       if (seconds < 1 || seconds > MAX_TIMEOUT_SECONDS) {
@@ -180,6 +184,42 @@ async function main() {
     const reply = await request({ id, action: 'ping', timeoutMs: 15000 }, 15000);
     process.stdout.write(`${JSON.stringify(reply, null, 2)}\n`);
     return reply.ok ? 0 : 1;
+  }
+
+  if (args.reload) {
+    progress('asking the extension to reload itself');
+    const ask = await request({ id, action: 'reload', timeoutMs: 15000 }, 15000);
+    if (!ask.ok) {
+      if (ask.error === 'unknown_action') {
+        ask.message =
+          'The running extension predates --reload. Reload it once from brave://extensions (or restart with the launcher); later builds can reload themselves.';
+      }
+      process.stdout.write(`${JSON.stringify(ask, null, 2)}\n`);
+      return 1;
+    }
+    // The old worker and its host go away; the new worker starts its own host. Wait for it.
+    const deadline = Date.now() + RELOAD_WAIT_MS;
+    let lastError;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    while (Date.now() < deadline) {
+      try {
+        const pong = await request({ id: `${id}-p`, action: 'ping', timeoutMs: 5000 }, 5000);
+        if (pong.ok) {
+          progress('extension reloaded and answering');
+          process.stdout.write(`${JSON.stringify({ ...pong, reloaded: true }, null, 2)}\n`);
+          return 0;
+        }
+        lastError = new Error(pong.message || pong.error);
+      } catch (error) {
+        lastError = error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    throw new Error(
+      `The extension did not answer within ${RELOAD_WAIT_MS / 1000}s of reloading: ${
+        lastError ? lastError.message : 'no reply'
+      }`
+    );
   }
 
   const canonical = canonicalXUrl(args.url);

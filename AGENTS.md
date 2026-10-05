@@ -235,6 +235,10 @@ the finished AI readable link as JSON, with no clicks, prompts, or clipboard use
   `chrome.exe` and still honor the flag), leaves the flag out, and asks for Load unpacked. On
   Chrome, `-Status` checks only the occlusion flag; `--ping` is the real check.
   `test/native-host.test.mjs` covers this with stand-in exes, through `-ShowLaunchArgs`.
+- **Load a rebuilt `dist/` with `--reload`, not a browser restart.** After
+  `npm run build:extension`, `node scripts/sourcecapsule-capture.mjs --reload` asks the worker to
+  call `chrome.runtime.reload()`, then pings until the fresh worker's host answers. An extension
+  built before this action answers `unknown_action`; that build needs one reload by hand.
 - **The host must not outlive its browser.** Node inherits the browser's stdio through the
   `.cmd`, and the host exits on stdin end/close/error or a failed stdout write
   (`test/native-host.test.mjs` covers the stdin case). Without that, a killed browser left an

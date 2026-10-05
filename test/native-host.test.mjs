@@ -259,6 +259,38 @@ async function cliChecks() {
   }
   console.log('ok  CLI fails fast when the host closes mid-request');
 
+  // --reload asks once, then waits for a worker to answer ping. A fake host answers both.
+  const reloadPipe = String.raw`\\.\pipe\sourcecapsule-reload-` + process.pid;
+  const asked = [];
+  let supportsReload = true;
+  const fakeHost = net.createServer((socket) => {
+    socket.setEncoding('utf8');
+    socket.once('data', (line) => {
+      const message = JSON.parse(line);
+      asked.push(message.action);
+      const reply =
+        message.action === 'reload' && !supportsReload
+          ? { id: message.id, ok: false, error: 'unknown_action' }
+          : { id: message.id, ok: true, extensionVersion: 'test' };
+      socket.end(`${JSON.stringify(reply)}\n`);
+    });
+  });
+  await new Promise((resolve) => fakeHost.listen(reloadPipe, resolve));
+  try {
+    const reloaded = await runCli(['--reload'], reloadPipe);
+    assert.equal(reloaded.code, 0, `--reload exit code (stderr: ${reloaded.stderr})`);
+    assert.deepEqual(asked, ['reload', 'ping']);
+    assert.equal(JSON.parse(reloaded.stdout).reloaded, true);
+
+    supportsReload = false;
+    const old = await runCli(['--reload'], reloadPipe);
+    assert.equal(old.code, 1);
+    assert.match(JSON.parse(old.stdout).message, /brave:\/\/extensions/);
+  } finally {
+    fakeHost.close();
+  }
+  console.log('ok  --reload waits for the reloaded extension and explains an old build');
+
   // Bad numeric flags are a usage error before any connection is attempted. Number('5m')
   // is NaN, and a NaN timer fires immediately, so a typo used to look like a host timeout.
   const noPipe = String.raw`\\.\pipe\sourcecapsule-absent-` + process.pid;
