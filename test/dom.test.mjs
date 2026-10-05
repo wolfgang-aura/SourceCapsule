@@ -5038,21 +5038,25 @@ check('a capture pass never advances to a surface it does not understand', () =>
   try {
     const waitDom = new JSDOM(
       `<html><body><div data-testid="primaryColumn">
-         <article data-testid="tweet"><div>root</div></article>
+         <article data-testid="tweet"><div data-testid="User-Name">Mark @finkd</div></article>
        </div></body></html>`,
       { url: 'https://x.com/finkd/status/2097402101332590646' }
     );
     const column = waitDom.window.document.querySelector('[data-testid="primaryColumn"]');
     const savedDocument = global.document;
     const savedNode = global.Node;
+    const savedLocation = global.location;
     global.document = waitDom.window.document;
     global.Node = waitDom.window.Node;
+    global.location = waitDom.window.location;
     try {
       // The conversation lands a beat after the click, exactly as X does it.
       setTimeout(() => {
-        for (let i = 0; i < 3; i += 1) {
+        // Two replies from other accounts and one follow-up by the root author (#50).
+        for (const handle of ['someone', 'FINKD', 'other']) {
           const el = waitDom.window.document.createElement('article');
           el.setAttribute('data-testid', 'tweet');
+          el.innerHTML = `<div data-testid="User-Name">Name @${handle}</div>`;
           column.appendChild(el);
         }
       }, 400);
@@ -5065,6 +5069,7 @@ check('a capture pass never advances to a surface it does not understand', () =>
       assert.equal(engine.conversationWaitDiagnostics.startedWith, 1);
       assert.equal(engine.conversationWaitDiagnostics.settled, 4);
       assert.equal(engine.conversationWaitDiagnostics.timedOut, false);
+      assert.equal(engine.conversationWaitDiagnostics.sameAuthor, 2);
       // A genuinely single post must still return, not hang.
       const soloColumn = waitDom.window.document.createElement('div');
       const solo = waitDom.window.document.createElement('article');
@@ -5081,6 +5086,7 @@ check('a capture pass never advances to a surface it does not understand', () =>
     } finally {
       global.document = savedDocument;
       global.Node = savedNode;
+      global.location = savedLocation;
     }
     console.log(`  ✓ ${name}`);
   } catch (e) {
@@ -5193,6 +5199,17 @@ await checkAsync('share uploads never carry the page debug diagnostics', async (
     counts: {},
   });
   assert.match(bundle, /"generator"/, 'diagnostic bundle still builds');
+});
+
+check('a single post with replies from others does not warn about a dropped thread', () => {
+  const warn = engine.singlePostCaptureWarning;
+  // jack/status/20: 25 top-level posts on the page, all replies by other accounts (#50).
+  assert.equal(warn(1, { settled: 25, sameAuthor: 1 }), '');
+  assert.match(warn(1, { settled: 9, sameAuthor: 4 }), /4 post\(s\) by the same author/);
+  assert.match(warn(1, { settled: 1, elapsedMs: 6000, timedOut: true }), /never mounted/);
+  // No author in the URL: keep the old, cruder signal rather than going quiet.
+  assert.match(warn(1, { settled: 5, sameAuthor: null }), /5 top-level post\(s\)/);
+  assert.equal(warn(8, { settled: 25, sameAuthor: 8 }), '');
 });
 
 check('export manifests never carry the request URLs of the browsing session', () => {

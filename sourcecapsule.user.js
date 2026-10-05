@@ -5718,6 +5718,23 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     return next;
   }
 
+  // A one-post capsule is only suspicious when the root author's own follow-ups were on the
+  // page. Replies from other accounts are top-level too, so `settled` alone over-warns (#50).
+  function singlePostCaptureWarning(capturedPosts, conversation) {
+    if (capturedPosts > 1) return '';
+    const { settled = 0, sameAuthor = null, elapsedMs = 0, timedOut = false } = conversation || {};
+    if (settled <= 1) {
+      return `only the root post was captured; the conversation never mounted (settled on ${settled} post(s) after ${elapsedMs}ms${timedOut ? ', hit the wait ceiling' : ''})`;
+    }
+    if (sameAuthor === null) {
+      return `only the root post was captured, though ${settled} top-level post(s) were on the page`;
+    }
+    if (sameAuthor > 1) {
+      return `only the root post was captured, though ${sameAuthor} post(s) by the same author were on the page`;
+    }
+    return '';
+  }
+
   // Unattended capture, driven by the CLI through the native messaging host. This is a
   // thin wrapper: it waits for the page and the passive capture layer, then hands off to
   // the same runExport('share') path a click would use. No parsing lives here.
@@ -5771,13 +5788,8 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       // is worse than a capsule that admits it did.
       const capturedPosts = model.blocks.filter((b) => b.kind === 'thread-marker').length || 1;
       const conversation = { ...conversationWaitDiagnostics };
-      if (capturedPosts <= 1) {
-        warnings.push(
-          conversation.settled > 1
-            ? `only the root post was captured, though ${conversation.settled} top-level post(s) were on the page`
-            : `only the root post was captured; the conversation never mounted (settled on ${conversation.settled} post(s) after ${conversation.elapsedMs}ms${conversation.timedOut ? ', hit the wait ceiling' : ''})`
-        );
-      }
+      const scopeWarning = singlePostCaptureWarning(capturedPosts, conversation);
+      if (scopeWarning) warnings.push(scopeWarning);
       return {
         ok: true,
         sourceUrl: model.sourceUrl || location.href,
@@ -11269,6 +11281,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     ran: false,
     startedWith: 0,
     settled: 0,
+    sameAuthor: null,
     elapsedMs: 0,
     timedOut: false,
   };
@@ -11294,10 +11307,24 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         break;
       }
     }
+    // Replies from other accounts are top-level too, so `settled` alone cannot say whether
+    // a thread was on the page. null when the page URL names no author.
+    const norm = (h) =>
+      String(h || '')
+        .replace(/^@/, '')
+        .toLowerCase();
+    const rootHandle = norm(
+      handleFromSourceUrl(typeof location !== 'undefined' ? location.href : '')
+    );
+    const sameAuthor = rootHandle
+      ? topLevelTweetEls(column).filter((el) => norm(extractAuthor(el).handle) === rootHandle)
+          .length
+      : null;
     Object.assign(conversationWaitDiagnostics, {
       ran: true,
       startedWith,
       settled: count,
+      sameAuthor,
       elapsedMs: Date.now() - started,
       timedOut,
     });
@@ -12435,6 +12462,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       folderPickerAvailable,
       pickDirectoryViaExtensionBridge,
       handleFromSourceUrl,
+      singlePostCaptureWarning,
       escapeHtml,
       safeUrl,
       highResImageUrl,
