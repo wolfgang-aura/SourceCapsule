@@ -6,6 +6,17 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.5] - 2026-10-05
+
+### Fixed
+
+- "Create AI link" on an X Article exports the Article again. When X mounted the article's post
+  before its reader, the button landed on that post and published a "thread" of the article's
+  images and the author's own replies, with no article text. The Article button now replaces it,
+  and any export aimed at the Article's own post runs as an Article.
+- Article capsules take their title from the Article title, not the first heading in the body,
+  and include the cover image. X moved both outside the reader body.
+
 ## [1.6.4] - 2026-10-03
 
 ### Changed

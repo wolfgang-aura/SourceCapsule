@@ -1373,6 +1373,86 @@ check('article-body image harvest survives virtualization without leaking quote 
   );
 });
 
+// Regression for #41. X no longer wraps an Article in `twitterArticleReadView`: the
+// reader root is `twitterArticleRichTextView`, and the title and cover sit beside it in
+// the article tweet. X can also mount that tweet before the reader, which put a per-post
+// control on it; clicking that exported a "thread" of the article's images plus the
+// author's own replies, with no article text at all.
+const CURRENT_ARTICLE_URL = 'https://x.com/writer/status/2070000000000000001';
+const currentArticleDom = new JSDOM(
+  `<!doctype html><html><body><div data-testid="primaryColumn">
+    <article data-testid="tweet" role="article" id="article-tweet">
+      <div data-testid="User-Name"><a href="/writer"><span>Writer</span></a><a href="/writer"><span>@writer</span></a></div>
+      <a href="/writer/status/2070000000000000001"><time datetime="2026-10-01T12:00:00Z">Oct 1</time></a>
+      <button data-testid="caret" type="button">...</button>
+      <div data-testid="twitter-article-title"><span>The Sunk Cost Cage</span></div>
+      <div data-testid="tweetPhoto"><img src="https://pbs.twimg.com/media/SunkCostCover?format=jpg&name=small" alt="Cover"></div>
+      <div data-testid="twitterArticleRichTextView">
+        <div data-testid="longformRichTextComponent">
+          <div data-block="true"><h1><span data-text="true">Intro to Crypto</span></h1></div>
+          <div data-block="true"><span data-text="true">The body paragraph must reach the capsule.</span></div>
+          <div data-block="true"><div data-testid="tweetPhoto"><img src="https://pbs.twimg.com/media/SunkCostChart?format=jpg&name=small" alt="Chart"></div></div>
+        </div>
+      </div>
+    </article>
+    <article data-testid="tweet" role="article" id="self-reply">
+      <div data-testid="User-Name"><a href="/writer"><span>Writer</span></a><a href="/writer"><span>@writer</span></a></div>
+      <div data-testid="tweetText"><span>Self reply must not join the article.</span></div>
+      <a href="/writer/status/2070000000000000002"><time datetime="2026-10-01T12:05:00Z">Oct 1</time></a>
+      <button data-testid="caret" type="button">...</button>
+    </article>
+  </div></body></html>`,
+  { url: CURRENT_ARTICLE_URL }
+);
+global.window = currentArticleDom.window;
+global.document = currentArticleDom.window.document;
+global.Node = currentArticleDom.window.Node;
+global.location = currentArticleDom.window.location;
+global.localStorage = currentArticleDom.window.localStorage;
+global.getComputedStyle = currentArticleDom.window.getComputedStyle;
+global.window.confirm = () => false;
+const currentArticleTweet = document.getElementById('article-tweet');
+const currentSelfReply = document.getElementById('self-reply');
+
+check('an article tweet that mounted before its reader gets the article control', () => {
+  const reader = document.querySelector('[data-testid="twitterArticleRichTextView"]');
+  reader.remove();
+  assert.equal(engine.detectPageType(), 'post');
+  engine.ensureButton();
+  assert.ok(currentArticleTweet.querySelector('.sourcecapsule-post-ctl'), 'race setup failed');
+  currentArticleTweet.appendChild(reader);
+  assert.equal(engine.detectPageType(), 'article');
+  engine.ensureButton();
+  const controls = currentArticleTweet.querySelectorAll('.sourcecapsule-post-ctl');
+  assert.equal(controls.length, 1);
+  assert.equal(controls[0].getAttribute('data-sourcecapsule-menu-mode'), 'article');
+});
+
+check('an export aimed at the focused article tweet runs as the article', () => {
+  assert.deepEqual(engine.resolveExportTarget(currentArticleTweet, true), {
+    type: 'article',
+    targetTweetEl: null,
+    includeThread: false,
+  });
+  const reply = engine.resolveExportTarget(currentSelfReply, true);
+  assert.equal(reply.type, 'post');
+  assert.equal(reply.targetTweetEl, currentSelfReply);
+});
+
+check('buildModelForArticle reads the title and cover beside the reader root', () => {
+  const model = engine.buildModelForArticle();
+  assert.equal(model.heading, 'The Sunk Cost Cage');
+  const images = model.blocks.filter((b) => b.kind === 'image');
+  assert.ok(
+    images[0] && images[0].url.includes('SunkCostCover'),
+    'cover image missing or not first'
+  );
+  assert.ok(images.some((image) => image.url.includes('SunkCostChart')));
+  const text = JSON.stringify(model.blocks);
+  assert.ok(text.includes('The body paragraph must reach the capsule.'));
+  assert.ok(!text.includes('Self reply must not join the article.'));
+});
+
 // ---------------------------------------------------------------------------
 // Media harvest survives virtualization (the v0.2.5 fix). X recycles off-screen
 // media out of the DOM, so we snapshot it during the scroll. Simulate that here:
