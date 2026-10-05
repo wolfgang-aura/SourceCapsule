@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- Unattended capture works with Windows Smart App Control on. The native host installer used to
+  compile an unsigned launcher exe, which Smart App Control blocked every 30 seconds. It now
+  registers a two-line `.cmd` that runs the signed `node.exe`, and it removes the old exe.
+- The native host installer exits with an error when it runs inside a packaged app's container.
+  There its files and registry keys go to a private copy that a normally started browser cannot
+  see, and it used to report success anyway.
+
 ## [1.6.5] - 2026-10-05
 
 ### Fixed

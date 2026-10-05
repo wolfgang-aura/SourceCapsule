@@ -191,6 +191,27 @@ async function transportChecks() {
     const free = await sendOverPipe({ id: 'a7', action: 'ping', timeoutMs: 5000 });
     assert.equal(free.ok, true, 'lock is released once the extension has replied');
     console.log('ok  lock survives a closed CLI socket and the late reply is logged');
+
+    // The registered host is a .cmd that runs node.exe with the browser's own stdio, so
+    // nothing between them closes stdin for the host. The host itself must exit when the
+    // browser's stream ends, or an orphan keeps the pipe and every later CLI call hangs.
+    const exited = new Promise((resolve) => host.on('exit', resolve));
+    host.stdin.end();
+    const outcome = await Promise.race([
+      exited.then(() => 'exited'),
+      new Promise((resolve) => setTimeout(() => resolve('still running'), 5000)),
+    ]);
+    assert.equal(outcome, 'exited', 'host must exit when the browser closes its stdin');
+    const released = await new Promise((resolve) => {
+      const probe = net.connect(PIPE);
+      probe.on('connect', () => {
+        probe.destroy();
+        resolve(false);
+      });
+      probe.on('error', () => resolve(true));
+    });
+    assert.ok(released, 'the pipe is released once the host exits');
+    console.log('ok  host exits and releases the pipe when the browser stream ends');
   } finally {
     host.kill();
   }

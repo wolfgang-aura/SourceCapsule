@@ -285,6 +285,13 @@ npm.cmd run install:native-host
 
 The installer needs no administrator rights. It writes everything under `HKCU` and installs the
 host into `%LOCALAPPDATA%\SourceCapsule\native-host`, registering it for Chrome, Edge, and Brave.
+The registered host is a two-line `.cmd` that runs your signed `node.exe`, so Windows Smart App
+Control allows it.
+
+Run the installer from an ordinary PowerShell window. A shell opened inside a packaged app, such
+as the Claude desktop app, redirects the files and registry keys into that app's private copy,
+where a normally started browser cannot see them. The installer detects this and exits with an
+error instead of reporting success.
 
 Then load `dist\sourcecapsule-extension` as an unpacked extension and confirm its ID reads
 `gaclgcfljpjojddiikddejenlnjaggie`. The ID is pinned by a `key` in the manifest, because the

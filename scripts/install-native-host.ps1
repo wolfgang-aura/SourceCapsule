@@ -11,11 +11,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$startedAt = (Get-Date).AddSeconds(-2)
 
 $hostName = 'com.wolfgang_aura.sourcecapsule'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $sourceDir = Join-Path $repoRoot 'native-host'
-$launcherSource = Join-Path $sourceDir 'launcher.cs'
 $sourceScript = Join-Path $sourceDir 'sourcecapsule-host.mjs'
 
 # The host is INSTALLED outside the repo, under LOCALAPPDATA. The browser resolves the
@@ -69,41 +69,34 @@ if ($null -eq $node) {
 $nodeExe = $node.Source
 Write-Host "Node: $nodeExe"
 
-# Chromium is unreliable about launching .bat/.cmd native hosts on Windows, so the
-# registered host is a real executable built from native-host/launcher.cs with the .NET
-# compiler that ships with Windows. No toolchain to install. The launcher does nothing
-# but start Node and shuttle the raw stdio streams.
-$nodePathFile = Join-Path $hostDir 'node-path.txt'
-[System.IO.File]::WriteAllText($nodePathFile, $nodeExe, (New-Object System.Text.UTF8Encoding($false)))
-
-# A host spawned by a running browser holds this file open, so reinstalling over a live
-# bridge fails on a locked file. Stop the launcher first; the browser reconnects on its
-# own through the service worker's reconnect alarm.
+# The registered host is a two-line .cmd that runs the signed node.exe. Smart App Control
+# blocks unsigned executables and has no per-file allowlist, so the compiled launcher this
+# script used to build (native-host/launcher.cs) never ran on a machine with it on (#8).
+# The .cmd is plain ASCII on purpose. The host exits on its own when the browser's stdin
+# ends, so nothing has to sit between Chromium and Node.
+#
+# A host started by the old installer is a running sourcecapsule-host.exe that holds its
+# own file open. Stop it so the cleanup below cannot hit a locked file; the browser
+# reconnects on its own through the service worker's reconnect alarm.
 Get-Process -Name 'sourcecapsule-host' -ErrorAction SilentlyContinue | ForEach-Object {
-    Write-Host "Stopping running host (pid $($_.Id))"
+    Write-Host "Stopping old launcher (pid $($_.Id))"
     $_ | Stop-Process -Force
 }
-if (Test-Path $hostExe) {
-    Start-Sleep -Milliseconds 500
-    Remove-Item $hostExe -Force
+foreach ($stale in @($hostExe, (Join-Path $hostDir 'node-path.txt'))) {
+    if (Test-Path $stale) {
+        Start-Sleep -Milliseconds 500
+        Remove-Item $stale -Force
+        Write-Host "Removed $stale"
+    }
 }
-Add-Type -TypeDefinition (Get-Content $launcherSource -Raw) `
-    -OutputAssembly $hostExe -OutputType ConsoleApplication
-if (-not (Test-Path $hostExe)) {
-    throw "Failed to build $hostExe"
-}
-Write-Host "Built $hostExe"
-
-# The old batch wrapper would still be registered in stale manifests; remove it so there
-# is exactly one host binary on disk.
-if (Test-Path $hostCmd) {
-    Remove-Item $hostCmd -Force
-}
+$cmdText = "@echo off`r`n`"$nodeExe`" `"%~dp0sourcecapsule-host.mjs`" %*`r`n"
+[System.IO.File]::WriteAllText($hostCmd, $cmdText, (New-Object System.Text.ASCIIEncoding))
+Write-Host "Wrote $hostCmd"
 
 $manifest = [ordered]@{
     name           = $hostName
     description    = 'SourceCapsule local automation bridge'
-    path           = $hostExe
+    path           = $hostCmd
     type           = 'stdio'
     allowed_origins = @("chrome-extension://$ExtensionId/")
 }
@@ -112,6 +105,19 @@ $manifest = [ordered]@{
 $json = $manifest | ConvertTo-Json -Depth 4
 [System.IO.File]::WriteAllText($manifestPath, $json, (New-Object System.Text.UTF8Encoding($false)))
 Write-Host "Wrote $manifestPath"
+
+# A shell started from inside a packaged (MSIX) app, such as the Claude desktop app,
+# silently redirects these writes, and the registry keys below, into that app's private
+# copy. The install then looks fine from this shell, while a browser started from the
+# desktop finds no host at all. Detect the redirected copy and refuse to report success.
+$packageCopies = Join-Path $env:LOCALAPPDATA "Packages\*\LocalCache\Local\SourceCapsule\native-host\$hostName.json"
+$redirected = @(Resolve-Path -Path $packageCopies -ErrorAction SilentlyContinue |
+    Get-Item | Where-Object { $_.LastWriteTime -ge $startedAt })
+if ($redirected.Count -gt 0) {
+    throw ("This PowerShell runs inside an app container, so the install landed in " +
+        "$($redirected[0].DirectoryName), which a normally started browser cannot see. " +
+        'Re-run this script from a PowerShell window opened from the Start menu.')
+}
 
 foreach ($root in $registryRoots) {
     $key = Join-Path $root $hostName
