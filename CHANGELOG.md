@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.8] - 2026-10-05
+
+### Fixed
+
+- The extension's direct fallback no longer decodes binary media into an unused text copy.
+  Videos over ~48 MB take that path, so the copy doubled their memory during export.
+
 ## [1.6.7] - 2026-10-05
 
 ### Fixed
