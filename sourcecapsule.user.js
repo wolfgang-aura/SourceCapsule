@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SourceCapsule - Save X/Twitter Threads & Articles as Markdown for LLMs + Offline HTML
 // @namespace    https://github.com/wolfgang-aura/SourceCapsule
-// @version      1.6.4
+// @version      1.6.5
 // @description  One click saves an X (Twitter) thread, Article, or post as clean Markdown for LLM context (Claude, ChatGPT) plus a self-contained offline HTML archive - images, video, and quoted posts embedded, with honest completeness reporting. Local-first, with optional expiring AI readable links.
 // @author       wolfgang-aura
 // @license      MIT
@@ -210,7 +210,7 @@
   };
 
   const APP = 'SourceCapsule';
-  const VERSION = '1.6.4';
+  const VERSION = '1.6.5';
 
   // ===========================================================================
   // Small utilities
@@ -2736,7 +2736,9 @@
     }
     const articleTweetEl = closestAny(root, CONFIG.selectors.tweet) || root;
 
-    const titleEl = pick(root, CONFIG.selectors.articleTitle, { quiet: true });
+    // X renders the title and cover beside the reader root, not inside it, and the body
+    // can open with its own h1. Look in the whole article tweet so the title testids win.
+    const titleEl = pick(articleTweetEl, CONFIG.selectors.articleTitle, { quiet: true });
     const title = titleEl
       ? (titleEl.innerText || titleEl.textContent || '').trim()
       : document.title.replace(/ \/ X.*$/, '');
@@ -2825,7 +2827,7 @@
         }
       });
     }
-    findTweetImageEls(root).forEach((node) => addCandidate('image', node));
+    findTweetImageEls(articleTweetEl).forEach((node) => addCandidate('image', node));
     pickAll(root, CONFIG.selectors.videoPlayer).forEach((node) => addCandidate('video', node));
     quoteEls.forEach((node) => addCandidate('quote', node));
     // Article body images do not belong to a tweet id. X can virtualize those
@@ -11240,17 +11242,40 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   // those out from under the first and ship it with holes.
   let exportInFlight = false;
 
+  // The focused status's own tweet, holding the Article reader. X can mount this tweet
+  // before the reader, so a per-post control may already sit on it.
+  function isFocusedArticleTweet(tweetEl) {
+    if (!tweetEl || tweetStatusId(tweetEl) !== currentStatusId()) return false;
+    return !!(
+      pick(tweetEl, CONFIG.selectors.articleTextRoot, { quiet: true }) ||
+      pick(tweetEl, CONFIG.selectors.articleRoot, { quiet: true })
+    );
+  }
+
+  // An export aimed at the focused Article tweet is an Article export. The post path
+  // reads tweetText only, so it built a "thread" of the article's images plus the
+  // author's own replies, with none of the article text (#41).
+  function resolveExportTarget(targetTweetEl, includeThread) {
+    if (isFocusedArticleTweet(targetTweetEl)) {
+      return { type: 'article', targetTweetEl: null, includeThread: false };
+    }
+    return { type: targetTweetEl ? 'post' : detectPageType(), targetTweetEl, includeThread };
+  }
+
   async function runExport(
     exportType,
     {
-      targetTweetEl = null,
+      targetTweetEl: requestedTweetEl = null,
       trigger = null,
-      includeThread = true,
+      includeThread: requestedThread = true,
       automation = false,
       expiryDays = 0,
     } = {}
   ) {
-    const type = targetTweetEl ? 'post' : detectPageType();
+    const { type, targetTweetEl, includeThread } = resolveExportTarget(
+      requestedTweetEl,
+      requestedThread
+    );
     if (!type) return;
     const openFirstReason = timelineArticlePreviewReason(targetTweetEl, { includeThread });
     if (openFirstReason) {
@@ -11700,6 +11725,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       if (!tweetStatusId(tweetEl)) return; // only real posts (skip compose box / ads)
       const mode = postControlCaptureMode(tweetEl, column);
       const existing = tweetEl.querySelector(`.${CONFIG.postControlClass}`);
+      if (existing && existing.getAttribute('data-sourcecapsule-menu-mode') === 'article') return;
       if (existing) {
         // Cache key reflects WHICH menu array is actually rendered, not just isThread.
         // A focused post now gets THREAD_EXPORT_TYPES even when auto-detection says
@@ -11796,9 +11822,19 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (!CONFIG.perPostButtons) return;
     const column = pick(document, CONFIG.selectors.primaryColumn, { quiet: true });
     if (!column) return;
-    if (column.querySelector(`.${CONFIG.postControlClass}`)) return; // already injected
-    const caret = column.querySelector('[data-testid="caret"]'); // topmost = article header
+    const reader =
+      pick(document, CONFIG.selectors.articleTextRoot, { quiet: true }) ||
+      pick(document, CONFIG.selectors.articleRoot, { quiet: true });
+    const articleTweetEl = reader && closestAny(reader, CONFIG.selectors.tweet);
+    const host = articleTweetEl || column;
+    const existing = host.querySelector(`.${CONFIG.postControlClass}`);
+    if (existing && existing.getAttribute('data-sourcecapsule-menu-mode') === 'article') return;
+    // A post control on the article tweet was injected before X mounted the reader. Its
+    // menu offers post and thread exports, so swap it for the article control (#41).
+    if (existing && !articleTweetEl) return;
+    const caret = host.querySelector('[data-testid="caret"]'); // topmost = article header
     if (!caret || !caret.parentElement) return;
+    if (existing) existing.remove();
     const { wrap } = createExportControl({
       triggerI18nKey: 'createAiLink',
       triggerTitle: `Create an AI readable link for this article`,
@@ -11808,6 +11844,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     });
     wrap.classList.add('xa-ctl-inline');
     wrap.setAttribute(CONFIG.postControlFlag, '1');
+    wrap.setAttribute('data-sourcecapsule-menu-mode', 'article');
     caret.parentElement.insertBefore(wrap, caret);
   }
 
@@ -12311,6 +12348,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       writeReplyProbeResult,
       runReplyProbe,
       postControlCaptureMode,
+      resolveExportTarget,
       authorFromNameBlock,
       copyText,
       waitForConversation,
