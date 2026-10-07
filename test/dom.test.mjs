@@ -5242,6 +5242,19 @@ check('a single post with replies from others does not warn about a dropped thre
   assert.equal(warn(8, { settled: 25, sameAuthor: 8 }), '');
 });
 
+check('a capture that never waited on a conversation (Article) gets no scope warning', () => {
+  // Articles skip waitForConversation, so its diagnostics are the untouched defaults (#64).
+  assert.equal(
+    engine.singlePostCaptureWarning(1, { ran: false, settled: 0, elapsedMs: 0, sameAuthor: null }),
+    ''
+  );
+  engine.conversationWaitDiagnostics.ran = true;
+  engine.conversationWaitDiagnostics.settled = 7;
+  engine.resetConversationWaitDiagnostics();
+  assert.equal(engine.conversationWaitDiagnostics.ran, false);
+  assert.equal(engine.conversationWaitDiagnostics.settled, 0);
+});
+
 check('export manifests never carry the request URLs of the browsing session', () => {
   engine.handleNetworkCapturePayload({
     source: 'SourceCapsule:network-capture',

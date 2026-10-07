@@ -5722,6 +5722,8 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
   // page. Replies from other accounts are top-level too, so `settled` alone over-warns (#50).
   function singlePostCaptureWarning(capturedPosts, conversation) {
     if (capturedPosts > 1) return '';
+    // The wait never ran (an Article, or the column was missing): there is no stage to blame.
+    if (conversation && conversation.ran === false) return '';
     const { settled = 0, sameAuthor = null, elapsedMs = 0, timedOut = false } = conversation || {};
     if (settled <= 1) {
       return `only the root post was captured; the conversation never mounted (settled on ${settled} post(s) after ${elapsedMs}ms${timedOut ? ', hit the wait ceiling' : ''})`;
@@ -5740,6 +5742,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
   // the same runExport('share') path a click would use. No parsing lives here.
   async function runAutomatedShareCapture({ expiryDays = 0, readyTimeoutMs = 60000 } = {}) {
     const started = Date.now();
+    resetConversationWaitDiagnostics();
     // 1. The tab was created moments ago, so wait for X to render the post itself.
     let pageType = detectPageType();
     while (!pageType && Date.now() - started < readyTimeoutMs) {
@@ -11306,6 +11309,19 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     timedOut: false,
   };
 
+  // An unattended capture calls this first: Articles never run the wait, and counters left
+  // by an earlier capture must not read as this capture's diagnostics.
+  function resetConversationWaitDiagnostics() {
+    Object.assign(conversationWaitDiagnostics, {
+      ran: false,
+      startedWith: 0,
+      settled: 0,
+      sameAuthor: null,
+      elapsedMs: 0,
+      timedOut: false,
+    });
+  }
+
   async function waitForConversation(column) {
     if (!column) return 0;
     const started = Date.now();
@@ -12468,6 +12484,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       copyText,
       waitForConversation,
       conversationWaitDiagnostics,
+      resetConversationWaitDiagnostics,
       timelineArticlePreviewReason,
       showShareResult,
       showCaptureReceipt,
