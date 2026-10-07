@@ -7046,7 +7046,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return backdrop;
   }
 
-  function promptCaptureOptions({ share = false, saveLocal = false } = {}) {
+  function promptCaptureOptions({ share = false, saveLocal = false, initial = null } = {}) {
     ensureStyle();
     return new Promise((resolve) => {
       const backdrop = document.createElement('div');
@@ -7083,6 +7083,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const form = backdrop.querySelector('form');
       const note = backdrop.querySelector('#xa-note');
       const tags = backdrop.querySelector('#xa-tags');
+      // Prefill with what an earlier save already recorded, so choosing only an expiry
+      // cannot overwrite the note and tags with empty values.
+      if (initial) {
+        note.value = String(initial.note || '');
+        tags.value = normalizeTags(initial.tags).join(', ');
+      }
       const finish = (value) => {
         document.removeEventListener('keydown', onKeyDown, true);
         backdrop.remove();
@@ -11267,7 +11273,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   async function saveToLibrary(model, debugJson, root, options = {}) {
     const prefs = getPrefs();
     prepareArchiveModel(model);
-    const paths = bundlePaths(model, prefs, localDateStamp());
+    // A re-save after a share passes the original paths: recomputing them could land in a
+    // different folder (past midnight, or after a layout change) and leave the first
+    // folder without the link.
+    const paths = options.paths || bundlePaths(model, prefs, localDateStamp());
     const stats = archiveStats(model);
     const indexEntry = libraryIndexEntry(model, paths, stats);
     const share = options.share || null;
@@ -11283,6 +11292,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         root,
         segments: paths.segments,
         postName: paths.postName,
+        paths,
         prefs,
       };
     }
@@ -11304,6 +11314,23 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       prefs,
       zipDeferred: options.deferZipDownload === true,
     };
+  }
+
+  // Re-save a library folder with the share link, in the folder the first save used. The
+  // capsule already exists when this runs, so a failure is returned as `libraryError`, never
+  // thrown: a throw would read as "link failed" and a retry would publish a second capsule.
+  async function resaveLibraryAfterShare(model, debugJson, savedTarget, created) {
+    if (!savedTarget || !savedTarget.root || !savedTarget.segments) return { libraryError: '' };
+    try {
+      await saveToLibrary(model, debugJson, savedTarget.root, {
+        share: shareMetadataFromCreated(created),
+        paths: savedTarget.paths,
+      });
+      return { libraryError: '' };
+    } catch (error) {
+      errlog(error);
+      return { libraryError: String((error && error.message) || error || 'library save failed') };
+    }
   }
 
   /**
@@ -11673,10 +11700,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             })
         );
         const remembered = rememberShareLink(created, model);
-        if (savedTarget && savedTarget.root && savedTarget.segments) {
-          await saveToLibrary(model, debugJson, savedTarget.root, {
-            share: shareMetadataFromCreated(created),
-          });
+        const { libraryError } = await resaveLibraryAfterShare(
+          model,
+          debugJson,
+          savedTarget,
+          created
+        );
+        if (libraryError) {
+          warn('AI readable link created but the library copy was not updated:', libraryError);
         }
         let copied = false;
         // Automation never touches the clipboard: it would clobber whatever the owner
@@ -11697,19 +11728,33 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           `AI readable link ready; expires ${readableUtcTime(created.expiresAt)}${copied ? ' (copied)' : ''}` +
             (remembered.storageError
               ? ` WARNING: browser storage is full, so this link was not added to your link list and cannot be deleted from it (${remembered.storageError}).`
+              : '') +
+            (libraryError
+              ? ` WARNING: the link exists, but your library folder could not be updated with it (${libraryError}).`
               : ''),
-          remembered.storageError ? { sticky: true, error: true } : undefined
+          remembered.storageError || libraryError ? { sticky: true, error: true } : undefined
         );
+        created.libraryError = libraryError;
         return created;
       };
       const shareFromReceipt = async (savedTarget = null) => {
-        const shareMetadata = await promptCaptureOptions({ share: true, saveLocal: true });
+        const shareMetadata = await promptCaptureOptions({
+          share: true,
+          saveLocal: true,
+          initial: { note: model.userNote, tags: model.tags },
+        });
         if (!shareMetadata) {
           setReceiptActionStatus('AI readable link cancelled. Your local save is unchanged.');
           return;
         }
         applyCaptureMetadata(model, shareMetadata);
-        await publishAndCopyShare(shareMetadata.expiryDays, savedTarget);
+        const created = await publishAndCopyShare(shareMetadata.expiryDays, savedTarget);
+        if (created && created.libraryError) {
+          setReceiptActionStatus(
+            `AI readable link created, but the library copy was not updated: ${created.libraryError}`,
+            { error: true }
+          );
+        }
       };
       if (outputType === 'library-share') {
         const saved = await saveToLibrary(model, debugJson, libraryRoot, {
@@ -12535,6 +12580,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       timelineArticlePreviewReason,
       showShareResult,
       showCaptureReceipt,
+      promptCaptureOptions,
+      saveToLibrary,
+      resaveLibraryAfterShare,
       archiveStats,
       // Strict-mode ship-blocker: assessment, diagnostic bundle, auto-repair
       // round, and the confirm modal (DOM-bound; exercised via jsdom).

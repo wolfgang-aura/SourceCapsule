@@ -5266,6 +5266,85 @@ await checkAsync(
   }
 );
 
+await checkAsync(
+  'receipt share keeps the saved note and tags, re-saves into the original folder, and survives a library error',
+  async () => {
+    // The prompt opens prefilled, so submitting only an expiry cannot wipe the metadata.
+    const pending = engine.promptCaptureOptions({
+      share: true,
+      saveLocal: true,
+      initial: { note: 'Compare with pricing research', tags: ['fintech', 'malaysia'] },
+    });
+    assert.equal(document.querySelector('#xa-note').value, 'Compare with pricing research');
+    assert.equal(document.querySelector('#xa-tags').value, 'fintech, malaysia');
+    document
+      .querySelector('.xa-modal')
+      .dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    const submitted = await pending;
+    assert.equal(submitted.note, 'Compare with pricing research');
+    assert.deepEqual(submitted.tags, ['fintech', 'malaysia']);
+
+    const files = new Map();
+    const state = { fail: false };
+    const makeDir = (prefix) => ({
+      name: 'root',
+      async getDirectoryHandle(name) {
+        if (state.fail) throw new Error('write permission denied');
+        return makeDir(`${prefix}${name}/`);
+      },
+      async getFileHandle(name, { create } = {}) {
+        const key = `${prefix}${name}`;
+        if (!create && !files.has(key)) throw new Error('NotFoundError');
+        return {
+          async createWritable() {
+            return {
+              async write(data) {
+                files.set(key, typeof data === 'string' ? data : '[bytes]');
+              },
+              async close() {},
+            };
+          },
+          async getFile() {
+            return { text: async () => files.get(key) || '' };
+          },
+        };
+      },
+    });
+    const model = {
+      type: 'post',
+      title: 'Resave',
+      heading: 'Resave',
+      sourceUrl: STATUS_URL,
+      author: { name: 'Vega Hao', handle: '@Vegahao' },
+      blocks: [{ kind: 'paragraph', html: 'Hello' }],
+    };
+    engine.applyCaptureMetadata(model, submitted);
+    const root = makeDir('');
+    const saved = await engine.saveToLibrary(model, '', root);
+    const originalDir = saved.segments.join('/');
+    // A layout change between the save and the share must not move the re-save.
+    localStorage.setItem('sourcecapsule.prefs', JSON.stringify({ layout: 'flat' }));
+    try {
+      const created = { viewUrl: 'https://share.test/c/abc', expiresAt: '2030-01-01T00:00:00Z' };
+      const outcome = await engine.resaveLibraryAfterShare(model, '', saved, created);
+      assert.equal(outcome.libraryError, '');
+      const md = files.get(`${originalDir}/${saved.postName}.llm.md`);
+      assert.match(md, /https:\/\/share\.test\/c\/abc/, 'the original folder got the link');
+      assert.match(md, /Compare with pricing research/, 'the note survives the re-save');
+      assert.ok(
+        [...files.keys()].every((key) => key.startsWith(originalDir) || !key.includes('/')),
+        'no second folder was written'
+      );
+      // A failing re-save is reported, not thrown: the link already exists.
+      state.fail = true;
+      const failed = await engine.resaveLibraryAfterShare(model, '', saved, created);
+      assert.match(failed.libraryError, /write permission denied/);
+    } finally {
+      localStorage.removeItem('sourcecapsule.prefs');
+    }
+  }
+);
+
 await checkAsync('share uploads never carry the page debug diagnostics', async () => {
   const model = {
     type: 'post',
