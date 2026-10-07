@@ -238,6 +238,39 @@ check('share success remains visible when automatic clipboard copy is blocked', 
   assert.equal(document.querySelector('.xa-share-result'), null);
 });
 
+check('the share link list never drops a live record and reports a failed write', () => {
+  const day = 86400000;
+  const live = (id) => ({ id, expiresAt: new Date(Date.now() + day).toISOString() });
+  const dead = (id) => ({ id, expiresAt: new Date(Date.now() - day).toISOString() });
+  const records = [
+    ...Array.from({ length: 51 }, (_, i) => live(`live${i}`)),
+    dead('expired-a'),
+    dead('expired-b'),
+  ];
+  const outcome = engine.setShareLinks(records);
+  const kept = engine.getShareLinks().map((item) => item.id);
+  assert.equal(outcome.ok, true);
+  assert.equal(kept.filter((id) => id.startsWith('live')).length, 51, 'every live record kept');
+  assert.ok(!kept.includes('expired-a') && !kept.includes('expired-b'), 'expired go first');
+  const priorStorage = global.localStorage;
+  global.localStorage = {
+    getItem: () => '[]',
+    setItem: () => {
+      throw new Error('QuotaExceededError');
+    },
+  };
+  try {
+    const failed = engine.setShareLinks([live('x')]);
+    assert.equal(failed.ok, false);
+    assert.match(failed.error, /Quota/);
+    const record = engine.rememberShareLink({ id: 'y', viewUrl: 'u', uploadToken: 't' }, {});
+    assert.match(record.storageError, /Quota/);
+  } finally {
+    global.localStorage = priorStorage;
+    engine.setShareLinks([]);
+  }
+});
+
 await checkAsync(
   'recent AI readable links modal folds expired links away with remove-only actions',
   async () => {
@@ -4029,6 +4062,38 @@ await checkAsync(
 );
 
 await checkAsync(
+  'a failed archive write is carried into the next save of the same pass, and reported',
+  async () => {
+    const memory = new Map();
+    let writes = 0;
+    const store = engine.createReplyArchiveStore({
+      async get(key) {
+        return memory.get(key) || null;
+      },
+      async set(key, value) {
+        writes += 1;
+        if (writes === 1) throw new Error('QuotaExceededError');
+        memory.set(key, value);
+      },
+      name: 'flaky',
+    });
+    const rootStatusId = '2000000000000000000';
+    const writer = engine.createReplyProbeArchiveWriter(store, rootStatusId);
+    const first = await writer.save([{ id: '2000000000000000201', text: 'Captured pass one.' }]);
+    assert.equal(first.ok, false);
+    const second = await writer.save([{ id: '2000000000000000202', text: 'Seeded later.' }]);
+    assert.equal(second.ok, true);
+    const stored = await store.load(rootStatusId);
+    assert.deepEqual(stored.records.map((record) => record.id).sort(), [
+      '2000000000000000201',
+      '2000000000000000202',
+    ]);
+    assert.equal(stored.records[0].text.length > 0, true);
+    assert.match(writer.errors.join(';'), /QuotaExceeded/, 'the earlier failure is not lost');
+  }
+);
+
+await checkAsync(
   'reply archive save never overwrites a stored archive it failed to read',
   async () => {
     const memory = new Map();
@@ -4291,6 +4356,36 @@ await checkAsync('syndication recovers replies X confirmed but never rendered', 
   assert.equal(outcome.unavailable, 1);
   assert.equal(outcome.attempted, 2);
 });
+
+await checkAsync(
+  'syndication reply recovery flags note previews, keeps line breaks, and records tombstones',
+  async () => {
+    const records = [
+      { id: '2000000000000000011', text: '', discoveredSurfaces: ['top'] },
+      { id: '2000000000000000012', text: '', discoveredSurfaces: ['top'] },
+    ];
+    const outcome = await engine.enrichReplyArchiveViaSyndication(records, async (id) =>
+      id === '2000000000000000011'
+        ? {
+            id_str: id,
+            text: 'First line\n\nSecond line',
+            note_tweet: { id: 'note' },
+            user: { screen_name: 'ghost' },
+          }
+        : {
+            __typename: 'TweetTombstone',
+            tombstone: { text: { text: 'This post is unavailable' } },
+          }
+    );
+    const byId = new Map(outcome.records.map((record) => [record.id, record]));
+    assert.equal(byId.get('2000000000000000011').truncated, true);
+    assert.equal(byId.get('2000000000000000011').text, 'First line\n\nSecond line');
+    assert.equal(byId.get('2000000000000000012').unavailable, true);
+    assert.match(byId.get('2000000000000000012').unavailableReason, /Tombstone/);
+    assert.equal(outcome.unavailable, 1);
+    assert.equal(outcome.recovered, 1);
+  }
+);
 
 // Regression: found on live X, invisible to every fixture test above.
 //
@@ -5155,6 +5250,133 @@ await checkAsync(
   }
 );
 
+await checkAsync(
+  'a video whose poster failed is incomplete in the shared copy the gate reports on',
+  async () => {
+    const model = {
+      type: 'post',
+      title: 'Video no poster',
+      heading: 'Video no poster',
+      sourceUrl: STATUS_URL,
+      author: { name: 'Vega Hao', handle: '@Vegahao' },
+      blocks: [
+        {
+          kind: 'video',
+          url: 'https://video.twimg.com/v.mp4',
+          mode: 'video-inline',
+          dataUri: 'data:video/mp4;base64,AAAA',
+          videoFileCaptured: true,
+          posterDataUri: '',
+        },
+      ],
+    };
+    global.GM_xmlhttpRequest = (options) => {
+      const body =
+        options.method === 'POST' && options.url.endsWith('/api/capsules')
+          ? JSON.stringify({
+              uploadUrl: 'https://share.test/api/capsules/abc/files',
+              uploadToken: 't',
+              finalizeUrl: 'https://share.test/api/capsules/abc/finalize',
+              viewUrl: 'https://share.test/c/abc',
+            })
+          : '';
+      options.onload({ status: 200, responseText: body });
+    };
+    let created;
+    try {
+      created = await engine.createShareLink(model, '', 7);
+    } finally {
+      delete global.GM_xmlhttpRequest;
+    }
+    assert.equal(engine.assessExportCompleteness(model).verdict, 'clean', 'local copy is clean');
+    assert.equal(
+      engine.assessExportCompleteness(created.sharedModel).verdict,
+      'incomplete',
+      'the uploaded copy has no video and no poster'
+    );
+    assert.ok(!JSON.stringify(created).includes('sharedModel'), 'never serialized with the link');
+  }
+);
+
+await checkAsync(
+  'receipt share keeps the saved note and tags, re-saves into the original folder, and survives a library error',
+  async () => {
+    // The prompt opens prefilled, so submitting only an expiry cannot wipe the metadata.
+    const pending = engine.promptCaptureOptions({
+      share: true,
+      saveLocal: true,
+      initial: { note: 'Compare with pricing research', tags: ['fintech', 'malaysia'] },
+    });
+    assert.equal(document.querySelector('#xa-note').value, 'Compare with pricing research');
+    assert.equal(document.querySelector('#xa-tags').value, 'fintech, malaysia');
+    document
+      .querySelector('.xa-modal')
+      .dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));
+    const submitted = await pending;
+    assert.equal(submitted.note, 'Compare with pricing research');
+    assert.deepEqual(submitted.tags, ['fintech', 'malaysia']);
+
+    const files = new Map();
+    const state = { fail: false };
+    const makeDir = (prefix) => ({
+      name: 'root',
+      async getDirectoryHandle(name) {
+        if (state.fail) throw new Error('write permission denied');
+        return makeDir(`${prefix}${name}/`);
+      },
+      async getFileHandle(name, { create } = {}) {
+        const key = `${prefix}${name}`;
+        if (!create && !files.has(key)) throw new Error('NotFoundError');
+        return {
+          async createWritable() {
+            return {
+              async write(data) {
+                files.set(key, typeof data === 'string' ? data : '[bytes]');
+              },
+              async close() {},
+            };
+          },
+          async getFile() {
+            return { text: async () => files.get(key) || '' };
+          },
+        };
+      },
+    });
+    const model = {
+      type: 'post',
+      title: 'Resave',
+      heading: 'Resave',
+      sourceUrl: STATUS_URL,
+      author: { name: 'Vega Hao', handle: '@Vegahao' },
+      blocks: [{ kind: 'paragraph', html: 'Hello' }],
+    };
+    engine.applyCaptureMetadata(model, submitted);
+    const root = makeDir('');
+    const saved = await engine.saveToLibrary(model, '', root);
+    const originalDir = saved.segments.join('/');
+    // A layout change between the save and the share must not move the re-save.
+    localStorage.setItem('sourcecapsule.prefs', JSON.stringify({ layout: 'flat' }));
+    try {
+      const created = { viewUrl: 'https://share.test/c/abc', expiresAt: '2030-01-01T00:00:00Z' };
+      const outcome = await engine.resaveLibraryAfterShare(model, '', saved, created);
+      assert.equal(outcome.libraryError, '');
+      const md = files.get(`${originalDir}/${saved.postName}.llm.md`);
+      assert.match(md, /https:\/\/share\.test\/c\/abc/, 'the original folder got the link');
+      assert.match(md, /Compare with pricing research/, 'the note survives the re-save');
+      assert.ok(
+        [...files.keys()].every((key) => key.startsWith(originalDir) || !key.includes('/')),
+        'no second folder was written'
+      );
+      // A failing re-save is reported, not thrown: the link already exists.
+      state.fail = true;
+      const failed = await engine.resaveLibraryAfterShare(model, '', saved, created);
+      assert.match(failed.libraryError, /write permission denied/);
+    } finally {
+      localStorage.removeItem('sourcecapsule.prefs');
+    }
+  }
+);
+
 await checkAsync('share uploads never carry the page debug diagnostics', async () => {
   const model = {
     type: 'post',
@@ -5210,6 +5432,19 @@ check('a single post with replies from others does not warn about a dropped thre
   // No author in the URL: keep the old, cruder signal rather than going quiet.
   assert.match(warn(1, { settled: 5, sameAuthor: null }), /5 top-level post\(s\)/);
   assert.equal(warn(8, { settled: 25, sameAuthor: 8 }), '');
+});
+
+check('a capture that never waited on a conversation (Article) gets no scope warning', () => {
+  // Articles skip waitForConversation, so its diagnostics are the untouched defaults (#64).
+  assert.equal(
+    engine.singlePostCaptureWarning(1, { ran: false, settled: 0, elapsedMs: 0, sameAuthor: null }),
+    ''
+  );
+  engine.conversationWaitDiagnostics.ran = true;
+  engine.conversationWaitDiagnostics.settled = 7;
+  engine.resetConversationWaitDiagnostics();
+  assert.equal(engine.conversationWaitDiagnostics.ran, false);
+  assert.equal(engine.conversationWaitDiagnostics.settled, 0);
 });
 
 check('export manifests never carry the request URLs of the browsing session', () => {

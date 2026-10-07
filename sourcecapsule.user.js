@@ -5656,6 +5656,11 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     });
     created.mediaFilesUploaded = files.length;
     created.mediaBytesUploaded = mediaBytes;
+    // The copy a recipient actually sees. Raw video is never uploaded, so a video whose
+    // poster failed is missing there even though the local model has its bytes. Callers
+    // that report completeness must assess this, not the local model. Non-enumerable so it
+    // is never serialized with the link record.
+    Object.defineProperty(created, 'sharedModel', { value: sharedModel, enumerable: false });
     return created;
   }
 
@@ -5722,6 +5727,8 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
   // page. Replies from other accounts are top-level too, so `settled` alone over-warns (#50).
   function singlePostCaptureWarning(capturedPosts, conversation) {
     if (capturedPosts > 1) return '';
+    // The wait never ran (an Article, or the column was missing): there is no stage to blame.
+    if (conversation && conversation.ran === false) return '';
     const { settled = 0, sameAuthor = null, elapsedMs = 0, timedOut = false } = conversation || {};
     if (settled <= 1) {
       return `only the root post was captured; the conversation never mounted (settled on ${settled} post(s) after ${elapsedMs}ms${timedOut ? ', hit the wait ceiling' : ''})`;
@@ -5740,6 +5747,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
   // the same runExport('share') path a click would use. No parsing lives here.
   async function runAutomatedShareCapture({ expiryDays = 0, readyTimeoutMs = 60000 } = {}) {
     const started = Date.now();
+    resetConversationWaitDiagnostics();
     // 1. The tab was created moments ago, so wait for X to render the post itself.
     let pageType = detectPageType();
     while (!pageType && Date.now() - started < readyTimeoutMs) {
@@ -5774,8 +5782,18 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       }
       const { created, model } = result;
       const stats = archiveStats(model);
-      const assessment = assessExportCompleteness(model);
+      // `complete` must describe the capsule that was uploaded, which the shared .md
+      // reports on too, not the richer local model.
+      const assessment = assessExportCompleteness(created.sharedModel || model);
       const warnings = [];
+      if (assessment.verdict !== 'clean' && created.sharedModel) {
+        const localVerdict = assessExportCompleteness(model).verdict;
+        if (localVerdict === 'clean') {
+          warnings.push(
+            'the shared copy is missing media the local capture holds (see shared .md)'
+          );
+        }
+      }
       if (stats.missingMedia) warnings.push(`${stats.missingMedia} media item(s) missing`);
       if (stats.incompleteMedia)
         warnings.push(`${stats.incompleteMedia} media item(s) incomplete (poster or link only)`);
@@ -5931,11 +5949,33 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     }
   }
 
+  const SHARE_LINKS_SOFT_CAP = 50;
+
+  // Keeps the list near SHARE_LINKS_SOFT_CAP by dropping the OLDEST EXPIRED records only.
+  // A live record holds the delete token of a capsule that still exists, so it is never
+  // dropped, even when that leaves the list over the cap. Returns the write outcome so a
+  // full localStorage reaches the caller instead of silently losing the delete token.
   function setShareLinks(records) {
+    let list = Array.isArray(records) ? records : [];
+    if (list.length > SHARE_LINKS_SOFT_CAP) {
+      const now = Date.now();
+      let excess = list.length - SHARE_LINKS_SOFT_CAP;
+      // Records are newest first, so walk from the tail to drop the oldest expired first.
+      const dropIdx = new Set();
+      for (let i = list.length - 1; i >= 0 && excess > 0; i -= 1) {
+        if (shareLinkExpired(list[i], now)) {
+          dropIdx.add(i);
+          excess -= 1;
+        }
+      }
+      list = list.filter((_, i) => !dropIdx.has(i));
+    }
     try {
-      localStorage.setItem(SHARES_KEY, JSON.stringify((records || []).slice(0, 50)));
+      localStorage.setItem(SHARES_KEY, JSON.stringify(list));
+      return { ok: true, error: '' };
     } catch (e) {
       errlog(e);
+      return { ok: false, error: String((e && e.message) || e || 'storage failed') };
     }
   }
 
@@ -5977,7 +6017,13 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       title: model.heading || model.title || 'X capture',
       sourceUrl: model.sourceUrl || '',
     };
-    setShareLinks([record, ...getShareLinks().filter((item) => item.id !== record.id)]);
+    const stored = setShareLinks([
+      record,
+      ...getShareLinks().filter((item) => item.id !== record.id),
+    ]);
+    // Set after the write, so it is never persisted. The caller must warn: without the
+    // record the capsule cannot be deleted from the link list before it expires.
+    if (!stored.ok) record.storageError = stored.error;
     return record;
   }
 
@@ -7000,7 +7046,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return backdrop;
   }
 
-  function promptCaptureOptions({ share = false, saveLocal = false } = {}) {
+  function promptCaptureOptions({ share = false, saveLocal = false, initial = null } = {}) {
     ensureStyle();
     return new Promise((resolve) => {
       const backdrop = document.createElement('div');
@@ -7037,6 +7083,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const form = backdrop.querySelector('form');
       const note = backdrop.querySelector('#xa-note');
       const tags = backdrop.querySelector('#xa-tags');
+      // Prefill with what an earlier save already recorded, so choosing only an expiry
+      // cannot overwrite the note and tags with empty values.
+      if (initial) {
+        note.value = String(initial.note || '');
+        tags.value = normalizeTags(initial.tags).join(', ');
+      }
       const finish = (value) => {
         document.removeEventListener('keydown', onKeyDown, true);
         backdrop.remove();
@@ -9916,6 +9968,28 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return store;
   }
 
+  // One probe pass saves up to three times (capture, gap seeds, recovery). Each save reloads
+  // the STORED archive, so a write that failed would be forgotten by the next one. This holds
+  // the merged result in memory and re-sends it, so a failed write is retried rather than lost,
+  // and keeps every storage error for the caller to report. Merging goes through
+  // mergeReplyArchiveRecords, so content still only accumulates.
+  function createReplyProbeArchiveWriter(store, rootStatusId) {
+    let held = [];
+    const errors = [];
+    return {
+      errors,
+      async save(records) {
+        const outcome = await store.save(
+          rootStatusId,
+          mergeReplyArchiveRecords(held, records || [])
+        );
+        held = outcome.records;
+        if (!outcome.ok) errors.push(outcome.storageError);
+        return outcome;
+      },
+    };
+  }
+
   let replyArchiveStore = null;
   function getReplyArchiveStore() {
     if (!replyArchiveStore) replyArchiveStore = createReplyArchiveStore();
@@ -10194,9 +10268,28 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         try {
           const payload = await fetchFn(id);
           const text = decodeBasicEntities((payload && (payload.text || payload.full_text)) || '')
-            .replace(/\s+/g, ' ')
+            .replace(/\r\n?/g, '\n')
+            .replace(/[^\S\n]+/g, ' ')
+            .replace(/ ?\n ?/g, '\n')
+            .replace(/\n{3,}/g, '\n\n')
             .trim();
-          if (!text && !(payload && payload.mediaDetails)) return;
+          // A 200 whose payload is a tombstone is as authoritative as a 404: the post is
+          // gone on X. Record it instead of leaving the reply "uncaptured" with no reason.
+          const typename = String((payload && payload.__typename) || '');
+          if (!text && /Tombstone|Unavailable/i.test(typename)) {
+            patches.push({
+              id,
+              unavailable: true,
+              unavailableReason: `syndication ${typename}`,
+              provenance: 'syndication',
+            });
+            unavailable += 1;
+            return;
+          }
+          if (!text && !(payload && payload.mediaDetails)) {
+            errors.push(`${id}: syndication returned no text or media`);
+            return;
+          }
           const user = (payload && payload.user) || {};
           const handle = String(user.screen_name || '');
           patches.push({
@@ -10207,7 +10300,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
               ? `https://x.com/${handle}/status/${id}`
               : `https://x.com/i/web/status/${id}`,
             text: text.slice(0, REPLY_ARCHIVE_TEXT_MAX),
-            truncated: false,
+            // Syndication returns only a preview for long-form posts.
+            truncated: !!payload.note_tweet,
             createdAt: safeIsoTime(payload.created_at || ''),
             parentId: String(payload.in_reply_to_status_id_str || ''),
             mediaLinks: replyMediaLinksFromLegacy({
@@ -10630,7 +10724,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         discoveredSurfaces: [surface],
       })),
     ].filter((record) => String(record.id) !== String(pending.rootStatusId));
-    let saved = await getReplyArchiveStore().save(pending.rootStatusId, archiveInput);
+    const archiveWriter = createReplyProbeArchiveWriter(
+      getReplyArchiveStore(),
+      pending.rootStatusId
+    );
+    let saved = await archiveWriter.save(archiveInput);
     // Every id the audit knows but the archive has no body for gets seeded here, so the
     // recovery round below can fetch it. Without this the archive only ever held what
     // THIS run happened to see, while the audit remembered a thousand ids from earlier
@@ -10638,7 +10736,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (options.recoverGaps !== false) {
       const seeds = replyArchiveGapSeeds(gapReport, pending.rootStatusId, saved.records, surface);
       if (seeds.length) {
-        saved = await getReplyArchiveStore().save(pending.rootStatusId, seeds);
+        saved = await archiveWriter.save(seeds);
         result.gapsSeeded = seeds.length;
       }
     }
@@ -10661,7 +10759,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         result.gapRecoveryErrors = recovery.errors;
         result.gapsSkippedOverLimit = recovery.skippedOverLimit;
         if (recovery.recovered || recovery.unavailable) {
-          saved = await getReplyArchiveStore().save(pending.rootStatusId, recovery.records);
+          saved = await archiveWriter.save(recovery.records);
         }
       } catch (error) {
         result.gapRecoveryError = String((error && error.message) || error);
@@ -10670,14 +10768,23 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     result.archivedReplies = saved.replyCount;
     result.archiveBackend = saved.backend;
     result.archiveBytes = saved.approxBytes;
-    result.archiveStorageError = saved.ok ? '' : saved.storageError;
+    // All of this pass's write errors, not just the last save's: an earlier failed write
+    // must not disappear because a later one succeeded.
+    const archiveErrors = Array.from(new Set(archiveWriter.errors));
+    result.archiveStorageError = saved.ok ? '' : archiveErrors.join('; ') || saved.storageError;
+    // The last write succeeded, so it carried everything held in memory; the earlier
+    // failure is reported as a warning rather than as lost data.
+    result.archiveStorageWarning = saved.ok ? archiveErrors.join('; ') : '';
     if (!saved.ok) {
       // Storage is the one step here that can fail invisibly and lose everything the
       // run just collected, so it gets its own loud, sticky message.
-      showToast(`Reply archive could NOT be saved (${saved.backend}): ${saved.storageError}`, {
-        error: true,
-        sticky: true,
-      });
+      showToast(
+        `Reply archive could NOT be saved (${saved.backend}): ${result.archiveStorageError}`,
+        {
+          error: true,
+          sticky: true,
+        }
+      );
     }
     // Persist the audit trail only AFTER the archive outcome is known - writing it
     // earlier stored a result whose archive fields were all undefined, which made the
@@ -10720,7 +10827,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       : '';
     const archiveSummary = result.archiveStorageError
       ? ` ARCHIVE NOT SAVED: ${result.archiveStorageError}.`
-      : ` Archive now holds ${result.archivedReplies} replies with content (${result.archiveBackend}).${recoverySummary}`;
+      : ` Archive now holds ${result.archivedReplies} replies with content (${result.archiveBackend}).${recoverySummary}${result.archiveStorageWarning ? ` WARNING: an earlier archive write failed (${result.archiveStorageWarning}); the final write saved everything held.` : ''}`;
     // A run that spent most of its time hidden did not measure this conversation's
     // coverage - it measured the tab being in the background. Say which one happened.
     const hiddenSummary =
@@ -10737,9 +10844,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         ? `${records.size} DOM-observed on ${surface} (surface ${pending.passIndex || 1} of ${pending.passTotal}; the archive total below spans all of them)`
         : `${records.size} DOM-observed on ${surface}`;
     showToast(
-      `Reply probe finished: ${passSummary}. Stop: ${stopReason}.${publicCount}${gapSummary}${archiveSummary}${downloadSummary}${hiddenSummary} Result saved locally.`,
+      `Reply probe finished: ${passSummary}. Stop: ${stopReason}.${publicCount}${gapSummary}${archiveSummary}${downloadSummary}${hiddenSummary}${
+        result.storageError
+          ? ` Result history NOT saved locally: ${result.storageError}.`
+          : ' Result saved locally.'
+      }`,
       {
         error:
+          Boolean(result.storageError || result.archiveStorageWarning) ||
           (hiddenMs > 0 && !records.size) ||
           !['pagination-idle', 'conversation-boundary'].includes(stopReason),
         sticky: true,
@@ -11201,7 +11313,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   async function saveToLibrary(model, debugJson, root, options = {}) {
     const prefs = getPrefs();
     prepareArchiveModel(model);
-    const paths = bundlePaths(model, prefs, localDateStamp());
+    // A re-save after a share passes the original paths: recomputing them could land in a
+    // different folder (past midnight, or after a layout change) and leave the first
+    // folder without the link.
+    const paths = options.paths || bundlePaths(model, prefs, localDateStamp());
     const stats = archiveStats(model);
     const indexEntry = libraryIndexEntry(model, paths, stats);
     const share = options.share || null;
@@ -11217,6 +11332,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         root,
         segments: paths.segments,
         postName: paths.postName,
+        paths,
         prefs,
       };
     }
@@ -11238,6 +11354,23 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       prefs,
       zipDeferred: options.deferZipDownload === true,
     };
+  }
+
+  // Re-save a library folder with the share link, in the folder the first save used. The
+  // capsule already exists when this runs, so a failure is returned as `libraryError`, never
+  // thrown: a throw would read as "link failed" and a retry would publish a second capsule.
+  async function resaveLibraryAfterShare(model, debugJson, savedTarget, created) {
+    if (!savedTarget || !savedTarget.root || !savedTarget.segments) return { libraryError: '' };
+    try {
+      await saveToLibrary(model, debugJson, savedTarget.root, {
+        share: shareMetadataFromCreated(created),
+        paths: savedTarget.paths,
+      });
+      return { libraryError: '' };
+    } catch (error) {
+      errlog(error);
+      return { libraryError: String((error && error.message) || error || 'library save failed') };
+    }
   }
 
   /**
@@ -11285,6 +11418,19 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     elapsedMs: 0,
     timedOut: false,
   };
+
+  // An unattended capture calls this first: Articles never run the wait, and counters left
+  // by an earlier capture must not read as this capture's diagnostics.
+  function resetConversationWaitDiagnostics() {
+    Object.assign(conversationWaitDiagnostics, {
+      ran: false,
+      startedWith: 0,
+      settled: 0,
+      sameAuthor: null,
+      elapsedMs: 0,
+      timedOut: false,
+    });
+  }
 
   async function waitForConversation(column) {
     if (!column) return 0;
@@ -11593,11 +11739,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
               sticky: true,
             })
         );
-        rememberShareLink(created, model);
-        if (savedTarget && savedTarget.root && savedTarget.segments) {
-          await saveToLibrary(model, debugJson, savedTarget.root, {
-            share: shareMetadataFromCreated(created),
-          });
+        const remembered = rememberShareLink(created, model);
+        const { libraryError } = await resaveLibraryAfterShare(
+          model,
+          debugJson,
+          savedTarget,
+          created
+        );
+        if (libraryError) {
+          warn('AI readable link created but the library copy was not updated:', libraryError);
         }
         let copied = false;
         // Automation never touches the clipboard: it would clobber whatever the owner
@@ -11615,18 +11765,36 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           showShareResult(created, { copied });
         }
         showToast(
-          `AI readable link ready; expires ${readableUtcTime(created.expiresAt)}${copied ? ' (copied)' : ''}`
+          `AI readable link ready; expires ${readableUtcTime(created.expiresAt)}${copied ? ' (copied)' : ''}` +
+            (remembered.storageError
+              ? ` WARNING: browser storage is full, so this link was not added to your link list and cannot be deleted from it (${remembered.storageError}).`
+              : '') +
+            (libraryError
+              ? ` WARNING: the link exists, but your library folder could not be updated with it (${libraryError}).`
+              : ''),
+          remembered.storageError || libraryError ? { sticky: true, error: true } : undefined
         );
+        created.libraryError = libraryError;
         return created;
       };
       const shareFromReceipt = async (savedTarget = null) => {
-        const shareMetadata = await promptCaptureOptions({ share: true, saveLocal: true });
+        const shareMetadata = await promptCaptureOptions({
+          share: true,
+          saveLocal: true,
+          initial: { note: model.userNote, tags: model.tags },
+        });
         if (!shareMetadata) {
           setReceiptActionStatus('AI readable link cancelled. Your local save is unchanged.');
           return;
         }
         applyCaptureMetadata(model, shareMetadata);
-        await publishAndCopyShare(shareMetadata.expiryDays, savedTarget);
+        const created = await publishAndCopyShare(shareMetadata.expiryDays, savedTarget);
+        if (created && created.libraryError) {
+          setReceiptActionStatus(
+            `AI readable link created, but the library copy was not updated: ${created.libraryError}`,
+            { error: true }
+          );
+        }
       };
       if (outputType === 'library-share') {
         const saved = await saveToLibrary(model, debugJson, libraryRoot, {
@@ -12455,15 +12623,20 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       readReplyProbeHistory,
       writeReplyProbeResult,
       runReplyProbe,
+      createReplyProbeArchiveWriter,
       postControlCaptureMode,
       resolveExportTarget,
       authorFromNameBlock,
       copyText,
       waitForConversation,
       conversationWaitDiagnostics,
+      resetConversationWaitDiagnostics,
       timelineArticlePreviewReason,
       showShareResult,
       showCaptureReceipt,
+      promptCaptureOptions,
+      saveToLibrary,
+      resaveLibraryAfterShare,
       archiveStats,
       // Strict-mode ship-blocker: assessment, diagnostic bundle, auto-repair
       // round, and the confirm modal (DOM-bound; exercised via jsdom).
