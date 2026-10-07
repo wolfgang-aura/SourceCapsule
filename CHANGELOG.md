@@ -6,6 +6,44 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.9] - 2026-10-07
+
+Fixes from the 2026-10-07 full-repo review.
+
+### Security
+
+- Share Worker: shared HTML pages allow only the lightbox script, by hash, instead of any
+  inline script, and block form submission. The cleanup sweep reads capsule ids only from
+  well-formed `_meta.json` keys. Uploads are accepted only while a capsule is still uploading,
+  file names are restricted to the media the client writes, bodies stop at the size cap while
+  streaming, and uploads are rate limited per capsule. Deployed 2026-10-07.
+
+### Fixed
+
+- The completeness verdict counts a truncated main post as incomplete, and no longer calls a
+  caption-less media post incomplete (#56).
+- `.llm.md` keeps line breaks inside posts, and post text can no longer open its own heading,
+  rule or code fence (#57). Multi-line alt text stays on one line (#62).
+- Article export keeps repeated headings and paragraphs (#58).
+- The author handle comes from the profile link, not an `@word` in the display name (#59).
+- Quote dedupe stays inside one thread post (#65).
+- Sharing from the capture receipt keeps the note and tags, re-saves the original library
+  folder, and reports a library error apart from the share (#60).
+- Unattended capture reports completeness from the copy it uploaded (#61), and no longer warns
+  that an Article's conversation never mounted (#64).
+- The share link list never drops a live record, and warns when it cannot be saved (#63).
+- Reply archive: a failed storage write carries into the next save and is reported (#66); gap
+  recovery flags note previews as truncated and records tombstones (#67).
+- Native host keeps the capture lock past a request timeout and logs a late link (#69), and
+  retries the pipe after losing it (#70). `-Restart` stops only orphaned hosts and the
+  default-profile browser.
+- Smaller fixes (#68): the CLI works through a junction, `--ping`/`--reload` print allowlisted
+  fields, the launcher handles trailing backslashes and bracketed paths, Chrome `-Status` exits
+  3 without the occlusion flag, the installer survives a non-ASCII node path, extension proxy
+  timeouts reach `ontimeout`, the MV3 build resets on in-app navigation, poll labels drop a
+  trailing percentage, library zips carry real timestamps, distinct permalink-less quotes are
+  counted separately, and share errors include the Worker's message.
+
 ## [1.6.8] - 2026-10-05
 
 ### Fixed
