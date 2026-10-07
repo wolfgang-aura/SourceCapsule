@@ -7,8 +7,9 @@
 //   host --(native messaging framing over stdio)------>  extension service worker
 // and routes the reply back by request id.
 //
-// Exactly one host owns the pipe. A second instance fails to listen and exits, which
-// is also what enforces one-capture-at-a-time across Chrome profiles.
+// Exactly one host owns the pipe. A second instance cannot listen, stays attached to
+// its browser, and retries every few seconds, so it takes over when the owner exits.
+// The pending entry (one per in-flight capture) is what enforces one capture at a time.
 'use strict';
 
 import net from 'node:net';
@@ -23,6 +24,10 @@ const DEFAULT_PIPE = String.raw`\\.\pipe\sourcecapsule-capture`;
 const PIPE = process.env.SOURCECAPSULE_PIPE || DEFAULT_PIPE;
 const LOG = path.join(os.tmpdir(), 'sourcecapsule-native-host.log');
 const REQUEST_MAX_MS = 15 * 60 * 1000;
+// After a request timeout the capture may still be running in the extension. Keep the
+// lock this much longer, then give up so a dead worker cannot hold it forever.
+const LOCK_GRACE_MS = Number(process.env.SOURCECAPSULE_LOCK_GRACE_MS) || 2 * 60 * 1000;
+const LISTEN_RETRY_MS = Number(process.env.SOURCECAPSULE_LISTEN_RETRY_MS) || 3000;
 
 function log(...parts) {
   const line = `${new Date().toISOString()} ${parts.join(' ')}\n`;
@@ -85,14 +90,42 @@ function readChromeMessages(onMessage) {
 // ---- CLI side: named pipe -------------------------------------------------------
 
 // id -> { socket, timer, cliGone }. An entry is the capture lock: it lives until the
-// extension replies or the request timer fires, NOT until the CLI socket closes. The
-// extension keeps capturing after the CLI walks away, and dropping the entry then let a
-// second capture start on top of it and threw away the finished capsule's reply.
+// extension replies (or a hard cap after the request timer), NOT until the CLI socket
+// closes or the request timer fires. The extension keeps capturing after the CLI walks
+// away, and dropping the entry then let a second capture start on top of it and threw
+// away the finished capsule's reply.
 const pending = new Map();
+
+function onRequestTimeout(id, timeoutMs) {
+  const entry = pending.get(id);
+  if (!entry) return;
+  if (!entry.cliGone && !entry.socket.destroyed) {
+    try {
+      entry.socket.write(
+        `${JSON.stringify({ ok: false, error: 'timeout', message: `No reply within ${timeoutMs}ms.` })}
+`
+      );
+      entry.socket.end();
+    } catch (error) {
+      log('failed writing timeout reply', id, error.message);
+    }
+  }
+  // Answer the CLI, keep the lock: the capture may still publish.
+  entry.cliGone = true;
+  entry.timer = setTimeout(() => {
+    pending.delete(id);
+    log('giving up on', id, `${LOCK_GRACE_MS}ms after its timeout; releasing the capture lock`);
+  }, LOCK_GRACE_MS);
+}
 
 function replyToCli(id, payload) {
   const entry = pending.get(id);
-  if (!entry) return;
+  if (!entry) {
+    // A capture the host already gave up on can still publish. Keep its link.
+    const link = payload && payload.viewUrl ? ` viewUrl=${payload.viewUrl}` : '';
+    log('reply for unknown or expired id', id, `ok=${!!(payload && payload.ok)}`, link);
+    return;
+  }
   clearTimeout(entry.timer);
   pending.delete(id);
   if (entry.cliGone || entry.socket.destroyed) {
@@ -152,9 +185,7 @@ const server = net.createServer((socket) => {
         continue;
       }
       const timeoutMs = Math.min(Number(request.timeoutMs) || REQUEST_MAX_MS, REQUEST_MAX_MS);
-      const timer = setTimeout(() => {
-        replyToCli(id, { ok: false, error: 'timeout', message: `No reply within ${timeoutMs}ms.` });
-      }, timeoutMs);
+      const timer = setTimeout(() => onRequestTimeout(id, timeoutMs), timeoutMs);
       pending.set(id, { socket, timer, cliGone: false });
       log('forwarding', id, request.action || 'unknown');
       sendToChrome({ ...request, id });
@@ -163,17 +194,32 @@ const server = net.createServer((socket) => {
   socket.on('error', (error) => log('cli socket error:', error.message));
 });
 
+let listenRetry = null;
+let reportedInUse = false;
+
+function listen() {
+  listenRetry = null;
+  server.listen(PIPE);
+}
+
 server.on('error', (error) => {
   log('pipe listen failed:', error.message);
-  // Another host already owns the pipe. Stay attached to Chrome so this instance is
-  // harmless, but never race for requests.
-  sendToChrome({ type: 'sourcecapsule:host-status', ok: false, error: 'pipe_in_use' });
+  // Another host already owns the pipe. Stay attached to Chrome, never race for
+  // requests, and keep trying so this instance takes over when the owner exits.
+  if (!reportedInUse) {
+    reportedInUse = true;
+    sendToChrome({ type: 'sourcecapsule:host-status', ok: false, error: 'pipe_in_use' });
+  }
+  if (!listenRetry) listenRetry = setTimeout(listen, LISTEN_RETRY_MS);
 });
 
-server.listen(PIPE, () => {
+server.on('listening', () => {
   log('listening on', PIPE, 'pid', process.pid);
+  reportedInUse = false;
   sendToChrome({ type: 'sourcecapsule:host-status', ok: true, pipe: PIPE, pid: process.pid });
 });
+
+listen();
 
 // Chrome suspends an idle MV3 service worker after ~30s. An inbound native message
 // resets that timer, so the host, not the worker, owns the keepalive.

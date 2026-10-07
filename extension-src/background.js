@@ -106,7 +106,11 @@ function handleMessage(message, _sender, sendResponse) {
     return false;
   }
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), request.timeout || 30000);
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, request.timeout || 30000);
   const body = request.bodyBase64
     ? base64ToBytes(request.bodyBase64)
     : request.bodyText === null
@@ -137,7 +141,9 @@ function handleMessage(message, _sender, sendResponse) {
           : { responseText: new TextDecoder().decode(bytes) }),
       });
     })
-    .catch((error) => sendResponse({ ok: false, error: error.message }))
+    // compat.js routes /timeout/i to the userscript's ontimeout, so say so when our own
+    // timer aborted the fetch; the raw abort message ("This operation was aborted") never matches.
+    .catch((error) => sendResponse({ ok: false, error: timedOut ? 'timeout' : error.message }))
     .finally(() => clearTimeout(timer));
   return true;
 }
@@ -238,18 +244,38 @@ async function captureShare(request) {
   if (!tabId) {
     return { ok: false, error: 'no_tab', message: 'Could not open a capture tab.' };
   }
+  // chrome.tabs.sendMessage waits as long as the capture runs, so bound it ourselves. The
+  // finally below closes the capture window, which is what actually stops the capture.
+  let deadlineTimer = null;
+  const deadline = new Promise((resolve) => {
+    deadlineTimer = setTimeout(
+      () =>
+        resolve({
+          ok: false,
+          error: 'timeout',
+          message: `The capture did not finish within ${timeoutMs}ms.`,
+        }),
+      timeoutMs
+    );
+  });
   try {
-    await waitForContentScript(tabId, Math.min(timeoutMs, 90000));
-    const result = await chrome.tabs.sendMessage(tabId, {
-      type: 'sourcecapsule:controller',
-      version: 1,
-      action: 'capture-share',
-      value: { expiryDays: Number(request.expiryDays) || 0 },
-    });
+    const result = await Promise.race([
+      deadline,
+      (async () => {
+        await waitForContentScript(tabId, Math.min(timeoutMs, 90000));
+        return chrome.tabs.sendMessage(tabId, {
+          type: 'sourcecapsule:controller',
+          version: 1,
+          action: 'capture-share',
+          value: { expiryDays: Number(request.expiryDays) || 0 },
+        });
+      })(),
+    ]);
     return result || { ok: false, error: 'no_result', message: 'The capture returned nothing.' };
   } catch (error) {
     return { ok: false, error: 'capture_failed', message: error.message };
   } finally {
+    clearTimeout(deadlineTimer);
     try {
       await chrome.windows.remove(window.id);
     } catch (error) {

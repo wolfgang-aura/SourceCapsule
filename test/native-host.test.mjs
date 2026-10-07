@@ -11,6 +11,7 @@ import os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import process from 'node:process';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { canonicalXUrl, formatResult } from '../scripts/sourcecapsule-capture.mjs';
 
@@ -116,7 +117,7 @@ function resultContractChecks() {
 async function transportChecks() {
   const host = spawn(process.execPath, [path.join(root, 'native-host', 'sourcecapsule-host.mjs')], {
     stdio: ['pipe', 'pipe', 'inherit'],
-    env: { ...process.env, SOURCECAPSULE_PIPE: PIPE },
+    env: { ...process.env, SOURCECAPSULE_PIPE: PIPE, SOURCECAPSULE_LOCK_GRACE_MS: '1500' },
   });
   const received = [];
   let ready;
@@ -149,6 +150,8 @@ async function transportChecks() {
     assert.equal(received[0].url, undefined);
     console.log('ok  round trip CLI -> host -> extension -> CLI');
 
+    const readLog = () =>
+      fs.readFileSync(path.join(os.tmpdir(), 'sourcecapsule-native-host.log'), 'utf8');
     const timedOut = await sendOverPipe({
       id: 'a2',
       action: 'never-answered',
@@ -158,6 +161,34 @@ async function transportChecks() {
     assert.equal(timedOut.error, 'timeout');
     console.log('ok  bounded request timeout');
 
+    // The timer answers the CLI but the extension may still be capturing, so the lock must
+    // hold: a retry now would start a second capture of the same post (#69). The late
+    // reply's link must reach the log.
+    const retry = await sendOverPipe({ id: 'a2r', action: 'capture-share', timeoutMs: 3000 });
+    assert.equal(retry.error, 'busy', 'a request timeout must not release the capture lock');
+    const lateUrl = `https://share.test/c/after-timeout-${process.pid}`;
+    host.stdin.write(encode({ id: 'a2', ok: true, viewUrl: lateUrl }));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.ok(readLog().includes(lateUrl), 'reply after the request timeout is logged');
+    const afterLate = await sendOverPipe({ id: 'a2p', action: 'ping', timeoutMs: 5000 });
+    assert.equal(afterLate.ok, true, 'lock is released once the late reply arrives');
+    // An id the host no longer knows still gets its link logged, not dropped.
+    const orphanUrl = `https://share.test/c/orphan-${process.pid}`;
+    host.stdin.write(encode({ id: 'never-seen', ok: true, viewUrl: orphanUrl }));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.ok(readLog().includes(orphanUrl), 'reply for an unknown id is logged');
+    console.log('ok  request timeout keeps the lock until the extension replies');
+
+    // A dead worker must not hold the lock forever: the hard cap releases it.
+    const dead = await sendOverPipe({ id: 'a2d', action: 'never-answered', timeoutMs: 500 });
+    assert.equal(dead.error, 'timeout');
+    const heldByDead = await sendOverPipe({ id: 'a2e', action: 'capture-share', timeoutMs: 3000 });
+    assert.equal(heldByDead.error, 'busy');
+    await new Promise((resolve) => setTimeout(resolve, 1800));
+    const capped = await sendOverPipe({ id: 'a2f', action: 'ping', timeoutMs: 5000 });
+    assert.equal(capped.ok, true, 'hard cap releases the lock for a dead worker');
+    console.log('ok  hard cap releases the lock when the extension never replies');
+
     // Lock: hold one request open, then confirm a second is refused as busy.
     const held = sendOverPipe({ id: 'a3', action: 'never-answered', timeoutMs: 3000 });
     await new Promise((resolve) => setTimeout(resolve, 150));
@@ -166,6 +197,8 @@ async function transportChecks() {
     assert.equal(busy.error, 'busy');
     console.log('ok  one capture at a time');
     await held;
+    host.stdin.write(encode({ id: 'a3', ok: false, error: 'late' }));
+    await new Promise((resolve) => setTimeout(resolve, 150));
 
     // The CLI can disconnect while the extension is still capturing. The lock must hold
     // until the extension answers, and the late reply's link must reach the host log.
@@ -183,11 +216,7 @@ async function transportChecks() {
     const viewUrl = `https://share.test/c/late-${process.pid}`;
     host.stdin.write(encode({ id: 'a5', ok: true, viewUrl }));
     await new Promise((resolve) => setTimeout(resolve, 200));
-    const hostLog = fs.readFileSync(
-      path.join(os.tmpdir(), 'sourcecapsule-native-host.log'),
-      'utf8'
-    );
-    assert.ok(hostLog.includes(viewUrl), 'late reply viewUrl is logged when the CLI is gone');
+    assert.ok(readLog().includes(viewUrl), 'late reply viewUrl is logged when the CLI is gone');
     const free = await sendOverPipe({ id: 'a7', action: 'ping', timeoutMs: 5000 });
     assert.equal(free.ok, true, 'lock is released once the extension has replied');
     console.log('ok  lock survives a closed CLI socket and the late reply is logged');
@@ -217,17 +246,81 @@ async function transportChecks() {
   }
 }
 
-function runCli(args, pipe) {
-  return new Promise((resolve) => {
-    const started = Date.now();
+// Two hosts, one pipe (#70): the second must keep retrying and take over when the first
+// goes away, instead of sitting idle until its browser restarts.
+async function pipeTakeoverChecks() {
+  if (process.platform !== 'win32') {
+    // Off Windows the "pipe" is a socket file that outlives its owner, so B can never listen.
+    console.log('skip pipe takeover (Windows named pipes only)');
+    return;
+  }
+  const takeoverPipe = String.raw`\\.\pipe\sourcecapsule-takeover-` + process.pid;
+  const env = {
+    ...process.env,
+    SOURCECAPSULE_PIPE: takeoverPipe,
+    SOURCECAPSULE_LISTEN_RETRY_MS: '300',
+  };
+  const startHost = () => {
     const child = spawn(
       process.execPath,
-      [path.join(root, 'scripts', 'sourcecapsule-capture.mjs'), ...args],
-      {
-        env: { ...process.env, SOURCECAPSULE_PIPE: pipe },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      }
+      [path.join(root, 'native-host', 'sourcecapsule-host.mjs')],
+      { stdio: ['pipe', 'pipe', 'inherit'], env }
     );
+    const statuses = [];
+    const waiters = [];
+    child.stdout.on(
+      'data',
+      decoder((message) => {
+        if (message.type === 'sourcecapsule:host-status') {
+          statuses.push(message);
+          for (const waiter of waiters.splice(0)) waiter();
+        } else if (message.action === 'ping') {
+          child.stdin.write(encode({ id: message.id, ok: true, extensionVersion: 'test' }));
+        }
+      })
+    );
+    const status = async (count) => {
+      const deadline = Date.now() + 8000;
+      while (statuses.length < count && Date.now() < deadline) {
+        await new Promise((resolve) => {
+          waiters.push(resolve);
+          setTimeout(resolve, 200);
+        });
+      }
+      assert.ok(statuses.length >= count, `host status #${count} never arrived`);
+      return statuses[count - 1];
+    };
+    return { child, status };
+  };
+  const a = startHost();
+  let b;
+  try {
+    const first = await a.status(1);
+    assert.equal(first.ok, true, 'A owns the pipe');
+    b = startHost();
+    const second = await b.status(1);
+    assert.equal(second.ok, false);
+    assert.equal(second.error, 'pipe_in_use');
+    a.child.stdin.end();
+    const taken = await b.status(2);
+    assert.equal(taken.ok, true, 'B reports ok once it owns the pipe');
+    const ping = await runCli(['--ping'], takeoverPipe);
+    assert.equal(ping.code, 0, `--ping against B (stderr: ${ping.stderr})`);
+    assert.equal(JSON.parse(ping.stdout).ok, true);
+    console.log('ok  a host that lost the pipe race takes over when the owner exits');
+  } finally {
+    a.child.kill();
+    if (b) b.child.kill();
+  }
+}
+
+function runCli(args, pipe, script = path.join(root, 'scripts', 'sourcecapsule-capture.mjs')) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const child = spawn(process.execPath, [script, ...args], {
+      env: { ...process.env, SOURCECAPSULE_PIPE: pipe },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (chunk) => (stdout += chunk));
@@ -281,6 +374,10 @@ async function cliChecks() {
     assert.equal(reloaded.code, 0, `--reload exit code (stderr: ${reloaded.stderr})`);
     assert.deepEqual(asked, ['reload', 'ping']);
     assert.equal(JSON.parse(reloaded.stdout).reloaded, true);
+    // stdout is a contract: the transport correlation id must not leak through --reload.
+    assert.equal('id' in JSON.parse(reloaded.stdout), false);
+    const pinged = await runCli(['--ping'], reloadPipe);
+    assert.deepEqual(JSON.parse(pinged.stdout), { ok: true, extensionVersion: 'test' });
 
     supportsReload = false;
     const old = await runCli(['--reload'], reloadPipe);
@@ -353,7 +450,7 @@ function launcherChecks() {
       assert.equal(built.status, 0, built.stdout);
       return exe;
     };
-    const launchArgs = (browser) => {
+    const launchArgs = (browser, dir = extensionDir) => {
       const run = spawnSync(
         'powershell',
         [
@@ -366,7 +463,7 @@ function launcherChecks() {
           '-BrowserPath',
           browser,
           '-ExtensionDir',
-          extensionDir,
+          dir,
         ],
         { encoding: 'utf8' }
       );
@@ -386,11 +483,68 @@ function launcherChecks() {
       fakeBrowser(path.join('cft', 'chrome.exe'), 'Google Chrome for Testing')
     );
     assert.match(testing.args, /--load-extension=/);
-    const edge = launchArgs(fakeBrowser(path.join('edge', 'msedge.exe'), 'Microsoft Edge'));
+    const edgeExe = fakeBrowser(path.join('edge', 'msedge.exe'), 'Microsoft Edge');
+    const edge = launchArgs(edgeExe);
     assert.match(edge.args, /--load-extension=/);
     console.log('ok  launcher never relies on --load-extension for Google Chrome');
+
+    // A trailing backslash used to put a backslash before the closing quote, which Windows
+    // reads as an escaped quote and merges every later flag into the extension path.
+    const slashed = launchArgs(edgeExe, extensionDir + path.sep);
+    assert.doesNotMatch(slashed.args, /\\"/, 'no backslash before a quote');
+    assert.match(slashed.args, /--load-extension="[^"]+" --disable-features=/);
+    console.log('ok  launcher trims a trailing backslash from -ExtensionDir');
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+// A junction or symlink to the repo made import.meta.url (real path) differ from argv[1], so
+// main() never ran and the CLI exited 0 with empty stdout.
+async function junctionChecks() {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'sourcecapsule-junction-'));
+  try {
+    const link = path.join(tmp, 'scripts-link');
+    fs.symlinkSync(path.join(root, 'scripts'), link, 'junction');
+    const result = await runCli(
+      ['--url', 'not-a-post-url'],
+      String.raw`\\.\pipe\sourcecapsule-absent-junction-` + process.pid,
+      path.join(link, 'sourcecapsule-capture.mjs')
+    );
+    assert.equal(result.code, 1, 'CLI must run, and fail, through a junction');
+    assert.equal(JSON.parse(result.stdout).ok, false);
+    console.log('ok  CLI runs when started through a junction');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+// The proxy aborts its own fetch on timeout. compat.js only calls ontimeout for an error
+// matching /timeout/i, and the raw abort message does not.
+async function proxyTimeoutChecks() {
+  const require = createRequire(import.meta.url);
+  const background = require(path.join(root, 'extension-src', 'background.js'));
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (_url, init) =>
+    new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(new Error('This operation was aborted')));
+    });
+  try {
+    const reply = await new Promise((resolve) =>
+      background.handleMessage(
+        {
+          type: 'sourcecapsule:http',
+          request: { url: 'https://pbs.twimg.com/media/a.jpg', timeout: 30 },
+        },
+        null,
+        resolve
+      )
+    );
+    assert.equal(reply.ok, false);
+    assert.match(reply.error, /timeout/i);
+    console.log('ok  proxy timeout is reported as a timeout, not an abort');
+  } finally {
+    globalThis.fetch = realFetch;
   }
 }
 
@@ -398,5 +552,8 @@ canonicalUrlChecks();
 resultContractChecks();
 launcherChecks();
 await transportChecks();
+await pipeTakeoverChecks();
 await cliChecks();
+await junctionChecks();
+await proxyTimeoutChecks();
 console.log('native-host transport tests passed');

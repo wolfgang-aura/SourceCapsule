@@ -12334,6 +12334,19 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       };
     }
     window.addEventListener('popstate', fire);
+    // In the MV3 build this script runs in the isolated world, where X's own pushState calls
+    // never reach the patch above. extension-src/page-bridge.js (MAIN world) patches history
+    // and posts this message instead.
+    window.addEventListener('message', (event) => {
+      if (
+        event.source === window &&
+        (!event.origin || event.origin === window.location.origin) &&
+        event.data &&
+        event.data.source === 'SourceCapsule:navigation' &&
+        event.data.type === 'navigate'
+      )
+        fire();
+    });
   }
 
   let scheduled = false;

@@ -9,6 +9,7 @@
 // native messaging host and prints what comes back.
 'use strict';
 
+import fs from 'node:fs';
 import net from 'node:net';
 import process from 'node:process';
 import { pathToFileURL } from 'node:url';
@@ -29,8 +30,8 @@ const RELOAD_WAIT_MS = 45000;
 const CANONICAL_X_URL =
   /^https:\/\/(?:www\.|mobile\.)?(?:x|twitter)\.com\/([A-Za-z0-9_]{1,15})\/status\/(\d{1,25})(?:[/?#].*)?$/;
 
-// The extension clamps the capture to 900s, so a larger value would only promise more
-// than it can deliver. The Worker accepts exactly these expiries.
+// The extension and the host both cap the capture at 900s, so a larger value would only
+// promise more than it can deliver. The Worker accepts exactly these expiries.
 const MAX_TIMEOUT_SECONDS = 900;
 const VALID_EXPIRY_DAYS = [1, 7, 30];
 
@@ -46,6 +47,7 @@ function parseArgs(argv) {
   const args = { json: false, timeoutMs: DEFAULT_TIMEOUT_MS };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
+    // JSON is the only output format; the flag is accepted so existing callers keep working.
     if (arg === '--json') args.json = true;
     else if (arg === '--url') args.url = argv[++i];
     else if (arg === '--ping') args.ping = true;
@@ -97,6 +99,25 @@ export function formatResult(reply) {
     if (reply && Object.prototype.hasOwnProperty.call(reply, field)) out[field] = reply[field];
   }
   if (out.ok && !Array.isArray(out.warnings)) out.warnings = [];
+  return out;
+}
+
+// --ping and --reload replies get the same treatment: an allowlist, never the raw envelope.
+const CONTROL_FIELDS = [
+  'ok',
+  'extensionVersion',
+  'extensionId',
+  'reloading',
+  'reloaded',
+  'error',
+  'message',
+];
+
+export function formatControlReply(reply) {
+  const out = {};
+  for (const field of CONTROL_FIELDS) {
+    if (reply && Object.prototype.hasOwnProperty.call(reply, field)) out[field] = reply[field];
+  }
   return out;
 }
 
@@ -182,7 +203,7 @@ async function main() {
   if (args.ping) {
     progress('pinging extension through the native host');
     const reply = await request({ id, action: 'ping', timeoutMs: 15000 }, 15000);
-    process.stdout.write(`${JSON.stringify(reply, null, 2)}\n`);
+    process.stdout.write(`${JSON.stringify(formatControlReply(reply), null, 2)}\n`);
     return reply.ok ? 0 : 1;
   }
 
@@ -194,7 +215,7 @@ async function main() {
         ask.message =
           'The running extension predates --reload. Reload it once from brave://extensions (or restart with the launcher); later builds can reload themselves.';
       }
-      process.stdout.write(`${JSON.stringify(ask, null, 2)}\n`);
+      process.stdout.write(`${JSON.stringify(formatControlReply(ask), null, 2)}\n`);
       return 1;
     }
     // The old worker and its host go away; the new worker starts its own host. Wait for it.
@@ -206,7 +227,9 @@ async function main() {
         const pong = await request({ id: `${id}-p`, action: 'ping', timeoutMs: 5000 }, 5000);
         if (pong.ok) {
           progress('extension reloaded and answering');
-          process.stdout.write(`${JSON.stringify({ ...pong, reloaded: true }, null, 2)}\n`);
+          process.stdout.write(
+            `${JSON.stringify(formatControlReply({ ...pong, reloaded: true }), null, 2)}\n`
+          );
           return 0;
         }
         lastError = new Error(pong.message || pong.error);
@@ -244,7 +267,19 @@ async function main() {
 }
 
 // Only run when invoked directly, so tests can import canonicalXUrl without side effects.
-const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
+// import.meta.url is the REAL path, so resolve argv[1] too: through a junction or symlink the
+// two differ, main() never ran, and the CLI exited 0 with empty stdout.
+function isInvokedDirectly() {
+  if (!process.argv[1]) return false;
+  let entry = process.argv[1];
+  try {
+    entry = fs.realpathSync(entry);
+  } catch {
+    /* fall back to the path as given */
+  }
+  return import.meta.url === pathToFileURL(entry).href;
+}
+const invokedDirectly = isInvokedDirectly();
 
 if (invokedDirectly) {
   main()

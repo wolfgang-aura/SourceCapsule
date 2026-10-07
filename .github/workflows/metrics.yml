@@ -43,8 +43,16 @@ jobs:
           # --- traffic (needs an admin-read token in METRICS_TOKEN) ---
           views=null; uniques=null; clones=null; clone_uniques=null
           if [ -n "${TRAFFIC_TOKEN:-}" ]; then
-            v=$(GH_TOKEN="$TRAFFIC_TOKEN" gh api "repos/$REPO/traffic/views"  2>/dev/null || echo '{}')
-            c=$(GH_TOKEN="$TRAFFIC_TOKEN" gh api "repos/$REPO/traffic/clones" 2>/dev/null || echo '{}')
+            # A failed call (expired or under-scoped token) must not become a silent null row.
+            # Keep the snapshot, but surface the gap as a workflow warning.
+            if ! v=$(GH_TOKEN="$TRAFFIC_TOKEN" gh api "repos/$REPO/traffic/views" 2>/tmp/views.err); then
+              echo "::warning::traffic/views failed, recording null: $(head -c 300 /tmp/views.err)"
+              v='{}'
+            fi
+            if ! c=$(GH_TOKEN="$TRAFFIC_TOKEN" gh api "repos/$REPO/traffic/clones" 2>/tmp/clones.err); then
+              echo "::warning::traffic/clones failed, recording null: $(head -c 300 /tmp/clones.err)"
+              c='{}'
+            fi
             views=$(echo "$v" | jq '.count // null')
             uniques=$(echo "$v" | jq '.uniques // null')
             clones=$(echo "$c" | jq '.count // null')
