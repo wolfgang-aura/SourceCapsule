@@ -3632,6 +3632,19 @@ check('article export keeps repeated headings and paragraphs, drops only adjacen
   ]);
 });
 
+check('author handle comes from the profile link, not an @word in the display name', () => {
+  const block = document.createElement('div');
+  block.innerHTML =
+    '<a href="/alice_real"><span>Alice \u{1F98B} @acme.bsky.social</span></a><a href="/alice_real"><span>@alice_real</span></a>';
+  assert.deepEqual(engine.authorFromNameBlock(block), {
+    name: 'Alice \u{1F98B} @acme.bsky.social',
+    handle: '@alice_real',
+  });
+  const noLinks = document.createElement('div');
+  noLinks.textContent = 'Jane | @Acme\n@jane';
+  assert.equal(engine.authorFromNameBlock(noLinks).handle, '@jane');
+});
+
 // ---------------------------------------------------------------------------
 // Reply context, parallel media downloads, link-card thumbnails.
 // ---------------------------------------------------------------------------

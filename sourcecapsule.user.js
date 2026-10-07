@@ -80,6 +80,8 @@
       tweetText: ['div[data-testid="tweetText"]', 'div[lang]'],
       // Author name/handle block within a tweet.
       userName: ['div[data-testid="User-Name"]'],
+      // Profile links inside that block (`/<handle>`); the handle is read from their href.
+      userProfileLink: ['a[href^="/"]'],
       // Avatar image within a tweet.
       avatar: ['div[data-testid="Tweet-User-Avatar"] img', 'img[src*="profile_images"]'],
       // Photos within a tweet.
@@ -2218,8 +2220,27 @@
     const out = { name: '', handle: '' };
     if (!nameBlock) return out;
     const text = nameBlock.innerText || nameBlock.textContent || '';
-    const handleMatch = text.match(/@[A-Za-z0-9_]+/);
-    out.handle = handleMatch ? handleMatch[0] : '';
+    // The profile link is authoritative: a display name can itself contain "@word"
+    // ("Alice @alice.bsky.social", "Jane | @Acme"), so a text scan picks the wrong one.
+    const profileLinks = pickAll(nameBlock, CONFIG.selectors.userProfileLink)
+      .map((a) => {
+        const m = (a.getAttribute('href') || '').match(/^\/([A-Za-z0-9_]{1,15})\/?(?:[?#].*)?$/);
+        return m ? { handle: `@${m[1]}`, text: (a.textContent || '').trim() } : null;
+      })
+      .filter(Boolean);
+    if (profileLinks.length) {
+      const isHandleText = (l) => l.text.toLowerCase() === l.handle.toLowerCase();
+      out.handle = (profileLinks.find(isHandleText) || profileLinks[0]).handle;
+      const nameLink = profileLinks.find((l) => l.text && !isHandleText(l));
+      if (nameLink) {
+        out.name = nameLink.text;
+        return out;
+      }
+    } else {
+      // No link: the handle follows the display name, so the LAST @word is the safer pick.
+      const handles = text.match(/@[A-Za-z0-9_]+/g);
+      out.handle = handles ? handles[handles.length - 1] : '';
+    }
     // The display name is the first line, minus any @handle X glued onto it.
     out.name = displayNameFromLine(
       text
