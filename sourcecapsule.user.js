@@ -9968,6 +9968,28 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return store;
   }
 
+  // One probe pass saves up to three times (capture, gap seeds, recovery). Each save reloads
+  // the STORED archive, so a write that failed would be forgotten by the next one. This holds
+  // the merged result in memory and re-sends it, so a failed write is retried rather than lost,
+  // and keeps every storage error for the caller to report. Merging goes through
+  // mergeReplyArchiveRecords, so content still only accumulates.
+  function createReplyProbeArchiveWriter(store, rootStatusId) {
+    let held = [];
+    const errors = [];
+    return {
+      errors,
+      async save(records) {
+        const outcome = await store.save(
+          rootStatusId,
+          mergeReplyArchiveRecords(held, records || [])
+        );
+        held = outcome.records;
+        if (!outcome.ok) errors.push(outcome.storageError);
+        return outcome;
+      },
+    };
+  }
+
   let replyArchiveStore = null;
   function getReplyArchiveStore() {
     if (!replyArchiveStore) replyArchiveStore = createReplyArchiveStore();
@@ -10702,7 +10724,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         discoveredSurfaces: [surface],
       })),
     ].filter((record) => String(record.id) !== String(pending.rootStatusId));
-    let saved = await getReplyArchiveStore().save(pending.rootStatusId, archiveInput);
+    const archiveWriter = createReplyProbeArchiveWriter(
+      getReplyArchiveStore(),
+      pending.rootStatusId
+    );
+    let saved = await archiveWriter.save(archiveInput);
     // Every id the audit knows but the archive has no body for gets seeded here, so the
     // recovery round below can fetch it. Without this the archive only ever held what
     // THIS run happened to see, while the audit remembered a thousand ids from earlier
@@ -10710,7 +10736,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (options.recoverGaps !== false) {
       const seeds = replyArchiveGapSeeds(gapReport, pending.rootStatusId, saved.records, surface);
       if (seeds.length) {
-        saved = await getReplyArchiveStore().save(pending.rootStatusId, seeds);
+        saved = await archiveWriter.save(seeds);
         result.gapsSeeded = seeds.length;
       }
     }
@@ -10733,7 +10759,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         result.gapRecoveryErrors = recovery.errors;
         result.gapsSkippedOverLimit = recovery.skippedOverLimit;
         if (recovery.recovered || recovery.unavailable) {
-          saved = await getReplyArchiveStore().save(pending.rootStatusId, recovery.records);
+          saved = await archiveWriter.save(recovery.records);
         }
       } catch (error) {
         result.gapRecoveryError = String((error && error.message) || error);
@@ -10742,14 +10768,23 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     result.archivedReplies = saved.replyCount;
     result.archiveBackend = saved.backend;
     result.archiveBytes = saved.approxBytes;
-    result.archiveStorageError = saved.ok ? '' : saved.storageError;
+    // All of this pass's write errors, not just the last save's: an earlier failed write
+    // must not disappear because a later one succeeded.
+    const archiveErrors = Array.from(new Set(archiveWriter.errors));
+    result.archiveStorageError = saved.ok ? '' : archiveErrors.join('; ') || saved.storageError;
+    // The last write succeeded, so it carried everything held in memory; the earlier
+    // failure is reported as a warning rather than as lost data.
+    result.archiveStorageWarning = saved.ok ? archiveErrors.join('; ') : '';
     if (!saved.ok) {
       // Storage is the one step here that can fail invisibly and lose everything the
       // run just collected, so it gets its own loud, sticky message.
-      showToast(`Reply archive could NOT be saved (${saved.backend}): ${saved.storageError}`, {
-        error: true,
-        sticky: true,
-      });
+      showToast(
+        `Reply archive could NOT be saved (${saved.backend}): ${result.archiveStorageError}`,
+        {
+          error: true,
+          sticky: true,
+        }
+      );
     }
     // Persist the audit trail only AFTER the archive outcome is known - writing it
     // earlier stored a result whose archive fields were all undefined, which made the
@@ -10792,7 +10827,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       : '';
     const archiveSummary = result.archiveStorageError
       ? ` ARCHIVE NOT SAVED: ${result.archiveStorageError}.`
-      : ` Archive now holds ${result.archivedReplies} replies with content (${result.archiveBackend}).${recoverySummary}`;
+      : ` Archive now holds ${result.archivedReplies} replies with content (${result.archiveBackend}).${recoverySummary}${result.archiveStorageWarning ? ` WARNING: an earlier archive write failed (${result.archiveStorageWarning}); the final write saved everything held.` : ''}`;
     // A run that spent most of its time hidden did not measure this conversation's
     // coverage - it measured the tab being in the background. Say which one happened.
     const hiddenSummary =
@@ -10809,9 +10844,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         ? `${records.size} DOM-observed on ${surface} (surface ${pending.passIndex || 1} of ${pending.passTotal}; the archive total below spans all of them)`
         : `${records.size} DOM-observed on ${surface}`;
     showToast(
-      `Reply probe finished: ${passSummary}. Stop: ${stopReason}.${publicCount}${gapSummary}${archiveSummary}${downloadSummary}${hiddenSummary} Result saved locally.`,
+      `Reply probe finished: ${passSummary}. Stop: ${stopReason}.${publicCount}${gapSummary}${archiveSummary}${downloadSummary}${hiddenSummary}${
+        result.storageError
+          ? ` Result history NOT saved locally: ${result.storageError}.`
+          : ' Result saved locally.'
+      }`,
       {
         error:
+          Boolean(result.storageError || result.archiveStorageWarning) ||
           (hiddenMs > 0 && !records.size) ||
           !['pagination-idle', 'conversation-boundary'].includes(stopReason),
         sticky: true,
@@ -12570,6 +12610,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       readReplyProbeHistory,
       writeReplyProbeResult,
       runReplyProbe,
+      createReplyProbeArchiveWriter,
       postControlCaptureMode,
       resolveExportTarget,
       authorFromNameBlock,

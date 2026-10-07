@@ -4062,6 +4062,38 @@ await checkAsync(
 );
 
 await checkAsync(
+  'a failed archive write is carried into the next save of the same pass, and reported',
+  async () => {
+    const memory = new Map();
+    let writes = 0;
+    const store = engine.createReplyArchiveStore({
+      async get(key) {
+        return memory.get(key) || null;
+      },
+      async set(key, value) {
+        writes += 1;
+        if (writes === 1) throw new Error('QuotaExceededError');
+        memory.set(key, value);
+      },
+      name: 'flaky',
+    });
+    const rootStatusId = '2000000000000000000';
+    const writer = engine.createReplyProbeArchiveWriter(store, rootStatusId);
+    const first = await writer.save([{ id: '2000000000000000201', text: 'Captured pass one.' }]);
+    assert.equal(first.ok, false);
+    const second = await writer.save([{ id: '2000000000000000202', text: 'Seeded later.' }]);
+    assert.equal(second.ok, true);
+    const stored = await store.load(rootStatusId);
+    assert.deepEqual(stored.records.map((record) => record.id).sort(), [
+      '2000000000000000201',
+      '2000000000000000202',
+    ]);
+    assert.equal(stored.records[0].text.length > 0, true);
+    assert.match(writer.errors.join(';'), /QuotaExceeded/, 'the earlier failure is not lost');
+  }
+);
+
+await checkAsync(
   'reply archive save never overwrites a stored archive it failed to read',
   async () => {
     const memory = new Map();
