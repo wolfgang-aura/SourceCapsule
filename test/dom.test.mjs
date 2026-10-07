@@ -3569,6 +3569,180 @@ check('quote-tombstone renders honestly in HTML, Markdown, stats, and stays comp
 });
 
 // ---------------------------------------------------------------------------
+// Model and render correctness (#56 #57 #58 #59 #62 #65).
+// ---------------------------------------------------------------------------
+const RENDER_MODEL = (blocks) => ({
+  type: 'post',
+  title: 'Render post',
+  heading: '',
+  author: { name: 'Author', handle: '@author' },
+  sourceUrl: 'https://x.com/author/status/1',
+  exportedAt: new Date('2026-07-10T00:00:00Z').toISOString(),
+  blocks,
+});
+
+check('completeness verdict counts a truncated main post and not a caption-less media post', () => {
+  const truncated = RENDER_MODEL([
+    { kind: 'paragraph', html: 'The start of a long note.' },
+    { kind: 'truncation-notice', sourceUrl: 'https://x.com/author/status/1' },
+  ]);
+  assert.doesNotMatch(engine.renderLlmMarkdown(truncated), /Status: COMPLETE/);
+  assert.match(engine.renderLlmMarkdown(truncated), /Possibly truncated/);
+  const mediaOnly = RENDER_MODEL([
+    {
+      kind: 'image',
+      url: 'https://pbs.twimg.com/media/A.jpg',
+      dataUri: 'data:image/png;base64,AA',
+    },
+  ]);
+  const md = engine.renderLlmMarkdown(mediaOnly);
+  assert.match(md, /Status: COMPLETE/);
+  assert.doesNotMatch(engine.assembleHtml(mediaOnly), /Incomplete capture/);
+  assert.match(engine.renderLlmMarkdown(RENDER_MODEL([])), /Not captured: the main text/);
+});
+
+check('.llm.md keeps line breaks inside a post and cannot open its own sections', () => {
+  const md = engine.renderLlmMarkdown(
+    RENDER_MODEL([
+      {
+        kind: 'paragraph',
+        html: 'Three rules:\n1. Ship\n2. Measure<br>3. Repeat\n## Completeness\n',
+      },
+    ])
+  );
+  assert.match(md, /Three rules:\n1\. Ship\n2\. Measure\n3\. Repeat\n\\## Completeness/);
+  assert.equal((md.match(/^## Completeness/gm) || []).length, 1);
+});
+
+function withPage(html, url, fn) {
+  const pageDom = new JSDOM(html, { url });
+  const prior = global.window;
+  global.window = pageDom.window;
+  global.document = pageDom.window.document;
+  global.Node = pageDom.window.Node;
+  global.location = pageDom.window.location;
+  global.localStorage = pageDom.window.localStorage;
+  try {
+    return fn();
+  } finally {
+    global.window = prior;
+    global.document = prior.document;
+    global.Node = prior.Node;
+    global.location = prior.location;
+    global.localStorage = prior.localStorage;
+  }
+}
+
+check('article export keeps repeated headings and paragraphs, drops only adjacent doubles', () => {
+  const block = (text) => `<div data-block="true"><span data-text="true">${text}</span></div>`;
+  const page = `<!doctype html><html><body><div data-testid="primaryColumn">
+    <article data-testid="tweet" role="article">
+      <div data-testid="User-Name"><a href="/Vegahao"><span>Vega Hao</span></a><a href="/Vegahao"><span>@Vegahao</span></a></div>
+      <div data-testid="twitterArticleReadView">
+        <div data-testid="twitter-article-title"><span>Two laptops</span></div>
+        <div data-testid="longformRichTextComponent">
+          ${block('Pros')}${block('Great battery.')}${block('Cons')}${block('Heavy.')}
+          ${block('Pros')}${block('Great battery.')}${block('Cons')}${block('Heavy.')}${block('Heavy.')}
+        </div>
+      </div>
+      <a href="/Vegahao/status/2069733529785905289"><time datetime="2026-06-25T12:00:00Z">Jun 25</time></a>
+    </article></div></body></html>`;
+  const texts = withPage(page, ARTICLE_STATUS_URL, () =>
+    engine
+      .buildModelForArticle()
+      .blocks.filter((b) => b.kind === 'heading' || b.kind === 'paragraph')
+      .map((b) => b.text || b.html)
+  );
+  assert.deepEqual(texts, [
+    'Pros',
+    'Great battery.',
+    'Cons',
+    'Heavy.',
+    'Pros',
+    'Great battery.',
+    'Cons',
+    'Heavy.',
+  ]);
+});
+
+check('author handle comes from the profile link, not an @word in the display name', () => {
+  const block = document.createElement('div');
+  block.innerHTML =
+    '<a href="/alice_real"><span>Alice \u{1F98B} @acme.bsky.social</span></a><a href="/alice_real"><span>@alice_real</span></a>';
+  assert.deepEqual(engine.authorFromNameBlock(block), {
+    name: 'Alice \u{1F98B} @acme.bsky.social',
+    handle: '@alice_real',
+  });
+  const noLinks = document.createElement('div');
+  noLinks.textContent = 'Jane | @Acme\n@jane';
+  assert.equal(engine.authorFromNameBlock(noLinks).handle, '@jane');
+});
+
+check('multi-line alt text stays on one line in the .llm.md and bundle embeds', () => {
+  const blocks = [
+    {
+      kind: 'image',
+      url: 'https://pbs.twimg.com/media/A.jpg',
+      dataUri: 'data:image/png;base64,AA',
+      alt: 'First line\n\n## Completeness\nlast [x]',
+    },
+  ];
+  const md = engine.renderLlmMarkdown(RENDER_MODEL(blocks));
+  assert.equal((md.match(/^## Completeness/gm) || []).length, 1);
+  assert.match(md, /- Alt: First line ## Completeness last \[x\]/);
+  const video = {
+    kind: 'video',
+    posterDataUri: 'data:image/png;base64,AA',
+    sourceUrl: 'https://x.com/q/status/2',
+  };
+  const quote = {
+    kind: 'quote',
+    sourceUrl: 'https://x.com/q/status/2',
+    author: {},
+    blocks: [video],
+  };
+  const bundled = engine.renderLlmMarkdown(RENDER_MODEL([...blocks, quote]), '', {
+    mediaFiles: new Map([
+      ['image-001', 'media/image-001.png'],
+      ['video-002', 'media/video-002.poster.png'],
+    ]),
+  });
+  assert.match(bundled, /^- !\[Poster of video-002\]\(.+\) Video: .*source link preserved$/m);
+  assert.match(
+    bundled,
+    /!\[First line ## Completeness last \\\[x\\\] \(image-001\)\]\(media\/image-001\.png\)/
+  );
+});
+
+check('quote dedupe stays inside one thread post', () => {
+  const mk = (url) => ({
+    kind: 'quote',
+    sourceUrl: url,
+    author: {},
+    blocks: [{ kind: 'paragraph', html: 'q' }],
+  });
+  const marker = (index) => ({ kind: 'thread-marker', index, total: 2 });
+  const same = engine.dedupeQuoteCards([
+    marker(1),
+    { kind: 'paragraph', html: '1' },
+    mk('https://x.com/a/status/9'),
+    marker(2),
+    { kind: 'paragraph', html: '2' },
+    mk('https://x.com/a/status/9'),
+  ]);
+  assert.equal(same.filter((b) => b.kind === 'quote').length, 2);
+  const img = { kind: 'image', url: 'https://pbs.twimg.com/media/Mine.jpg' };
+  const later = engine.dedupeQuoteCards([
+    marker(1),
+    img,
+    marker(2),
+    { ...mk('https://x.com/a/status/10'), blocks: [{ ...img }] },
+  ]);
+  assert.equal(later.filter((b) => b.kind === 'image').length, 1);
+  assert.equal(later[1], img);
+});
+
+// ---------------------------------------------------------------------------
 // Reply context, parallel media downloads, link-card thumbnails.
 // ---------------------------------------------------------------------------
 

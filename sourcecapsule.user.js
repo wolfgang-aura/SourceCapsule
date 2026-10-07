@@ -80,6 +80,8 @@
       tweetText: ['div[data-testid="tweetText"]', 'div[lang]'],
       // Author name/handle block within a tweet.
       userName: ['div[data-testid="User-Name"]'],
+      // Profile links inside that block (`/<handle>`); the handle is read from their href.
+      userProfileLink: ['a[href^="/"]'],
       // Avatar image within a tweet.
       avatar: ['div[data-testid="Tweet-User-Avatar"] img', 'img[src*="profile_images"]'],
       // Photos within a tweet.
@@ -456,9 +458,24 @@
     }
   }
 
+  /** Single-line text: every whitespace run, including newlines, becomes one space. */
   function textFromHtml(html) {
+    return htmlToText(html).replace(/\s+/g, ' ').trim();
+  }
+
+  /** Text that keeps <br>, block-tag and literal newlines; collapses only spaces/tabs. */
+  function textBlockFromHtml(html) {
+    return htmlToText(html, true)
+      .replace(/[ \t\f\v\u00a0]+/g, ' ')
+      .replace(/ ?\n ?/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  function htmlToText(html, keepBreaks = false) {
     return String(html || '')
       .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/?(?:p|div|li|h[1-6])\b[^>]*>/gi, keepBreaks ? '\n' : ' ')
       .replace(/<[^>]+>/g, ' ')
       .replace(/&nbsp;/g, ' ')
       .replace(/&amp;/g, '&')
@@ -467,9 +484,7 @@
       .replace(/&quot;/g, '"')
       .replace(/&#39;/g, "'")
       .replace(/&#(\d+);/g, (match, code) => decodeHtmlCodePoint(match, code))
-      .replace(/&#x([0-9a-f]+);/gi, (match, code) => decodeHtmlCodePoint(match, code, 16))
-      .replace(/\s+/g, ' ')
-      .trim();
+      .replace(/&#x([0-9a-f]+);/gi, (match, code) => decodeHtmlCodePoint(match, code, 16));
   }
 
   function blockTextForLanguage(block) {
@@ -2205,8 +2220,27 @@
     const out = { name: '', handle: '' };
     if (!nameBlock) return out;
     const text = nameBlock.innerText || nameBlock.textContent || '';
-    const handleMatch = text.match(/@[A-Za-z0-9_]+/);
-    out.handle = handleMatch ? handleMatch[0] : '';
+    // The profile link is authoritative: a display name can itself contain "@word"
+    // ("Alice @alice.bsky.social", "Jane | @Acme"), so a text scan picks the wrong one.
+    const profileLinks = pickAll(nameBlock, CONFIG.selectors.userProfileLink)
+      .map((a) => {
+        const m = (a.getAttribute('href') || '').match(/^\/([A-Za-z0-9_]{1,15})\/?(?:[?#].*)?$/);
+        return m ? { handle: `@${m[1]}`, text: (a.textContent || '').trim() } : null;
+      })
+      .filter(Boolean);
+    if (profileLinks.length) {
+      const isHandleText = (l) => l.text.toLowerCase() === l.handle.toLowerCase();
+      out.handle = (profileLinks.find(isHandleText) || profileLinks[0]).handle;
+      const nameLink = profileLinks.find((l) => l.text && !isHandleText(l));
+      if (nameLink) {
+        out.name = nameLink.text;
+        return out;
+      }
+    } else {
+      // No link: the handle follows the display name, so the LAST @word is the safer pick.
+      const handles = text.match(/@[A-Za-z0-9_]+/g);
+      out.handle = handles ? handles[handles.length - 1] : '';
+    }
     // The display name is the first line, minus any @handle X glued onto it.
     out.name = displayNameFromLine(
       text
@@ -2608,8 +2642,19 @@
    * cards. Collapse only near quote repeats; the same tweet can be intentionally
    * embedded twice in different article sections, and those positions must be kept.
    * Then drop any top-level image that is already shown inside a quote card.
+   * Both steps run per thread post (a `thread-marker` starts a new segment), so one post
+   * quoting what an earlier post quoted, or quoting that post itself, loses nothing.
    */
   function dedupeQuoteCards(blocks) {
+    const segments = [];
+    for (const b of blocks) {
+      if (b.kind === 'thread-marker' || !segments.length) segments.push([]);
+      segments[segments.length - 1].push(b);
+    }
+    return segments.flatMap(dedupeQuoteCardsInSegment);
+  }
+
+  function dedupeQuoteCardsInSegment(blocks) {
     const nearDuplicateWindow = 3;
     const out = [];
     for (const b of blocks) {
@@ -2635,6 +2680,8 @@
       }
       out.push(b);
     }
+    // Only this post's own quote cards count: an article is one segment, where harvested
+    // quote media can sit far from its card, so the filter must see the whole segment.
     const quoteImgUrls = new Set();
     for (const b of out) if (b.kind === 'quote') collectQuoteImageUrls(b.blocks, quoteImgUrls);
     return out.filter((b) => !(b.kind === 'image' && quoteImgUrls.has(b.url)));
@@ -2746,7 +2793,10 @@
     const blocks = [];
     const seenImg = new Set();
     const seenVideo = new Set();
-    const seenText = new Set();
+    // Node identity (seenCandidateNodes) already stops a DOM double-read of one block. Text
+    // equality is only checked against the PREVIOUS text block, so a repeated subheading such
+    // as "Pros" or "Summary" elsewhere in the article survives.
+    let lastTextKey = '';
     const richRoot = pick(root, CONFIG.selectors.articleTextRoot, { quiet: true });
     const quoteEls = findArticleEmbeddedTweetEls(root);
     const insideQuote = (el) => quoteEls.some((quoteEl) => quoteEl !== el && quoteEl.contains(el));
@@ -2758,8 +2808,8 @@
     const pushTextBlock = (el) => {
       const html = inlineHtmlFromArticleBlock(el);
       const key = html.replace(/\s+/g, ' ').trim();
-      if (!key || seenText.has(key)) return;
-      seenText.add(key);
+      if (!key || key === lastTextKey) return;
+      lastTextKey = key;
       const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
       if (articleDividerText(text)) blocks.push({ kind: 'divider' });
       else {
@@ -2781,9 +2831,8 @@
         .map((html) => html.replace(/\s+/g, ' ').trim())
         .filter(Boolean);
       const key = `${ordered ? 'ol' : 'ul'}:${cleanItems.join('|')}`;
-      if (cleanItems.length && !seenText.has(key)) {
-        cleanItems.forEach((item) => seenText.add(item));
-        seenText.add(key);
+      if (cleanItems.length && key !== lastTextKey) {
+        lastTextKey = key;
         blocks.push({ kind: 'list', ordered, items: cleanItems });
       }
     };
@@ -2795,8 +2844,8 @@
         .join('|')
         .replace(/\s+/g, ' ')
         .trim()}`;
-      if (innerBlocks.length && !seenText.has(key)) {
-        seenText.add(key);
+      if (innerBlocks.length && key !== lastTextKey) {
+        lastTextKey = key;
         blocks.push({ kind: 'blockquote', blocks: innerBlocks });
       }
     };
@@ -2849,6 +2898,7 @@
     for (let i = 0; i < candidates.length; i++) {
       const { kind, node, item } = candidates[i];
       if (kind !== 'quote' && node && insideQuote(node)) continue;
+      if (kind !== 'text' && kind !== 'blockquote') lastTextKey = '';
 
       if (kind === 'text') {
         const listType = articleListType(node);
@@ -4299,7 +4349,15 @@
     ].join('')}</dl></details>`;
   }
 
+  /** Single-line Markdown text (alt, titles, metadata rows): newlines fold to spaces. */
   function markdownLineText(value) {
+    return markdownEscapedText(value)
+      .replace(/ ?\n[ \n]*/g, ' ')
+      .trim();
+  }
+
+  /** Multi-line Markdown text: keeps line breaks, collapses spaces, escapes angle brackets. */
+  function markdownEscapedText(value) {
     return String(value == null ? '' : value)
       .replace(/\r\n?/g, '\n')
       .replace(/\u00a0/g, ' ')
@@ -4310,11 +4368,20 @@
   }
 
   function markdownPlainText(value) {
-    return markdownLineText(value).replace(/\n{3,}/g, '\n\n');
+    return (
+      markdownEscapedText(value)
+        .replace(/ ?\n ?/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        // Post text must not open its own Markdown structure now that line breaks survive:
+        // an ATX heading, a setext underline, or a code fence at a line start.
+        .replace(/^(#{1,6})(?=\s|$)/gm, '\\$1')
+        .replace(/^(-{3,}|={3,})[ \t]*$/gm, '\\$1')
+        .replace(/^(```|~~~)/gm, '\\$1')
+    );
   }
 
   function markdownHeading(level, text) {
-    const clean = markdownLineText(text).replace(/\n+/g, ' ');
+    const clean = markdownLineText(text);
     if (!clean) return '';
     const depth = Math.min(Math.max(Number(level) || 2, 1), 6);
     return `${'#'.repeat(depth)} ${clean}`;
@@ -4611,7 +4678,9 @@
     const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
     const count = (type) => stats.missing.filter((record) => record.type === type).length;
     const missing = [];
-    if (!stats.mainTextCaptured) missing.push('the main text');
+    // A caption-less photo/video/poll/quote post has no text to miss.
+    const hasOtherContent = stats.images + stats.videos + stats.polls + stats.quoteCards > 0;
+    if (!stats.mainTextCaptured && !hasOtherContent) missing.push('the main text');
     const quotes = count('quoted-post');
     if (quotes) missing.push(plural(quotes, 'quoted post', 'quoted posts'));
     const images = count('image');
@@ -4623,8 +4692,15 @@
     const truncated = allLlmQuotes(model.blocks).filter(
       (quote) => quote.truncated || (!quote.noteRecovered && isPossiblyTruncatedPost(quote))
     ).length;
+    // Top-level notices mark the exported post itself (one per thread post): its full
+    // long-form text never reached the browser.
+    const truncatedMain = (model.blocks || []).filter((b) => b.kind === 'truncation-notice').length;
     const parts = [];
     if (missing.length) parts.push(`Not captured: ${missing.join(', ')}.`);
+    if (truncatedMain)
+      parts.push(
+        `Possibly truncated: ${plural(truncatedMain, 'main post', 'main posts')} (only preview text was available).`
+      );
     if (truncated)
       parts.push(
         `Possibly truncated: ${plural(truncated, 'embedded post', 'embedded posts')} (only preview text was available).`
@@ -4660,7 +4736,7 @@
       const alt = markdownLineText(block._xaExportAlt || block.alt || 'Image');
       if (!block.dataUri) return `[Missing image: ${id}${alt ? ` - ${alt}` : ''}]`;
       // Bundle: emit a real relative embed so markdown-aware readers render the actual file.
-      if (bundlePath) return `![${alt} (${id})](${bundlePath})`;
+      if (bundlePath) return `![${alt.replace(/[[\]]/g, '\\$&')} (${id})](${bundlePath})`;
       return `[Image: ${id}${alt ? ` - ${alt}` : ''}]`;
     }
     const pieces = [];
@@ -4709,12 +4785,13 @@
         if (articleDividerText(text)) lines.push('---');
         else {
           const heading = articleHeadingBlock(text);
+          const blockText = textBlockFromHtml(b.html);
           lines.push(
             heading
               ? markdownHeading(heading.level, heading.text)
               : linkOriginalPostLabels
-                ? replaceOriginalPostLabels(text, b.html, originalPostResolver)
-                : markdownPlainText(text)
+                ? replaceOriginalPostLabels(blockText, b.html, originalPostResolver)
+                : markdownPlainText(blockText)
           );
         }
       } else if (b.kind === 'divider') {
@@ -4864,7 +4941,15 @@
     if (media.length) {
       lines.push('', 'Media:');
       media.forEach((item) => {
-        lines.push(`- ${llmMediaDescription(item, item.kind).replace(/^\[|\]$/g, '')}`);
+        // Strip the brackets of the `[Video: ...]` tag only (the last line), not of a leading
+        // `![Poster of ...](path)` embed, and keep the bullet on one line.
+        const description = llmMediaDescription(item, item.kind)
+          .split('\n')
+          .map((line, i, all) =>
+            i === all.length - 1 ? line.replace(/^\[([\s\S]*)\]$/, '$1') : line
+          )
+          .join(' ');
+        lines.push(`- ${description}`);
       });
     }
 
@@ -4881,7 +4966,8 @@
       if (value !== undefined && value !== null && value !== '') lines.push(`- ${label}: ${value}`);
     };
     row('Attached to', attachments.get(item.id) || 'unknown');
-    if (item.type === 'image') row('Alt', item.alt || item.exportAlt || item.originalAlt);
+    if (item.type === 'image')
+      row('Alt', markdownLineText(item.alt || item.exportAlt || item.originalAlt));
     row('Width', item.width);
     row('Height', item.height);
     if (item.type === 'video') {
