@@ -5949,11 +5949,33 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     }
   }
 
+  const SHARE_LINKS_SOFT_CAP = 50;
+
+  // Keeps the list near SHARE_LINKS_SOFT_CAP by dropping the OLDEST EXPIRED records only.
+  // A live record holds the delete token of a capsule that still exists, so it is never
+  // dropped, even when that leaves the list over the cap. Returns the write outcome so a
+  // full localStorage reaches the caller instead of silently losing the delete token.
   function setShareLinks(records) {
+    let list = Array.isArray(records) ? records : [];
+    if (list.length > SHARE_LINKS_SOFT_CAP) {
+      const now = Date.now();
+      let excess = list.length - SHARE_LINKS_SOFT_CAP;
+      // Records are newest first, so walk from the tail to drop the oldest expired first.
+      const dropIdx = new Set();
+      for (let i = list.length - 1; i >= 0 && excess > 0; i -= 1) {
+        if (shareLinkExpired(list[i], now)) {
+          dropIdx.add(i);
+          excess -= 1;
+        }
+      }
+      list = list.filter((_, i) => !dropIdx.has(i));
+    }
     try {
-      localStorage.setItem(SHARES_KEY, JSON.stringify((records || []).slice(0, 50)));
+      localStorage.setItem(SHARES_KEY, JSON.stringify(list));
+      return { ok: true, error: '' };
     } catch (e) {
       errlog(e);
+      return { ok: false, error: String((e && e.message) || e || 'storage failed') };
     }
   }
 
@@ -5995,7 +6017,13 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       title: model.heading || model.title || 'X capture',
       sourceUrl: model.sourceUrl || '',
     };
-    setShareLinks([record, ...getShareLinks().filter((item) => item.id !== record.id)]);
+    const stored = setShareLinks([
+      record,
+      ...getShareLinks().filter((item) => item.id !== record.id),
+    ]);
+    // Set after the write, so it is never persisted. The caller must warn: without the
+    // record the capsule cannot be deleted from the link list before it expires.
+    if (!stored.ok) record.storageError = stored.error;
     return record;
   }
 
@@ -11644,7 +11672,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
               sticky: true,
             })
         );
-        rememberShareLink(created, model);
+        const remembered = rememberShareLink(created, model);
         if (savedTarget && savedTarget.root && savedTarget.segments) {
           await saveToLibrary(model, debugJson, savedTarget.root, {
             share: shareMetadataFromCreated(created),
@@ -11666,7 +11694,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           showShareResult(created, { copied });
         }
         showToast(
-          `AI readable link ready; expires ${readableUtcTime(created.expiresAt)}${copied ? ' (copied)' : ''}`
+          `AI readable link ready; expires ${readableUtcTime(created.expiresAt)}${copied ? ' (copied)' : ''}` +
+            (remembered.storageError
+              ? ` WARNING: browser storage is full, so this link was not added to your link list and cannot be deleted from it (${remembered.storageError}).`
+              : ''),
+          remembered.storageError ? { sticky: true, error: true } : undefined
         );
         return created;
       };

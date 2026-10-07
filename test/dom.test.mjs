@@ -238,6 +238,39 @@ check('share success remains visible when automatic clipboard copy is blocked', 
   assert.equal(document.querySelector('.xa-share-result'), null);
 });
 
+check('the share link list never drops a live record and reports a failed write', () => {
+  const day = 86400000;
+  const live = (id) => ({ id, expiresAt: new Date(Date.now() + day).toISOString() });
+  const dead = (id) => ({ id, expiresAt: new Date(Date.now() - day).toISOString() });
+  const records = [
+    ...Array.from({ length: 51 }, (_, i) => live(`live${i}`)),
+    dead('expired-a'),
+    dead('expired-b'),
+  ];
+  const outcome = engine.setShareLinks(records);
+  const kept = engine.getShareLinks().map((item) => item.id);
+  assert.equal(outcome.ok, true);
+  assert.equal(kept.filter((id) => id.startsWith('live')).length, 51, 'every live record kept');
+  assert.ok(!kept.includes('expired-a') && !kept.includes('expired-b'), 'expired go first');
+  const priorStorage = global.localStorage;
+  global.localStorage = {
+    getItem: () => '[]',
+    setItem: () => {
+      throw new Error('QuotaExceededError');
+    },
+  };
+  try {
+    const failed = engine.setShareLinks([live('x')]);
+    assert.equal(failed.ok, false);
+    assert.match(failed.error, /Quota/);
+    const record = engine.rememberShareLink({ id: 'y', viewUrl: 'u', uploadToken: 't' }, {});
+    assert.match(record.storageError, /Quota/);
+  } finally {
+    global.localStorage = priorStorage;
+    engine.setShareLinks([]);
+  }
+});
+
 await checkAsync(
   'recent AI readable links modal folds expired links away with remove-only actions',
   async () => {
