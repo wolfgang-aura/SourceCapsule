@@ -11,9 +11,16 @@ preview_bucket_name = "sourcecapsule-shares-dev"
 crons = ["17 3 * * *"]
 
 # Per-IP limit on creating new share links (POST /api/capsules).
-# File uploads are not limited: they require the capsule's bearer token,
-# and one capsule can legitimately upload ~40 media files in a burst.
+# IPv6 clients are keyed on their /64 prefix.
 [[ratelimits]]
 name = "CREATE_LIMITER"
 namespace_id = "1001"
 simple = { limit = 5, period = 60 }
+
+# Per-capsule limit on file uploads (PUT /api/capsules/<id>/files/...), keyed on the
+# capsule id after the bearer token checks out. One capsule legitimately uploads ~40 files
+# in a burst, so the limit leaves headroom for retries.
+[[ratelimits]]
+name = "UPLOAD_LIMITER"
+namespace_id = "1002"
+simple = { limit = 120, period = 60 }

@@ -3,6 +3,21 @@ const VALID_EXPIRY_DAYS = new Set([1, 7, 30]);
 // How long an expired capsule keeps its tombstone (content is deleted at expiry;
 // only the back-link record survives). After this it is hard-deleted entirely.
 const TOMBSTONE_RETENTION_DAYS = 180;
+// sha256 of the one inline script the client emits into content.html (the image lightbox).
+// test/share-worker.test.mjs recomputes this from the userscript's real output, so editing
+// the lightbox without adding its new hash here fails CI instead of breaking live capsules.
+const LIGHTBOX_SCRIPT_HASHES = ['sha256-HjElcqBn7MgmOv/l9JPXAySq0NbP7jhuXip+wJwhr7g='];
+const CONTENT_HTML_CSP = [
+  "default-src 'none'",
+  "img-src 'self' data:",
+  "media-src 'self'",
+  "style-src 'unsafe-inline'",
+  `script-src ${LIGHTBOX_SCRIPT_HASHES.map((hash) => `'${hash}'`).join(' ')}`,
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'none'",
+].join('; ');
+const META_KEY_PATTERN = /^capsules\/([a-f0-9]{32})\/_meta\.json$/;
 const SOURCE_URL_PATTERN =
   /^https:\/\/(?:x|twitter)\.com\/([A-Za-z0-9_]{1,15})\/status\/([0-9]{1,20})(?:\/(?:photo|video)\/[0-9]{1,2})?\/?$/;
 
@@ -52,7 +67,9 @@ function validFilePath(path) {
     path === 'content.html' ||
     path === 'content.md' ||
     path === 'manifest.json' ||
-    /^media\/[A-Za-z0-9._-]{1,180}$/.test(path)
+    // Image files only, and never a name starting with "_": the client uploads nothing else
+    // (media ids are alphanumeric), and "_meta.json" is the Worker's own record name.
+    /^media\/[A-Za-z0-9][A-Za-z0-9._-]{0,179}\.(?:jpe?g|png|gif|webp|avif)$/i.test(path)
   );
 }
 
@@ -221,6 +238,9 @@ async function createCapsule(request, env) {
   } catch {
     return json(request, { error: 'Expected JSON body.' }, 400);
   }
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return json(request, { error: 'Expected a JSON object.' }, 400);
+  }
   const expiryDays = Number(body.expiryDays);
   if (!VALID_EXPIRY_DAYS.has(expiryDays)) {
     return json(request, { error: 'expiryDays must be 1, 7, or 30.' }, 400);
@@ -261,22 +281,51 @@ async function createCapsule(request, env) {
   );
 }
 
+// Reads a request body but gives up as soon as it passes `limit` bytes, so an oversized or
+// endless chunked upload is cut off instead of buffered whole. Returns null when over limit.
+async function readBodyCapped(request, limit) {
+  if (!request.body) return new Uint8Array(0);
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
 async function uploadFile(request, env, id, path) {
   const auth = await authorized(request, env, id);
   if (!auth.ok) return json(request, { error: 'Upload authorization failed.' }, auth.status);
   if (isExpired(auth.meta)) return json(request, { error: 'Upload session expired.' }, 410);
+  // Only an open upload session accepts files. A published capsule is immutable, so a
+  // leaked token can delete it but not rewrite what readers see.
+  if (auth.meta._custom.status !== 'uploading') {
+    return json(request, { error: 'Capsule is not accepting uploads.' }, 409);
+  }
   if (!validFilePath(path)) return json(request, { error: 'Invalid file path.' }, 400);
+  if (!(await uploadAllowed(env, id))) {
+    return json(request, { error: 'Too many uploads for this capsule. Try again shortly.' }, 429);
+  }
   const length = Number(request.headers.get('Content-Length') || 0);
   if (length > MAX_CAPSULE_BYTES) return json(request, { error: 'File is too large.' }, 413);
-  const bytes = new Uint8Array(await request.arrayBuffer());
   const key = fileKey(id, path);
   const existingBytes = await capsuleBytes(env, id, key);
-  if (
-    bytes.byteLength > MAX_CAPSULE_BYTES ||
-    existingBytes + bytes.byteLength > MAX_CAPSULE_BYTES
-  ) {
-    return json(request, { error: 'Capsule exceeds the 25 MB limit.' }, 413);
-  }
+  const bytes = await readBodyCapped(request, Math.max(0, MAX_CAPSULE_BYTES - existingBytes));
+  if (!bytes) return json(request, { error: 'Capsule exceeds the 25 MB limit.' }, 413);
   await env.CAPSULES.put(key, bytes, {
     httpMetadata: { contentType: servedType(path) || 'application/octet-stream' },
   });
@@ -443,17 +492,38 @@ async function serveCapsule(request, env, ctx, id, path) {
   headers.set(
     'Content-Security-Policy',
     path === 'content.html'
-      ? "default-src 'none'; img-src 'self' data:; media-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'"
+      ? CONTENT_HTML_CSP
       : "default-src 'none'; sandbox; frame-ancestors 'none'"
   );
   return new Response(request.method === 'HEAD' ? null : object.body, { headers });
+}
+
+// An IPv6 customer controls a whole /64, so keying on the full address lets one client
+// rotate through 2^64 keys. Collapse IPv6 to its /64 prefix; IPv4 stays as is.
+function limiterKey(ip) {
+  if (!ip.includes(':')) return ip;
+  const [head, tail = ''] = ip.split('::');
+  const headGroups = head ? head.split(':') : [];
+  const tailGroups = tail ? tail.split(':') : [];
+  const fill = Array(Math.max(0, 8 - headGroups.length - tailGroups.length)).fill('0');
+  const groups = ip.includes('::') ? [...headGroups, ...fill, ...tailGroups] : headGroups;
+  const prefix = groups.slice(0, 4).map((group) => group.toLowerCase().padStart(4, '0'));
+  return `${prefix.join(':')}::/64`;
 }
 
 async function createAllowed(request, env) {
   // CREATE_LIMITER is a Workers rate-limiting binding; absent in local dev and tests.
   if (!env.CREATE_LIMITER) return true;
   const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
-  const { success } = await env.CREATE_LIMITER.limit({ key: ip });
+  const { success } = await env.CREATE_LIMITER.limit({ key: limiterKey(ip) });
+  return success;
+}
+
+// Per-capsule upload limit, sized for the client's ~40-file burst. Checked after the
+// bearer token so a stranger who knows an id cannot burn that capsule's budget.
+async function uploadAllowed(env, id) {
+  if (!env.UPLOAD_LIMITER) return true;
+  const { success } = await env.UPLOAD_LIMITER.limit({ key: id });
   return success;
 }
 
@@ -511,7 +581,9 @@ async function cleanupExpired(env) {
       cursor,
       include: ['customMetadata'],
     });
-    const metaObjects = (page.objects || []).filter((object) => object.key.endsWith('/_meta.json'));
+    // Only the Worker's own record at capsules/<id>/_meta.json counts. Anything else that
+    // happens to end in "_meta.json" (e.g. an uploaded media/_meta.json) is ignored.
+    const metaObjects = (page.objects || []).filter((object) => META_KEY_PATTERN.test(object.key));
     for (const item of metaObjects) {
       // One bad capsule (a corrupt _meta.json, a failing delete) must not abort the sweep:
       // it would stall on the same item every day and nothing behind it would ever expire.
@@ -532,6 +604,8 @@ async function cleanupExpired(env) {
         const object = await env.CAPSULES.get(item.key);
         if (!object) continue;
         const meta = JSON.parse(await object.text());
+        // The id comes from the key, never from the stored body.
+        meta.id = META_KEY_PATTERN.exec(item.key)[1];
         meta._custom = object.customMetadata || {};
         if (isExpired(meta)) {
           await expireCapsule(env, { ...meta, expiredAt: new Date(now).toISOString() });

@@ -154,26 +154,22 @@ assert.equal(
   String('<!doctype html><title>Shared</title>'.length)
 );
 
-await worker.fetch(
+// A published capsule is immutable: its token can still delete it, but uploads answer 409.
+const lateUpload = await worker.fetch(
   new Request(`${created.uploadUrl}/media/image-002.jpg`, {
     method: 'PUT',
-    headers: {
-      Authorization: `Bearer ${created.uploadToken}`,
-      'Content-Type': 'application/octet-stream',
-    },
+    headers: { Authorization: `Bearer ${created.uploadToken}` },
     body: new Uint8Array([4, 5, 6]),
     duplex: 'half',
   }),
   env,
   ctx
 );
-const repairedImage = await worker.fetch(
-  new Request(`${created.viewUrl}/media/image-002.jpg`),
-  env,
-  ctx
+assert.equal(lateUpload.status, 409);
+assert.equal(
+  (await worker.fetch(new Request(`${created.viewUrl}/media/image-002.jpg`), env, ctx)).status,
+  404
 );
-assert.equal(repairedImage.status, 200);
-assert.equal(repairedImage.headers.get('Content-Type'), 'image/jpeg');
 
 {
   const limitedEnv = {
@@ -507,27 +503,21 @@ const past = new Date(Date.now() - 86400000).toISOString();
   // all of it is served from the Worker's own origin.
   const store = new MemoryR2();
   const capsule = await publishCapsule(store);
-  const put = (name, type, body) =>
-    worker.fetch(
-      new Request(`${capsule.uploadUrl}/${name}`, {
-        method: 'PUT',
-        headers: { Authorization: `Bearer ${capsule.uploadToken}`, 'Content-Type': type },
-        body,
-        duplex: 'half',
-      }),
-      { CAPSULES: store },
-      ctx
-    );
   const get = (path) =>
     worker.fetch(
       new Request(`https://share.example/c/${capsule.id}${path}`),
       { CAPSULES: store },
       ctx
     );
-  await put('media/page.html', 'text/html', '<script>1</script>');
-  await put('media/vector.svg', 'image/svg+xml', '<svg xmlns="http://www.w3.org/2000/svg"/>');
-  await put('media/pic.jpg', 'text/html', '<script>1</script>');
-  await put('media/blob.bin', 'application/octet-stream', new Uint8Array([1]));
+  // The upload path now refuses these names, so seed them as objects an older Worker stored.
+  const seed = (name, type, body) =>
+    store.put(`capsules/${capsule.id}/${name}`, new TextEncoder().encode(body), {
+      httpMetadata: { contentType: type },
+    });
+  await seed('media/page.html', 'text/html', '<script>1</script>');
+  await seed('media/vector.svg', 'image/svg+xml', '<svg xmlns="http://www.w3.org/2000/svg"/>');
+  await seed('media/pic.jpg', 'text/html', '<script>1</script>');
+  await seed('media/blob.bin', 'application/octet-stream', '1');
 
   for (const name of ['page.html', 'vector.svg']) {
     const res = await get(`/media/${name}`);
@@ -572,7 +562,185 @@ const past = new Date(Date.now() - 86400000).toISOString();
       { CAPSULES: store },
       ctx
     );
-    assert.ok([400, 404].includes(res.status), `${method} ${path} answered ${res.status}`);
+    assert.ok([400, 404, 409].includes(res.status), `${method} ${path} answered ${res.status}`);
+  }
+}
+
+{
+  // The sweep trusts the key, never an uploaded file's body: a media/_meta.json naming another
+  // capsule must not expire it. Such a name is also refused at upload.
+  const store = new MemoryR2();
+  const attacker = await publishCapsule(store);
+  const victim = await publishCapsule(store);
+  forceExpiry(store, attacker.id, past);
+  store.objects.set(`capsules/${attacker.id}/media/_meta.json`, {
+    bytes: new TextEncoder().encode(JSON.stringify({ id: victim.id, expiresAt: past })),
+    httpMetadata: {},
+    customMetadata: { status: 'published', expiresAt: past },
+  });
+  await cleanupExpired({ CAPSULES: store });
+  assert.equal(store.objects.has(`capsules/${victim.id}/content.html`), true, 'victim untouched');
+  assert.equal(store.objects.has(`capsules/${attacker.id}/content.html`), false, 'own expiry runs');
+
+  const open = new MemoryR2();
+  const session = await (
+    await worker.fetch(
+      new Request('https://share.example/api/capsules', {
+        method: 'POST',
+        body: JSON.stringify({ expiryDays: 7 }),
+      }),
+      { CAPSULES: open },
+      ctx
+    )
+  ).json();
+  const putTo = (name, body = new Uint8Array([1])) =>
+    worker.fetch(
+      new Request(`${session.uploadUrl}/${name}`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${session.uploadToken}` },
+        body,
+        duplex: 'half',
+      }),
+      { CAPSULES: open },
+      ctx
+    );
+  assert.equal((await putTo('media/_meta.json')).status, 400, 'underscore name refused');
+  // Only image names the client really uploads are accepted under media/.
+  for (const name of ['media/a.html', 'media/a.svg', 'media/a.bin', 'media/a', 'media/.jpg']) {
+    assert.equal((await putTo(name)).status, 400, name);
+  }
+  for (const name of ['media/abc123.jpg', 'media/abc123.poster.png', 'media/x-1.webp']) {
+    assert.equal((await putTo(name)).status, 200, name);
+  }
+}
+
+{
+  // content.html allows only the lightbox script by hash. Recompute that hash from what the
+  // current userscript really emits, so a lightbox edit fails here, not on live capsules.
+  const { createRequire } = await import('node:module');
+  const { createHash } = await import('node:crypto');
+  const engine = createRequire(import.meta.url)('../sourcecapsule.user.js');
+  const html = engine.assembleHtml(
+    {
+      title: 'T',
+      heading: 'T',
+      author: { name: 'A', handle: '@a' },
+      sourceUrl: 'https://x.com/a/status/1',
+      blocks: [{ kind: 'paragraph', html: 'hi' }],
+    },
+    '',
+    { distribution: 'shared' }
+  );
+  const scripts = [...html.matchAll(/<script(?![^>]*type=)[^>]*>([\s\S]*?)<\/script>/g)];
+  assert.equal(scripts.length, 1, 'content.html has exactly one executable inline script');
+  const hash = `'sha256-${createHash('sha256').update(scripts[0][1], 'utf8').digest('base64')}'`;
+
+  const store = new MemoryR2();
+  const capsule = await publishCapsule(store);
+  const page = await worker.fetch(new Request(capsule.viewUrl), { CAPSULES: store }, ctx);
+  const csp = page.headers.get('Content-Security-Policy');
+  const scriptSrc = csp.match(/script-src ([^;]*)/)[1];
+  assert.ok(scriptSrc.split(' ').includes(hash), `CSP allows the emitted lightbox hash ${hash}`);
+  assert.ok(!/unsafe-inline/.test(scriptSrc), 'no unsafe-inline for scripts');
+  assert.match(csp, /form-action 'none'/);
+}
+
+{
+  // An upload body is counted as it streams and cut off at the capsule's remaining budget,
+  // rather than buffered whole before the size check.
+  const store = new MemoryR2();
+  let pulled = 0;
+  const open = await (
+    await worker.fetch(
+      new Request('https://share.example/api/capsules', {
+        method: 'POST',
+        body: JSON.stringify({ expiryDays: 7 }),
+      }),
+      { CAPSULES: store },
+      ctx
+    )
+  ).json();
+  const stream = new ReadableStream({
+    pull(controller) {
+      pulled += 1;
+      controller.enqueue(new Uint8Array(1024 * 1024));
+      if (pulled > 200) controller.close();
+    },
+  });
+  const over = await worker.fetch(
+    new Request(`${open.uploadUrl}/media/big.jpg`, {
+      method: 'PUT',
+      headers: { Authorization: `Bearer ${open.uploadToken}` },
+      body: stream,
+      duplex: 'half',
+    }),
+    { CAPSULES: store },
+    ctx
+  );
+  assert.equal(over.status, 413);
+  assert.ok(pulled <= 40, `read stopped early (pulled ${pulled} MB of 200)`);
+  assert.equal(store.objects.has(`capsules/${open.id}/media/big.jpg`), false);
+}
+
+{
+  // Upload limiter: keyed on the capsule id, consulted only after the token is accepted.
+  const store = new MemoryR2();
+  const keys = [];
+  const limited = { limit: async ({ key }) => (keys.push(key), { success: false }) };
+  const open = await (
+    await worker.fetch(
+      new Request('https://share.example/api/capsules', {
+        method: 'POST',
+        body: JSON.stringify({ expiryDays: 7 }),
+      }),
+      { CAPSULES: store },
+      ctx
+    )
+  ).json();
+  const put = (token) =>
+    worker.fetch(
+      new Request(`${open.uploadUrl}/media/a.jpg`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${token}` },
+        body: new Uint8Array([1]),
+        duplex: 'half',
+      }),
+      { CAPSULES: store, UPLOAD_LIMITER: limited },
+      ctx
+    );
+  assert.equal((await put('wrong')).status, 403);
+  assert.equal(keys.length, 0, 'a bad token never spends the capsule budget');
+  assert.equal((await put(open.uploadToken)).status, 429);
+  assert.deepEqual(keys, [open.id]);
+
+  // IPv6 clients share one create-limiter key per /64.
+  const seen = [];
+  const spy = { limit: async ({ key }) => (seen.push(key), { success: true }) };
+  for (const ip of ['2001:db8:1:2:aaaa::1', '2001:DB8:1:2:bbbb:0:0:9', '203.0.113.7']) {
+    await worker.fetch(
+      new Request('https://share.example/api/capsules', {
+        method: 'POST',
+        headers: { 'CF-Connecting-IP': ip },
+        body: JSON.stringify({ expiryDays: 1 }),
+      }),
+      { CAPSULES: store, CREATE_LIMITER: spy },
+      ctx
+    );
+  }
+  assert.equal(seen[0], seen[1], 'same /64 shares a key');
+  assert.equal(seen[2], '203.0.113.7');
+}
+
+{
+  // A JSON body that is not an object is a 400, not a Worker exception.
+  for (const raw of ['null', '[]', '7', '"x"', 'true']) {
+    const res = await worker.fetch(
+      new Request('https://share.example/api/capsules', { method: 'POST', body: raw }),
+      { CAPSULES: new MemoryR2() },
+      ctx
+    );
+    assert.equal(res.status, 400, raw);
+    assert.match(res.headers.get('Content-Type'), /json/);
   }
 }
 
