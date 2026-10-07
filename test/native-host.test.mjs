@@ -418,7 +418,7 @@ async function cliChecks() {
 // Branded Google Chrome 137+ ignores --load-extension, so a launcher that hands it that flag
 // produces a shortcut that looks healthy while the extension never loads (#44). The stand-in
 // browsers are empty executables carrying only the version resource the launcher reads.
-function launcherChecks() {
+async function launcherChecks() {
   if (process.platform !== 'win32') {
     console.log('skip launcher browser selection (Windows only)');
     return;
@@ -494,8 +494,62 @@ function launcherChecks() {
     assert.doesNotMatch(slashed.args, /\\"/, 'no backslash before a quote');
     assert.match(slashed.args, /--load-extension="[^"]+" --disable-features=/);
     console.log('ok  launcher trims a trailing backslash from -ExtensionDir');
+
+    // Edge's startup boost ran the extension windowless from sign-in and owned the capture
+    // pipe, while -Status inspected only Brave and said capture would fail.
+    // A copy of the signed node.exe stands in for Edge: Smart App Control blocks an unsigned
+    // compiled stand-in from running at all. It spawns a child whose command line looks like a
+    // host, writes the child's pid, and keeps it alive.
+    const foreignExe = path.join(tmp, 'foreign', 'msedge.exe');
+    fs.mkdirSync(path.dirname(foreignExe));
+    fs.copyFileSync(process.execPath, foreignExe);
+    const pidFile = path.join(tmp, 'foreign.pid');
+    const foreign = spawn(
+      foreignExe,
+      [
+        '-e',
+        'const [, pidFile, node] = process.argv;' +
+          'const c = require("child_process").spawn(node, ["-e", "setTimeout(() => {}, 60000)", "sourcecapsule-host-standin"], { stdio: "ignore" });' +
+          'require("fs").writeFileSync(pidFile, String(c.pid)); setTimeout(() => {}, 60000);',
+        pidFile,
+        process.execPath,
+      ],
+      { stdio: 'ignore' }
+    );
+    const waitUntil = Date.now() + 10000;
+    while (!fs.existsSync(pidFile) && Date.now() < waitUntil)
+      spawnSync(process.execPath, ['-e', 'setTimeout(() => {}, 200)']);
+    const hostPid = Number(fs.readFileSync(pidFile, 'utf8'));
+    assert.ok(hostPid > 0, 'stand-in host started');
+    try {
+      const status = spawnSync(
+        'powershell',
+        [
+          '-NoProfile',
+          '-ExecutionPolicy',
+          'Bypass',
+          '-File',
+          path.join(root, 'scripts', 'start-sourcecapsule-browser.ps1'),
+          '-Status',
+          '-BrowserPath',
+          fakeBrowser(path.join('managed', 'chromium.exe'), 'Chromium'),
+          '-ExtensionDir',
+          extensionDir,
+        ],
+        { encoding: 'utf8' }
+      );
+      assert.match(status.stdout, new RegExp(`host pid ${hostPid} belongs to .*msedge\\.exe`));
+      assert.equal(status.status, 3, status.stdout + status.stderr);
+      console.log('ok  launcher -Status reports a host owned by another browser');
+    } finally {
+      process.kill(hostPid);
+      // The temp directory cannot be removed while its msedge.exe is still running.
+      const exited = new Promise((resolve) => foreign.once('exit', resolve));
+      foreign.kill();
+      await exited;
+    }
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }
 }
 
@@ -550,7 +604,7 @@ async function proxyTimeoutChecks() {
 
 canonicalUrlChecks();
 resultContractChecks();
-launcherChecks();
+await launcherChecks();
 await transportChecks();
 await pipeTakeoverChecks();
 await cliChecks();

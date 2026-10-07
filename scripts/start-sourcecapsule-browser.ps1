@@ -102,11 +102,10 @@ function Get-BrowserMainProcesses([string]$exePath) {
     return @($all | Where-Object { $_.CommandLine -and $_.CommandLine -notmatch '--type=' -and (Test-IsDefaultProfileProcess $_) })
 }
 
-# A native host is an orphan only when no browser is left in its ancestry (browser -> cmd.exe
-# -> node.exe). A host whose browser is still alive, including a different browser such as
-# Chrome or Edge running the extension, is not ours to stop. A parent pid can be reused, so
+# Every running native host, paired with the browser that spawned it (browser -> cmd.exe ->
+# node.exe), or $null when no browser is left in its ancestry. A parent pid can be reused, so
 # an ancestor must also be older than the process it is supposed to have spawned.
-function Get-OrphanedNativeHosts {
+function Get-NativeHostOwners {
     $browserNames = @('brave.exe', 'chrome.exe', 'msedge.exe')
     $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
     $byId = @{}
@@ -116,16 +115,34 @@ function Get-OrphanedNativeHosts {
         ($_.Name -eq 'node.exe' -and $_.CommandLine -and $_.CommandLine.Contains('sourcecapsule-host'))
     })
     foreach ($h in $hosts) {
-        $alive = $false
+        $owner = $null
         $child = $h
         for ($depth = 0; $depth -lt 6; $depth++) {
             $parent = $byId[[int]$child.ParentProcessId]
             if (-not $parent) { break }
             if ($parent.CreationDate -and $child.CreationDate -and $parent.CreationDate -gt $child.CreationDate) { break }
-            if ($browserNames -contains $parent.Name) { $alive = $true; break }
+            if ($browserNames -contains $parent.Name) { $owner = $parent; break }
             $child = $parent
         }
-        if (-not $alive) { $h }
+        [pscustomobject]@{ Host = $h; Browser = $owner }
+    }
+}
+
+# A host whose browser is still alive, including a different browser such as Chrome or Edge
+# running the extension, is not ours to stop.
+function Get-OrphanedNativeHosts {
+    Get-NativeHostOwners | Where-Object { -not $_.Browser } | ForEach-Object { $_.Host }
+}
+
+# Hosts spawned by any browser other than the one this script manages. Only one host owns
+# the capture pipe, the first to start, so while one of these runs a capture may go to that
+# browser and its flags instead. Edge's startup boost starts it windowless at sign-in, ahead
+# of the Startup shortcut, so it wins the pipe every time it has the extension loaded.
+function Get-ForeignNativeHosts([string]$exePath) {
+    $managed = [System.IO.Path]::GetFullPath($exePath)
+    Get-NativeHostOwners | Where-Object {
+        $_.Browser -and -not ($_.Browser.ExecutablePath -and
+            [string]::Equals([System.IO.Path]::GetFullPath($_.Browser.ExecutablePath), $managed, [System.StringComparison]::OrdinalIgnoreCase))
     }
 }
 
@@ -232,6 +249,20 @@ if ($Status) {
         $state = 'missing'
         if (Test-Path $entry.Value) { $state = 'installed' }
         Write-Host ("  shortcut {0,-9} {1}" -f $entry.Key, $state)
+    }
+    $foreign = @(Get-ForeignNativeHosts $browser)
+    if ($foreign.Count -gt 0) {
+        $collapsing = $false
+        foreach ($f in $foreign) {
+            $occlusion = 'without'
+            if (Test-HasOcclusionFlag $f.Browser) { $occlusion = 'with' } else { $collapsing = $true }
+            Write-Host ("  host pid {0} belongs to {1} pid {2} ({3} {4})" -f $f.Host.ProcessId, $f.Browser.ExecutablePath, $f.Browser.ProcessId, $occlusion, $occlusionFlag)
+        }
+        Write-Warning ('SourceCapsule is also loaded in another browser. Only one host owns the capture pipe, so captures may run there instead of in ' + (Split-Path -Leaf $browser) + '. Remove the extension from that browser, or turn off its background start (Edge: Settings > System > Startup boost).')
+        if ($collapsing) {
+            Write-Warning ('That browser is running without ' + $occlusionFlag + ', so a thread captured there comes back as its root post alone.')
+            exit 3
+        }
     }
     if ($withFlag.Count -gt 0) {
         if ($occluded.Count -gt 0) {

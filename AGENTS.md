@@ -202,7 +202,9 @@ the finished AI readable link as JSON, with no clicks, prompts, or clipboard use
   came back holding the root post alone. Measured on one thread: without the flag the
   conversation wait settles on 1 top-level post after 6.9s; with it, 13 posts in 1.7s and a
   capsule holding all 8. `start-sourcecapsule-browser.ps1` passes it and writes it into the
-  shortcut, and `-Status` exits 3 when the running browser lacks it.
+  shortcut, and `-Status` exits 3 when the running browser lacks it. It also exits 3 when a
+  host belongs to another browser that lacks it: only the first host to start owns the pipe, and
+  Edge's startup boost starts Edge windowless at sign-in, ahead of the Startup shortcut (#77).
 - **An unattended capture reports its thread scope.** The result carries `capturedPosts` and
   the `conversation` counters `waitForConversation` recorded, and warns when thread scope was
   requested and one post came back. A capsule that silently drops seven posts is the failure
