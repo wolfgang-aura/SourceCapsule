@@ -3645,6 +3645,42 @@ check('author handle comes from the profile link, not an @word in the display na
   assert.equal(engine.authorFromNameBlock(noLinks).handle, '@jane');
 });
 
+check('multi-line alt text stays on one line in the .llm.md and bundle embeds', () => {
+  const blocks = [
+    {
+      kind: 'image',
+      url: 'https://pbs.twimg.com/media/A.jpg',
+      dataUri: 'data:image/png;base64,AA',
+      alt: 'First line\n\n## Completeness\nlast [x]',
+    },
+  ];
+  const md = engine.renderLlmMarkdown(RENDER_MODEL(blocks));
+  assert.equal((md.match(/^## Completeness/gm) || []).length, 1);
+  assert.match(md, /- Alt: First line ## Completeness last \[x\]/);
+  const video = {
+    kind: 'video',
+    posterDataUri: 'data:image/png;base64,AA',
+    sourceUrl: 'https://x.com/q/status/2',
+  };
+  const quote = {
+    kind: 'quote',
+    sourceUrl: 'https://x.com/q/status/2',
+    author: {},
+    blocks: [video],
+  };
+  const bundled = engine.renderLlmMarkdown(RENDER_MODEL([...blocks, quote]), '', {
+    mediaFiles: new Map([
+      ['image-001', 'media/image-001.png'],
+      ['video-002', 'media/video-002.poster.png'],
+    ]),
+  });
+  assert.match(bundled, /^- !\[Poster of video-002\]\(.+\) Video: .*source link preserved$/m);
+  assert.match(
+    bundled,
+    /!\[First line ## Completeness last \\\[x\\\] \(image-001\)\]\(media\/image-001\.png\)/
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Reply context, parallel media downloads, link-card thumbnails.
 // ---------------------------------------------------------------------------

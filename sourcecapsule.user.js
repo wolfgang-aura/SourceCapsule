@@ -4336,7 +4336,15 @@
     ].join('')}</dl></details>`;
   }
 
+  /** Single-line Markdown text (alt, titles, metadata rows): newlines fold to spaces. */
   function markdownLineText(value) {
+    return markdownEscapedText(value)
+      .replace(/ ?\n[ \n]*/g, ' ')
+      .trim();
+  }
+
+  /** Multi-line Markdown text: keeps line breaks, collapses spaces, escapes angle brackets. */
+  function markdownEscapedText(value) {
     return String(value == null ? '' : value)
       .replace(/\r\n?/g, '\n')
       .replace(/\u00a0/g, ' ')
@@ -4348,7 +4356,7 @@
 
   function markdownPlainText(value) {
     return (
-      markdownLineText(value)
+      markdownEscapedText(value)
         .replace(/ ?\n ?/g, '\n')
         .replace(/\n{3,}/g, '\n\n')
         // Post text must not open its own Markdown structure now that line breaks survive:
@@ -4360,7 +4368,7 @@
   }
 
   function markdownHeading(level, text) {
-    const clean = markdownLineText(text).replace(/\n+/g, ' ');
+    const clean = markdownLineText(text);
     if (!clean) return '';
     const depth = Math.min(Math.max(Number(level) || 2, 1), 6);
     return `${'#'.repeat(depth)} ${clean}`;
@@ -4715,7 +4723,7 @@
       const alt = markdownLineText(block._xaExportAlt || block.alt || 'Image');
       if (!block.dataUri) return `[Missing image: ${id}${alt ? ` - ${alt}` : ''}]`;
       // Bundle: emit a real relative embed so markdown-aware readers render the actual file.
-      if (bundlePath) return `![${alt} (${id})](${bundlePath})`;
+      if (bundlePath) return `![${alt.replace(/[[\]]/g, '\\$&')} (${id})](${bundlePath})`;
       return `[Image: ${id}${alt ? ` - ${alt}` : ''}]`;
     }
     const pieces = [];
@@ -4920,7 +4928,15 @@
     if (media.length) {
       lines.push('', 'Media:');
       media.forEach((item) => {
-        lines.push(`- ${llmMediaDescription(item, item.kind).replace(/^\[|\]$/g, '')}`);
+        // Strip the brackets of the `[Video: ...]` tag only (the last line), not of a leading
+        // `![Poster of ...](path)` embed, and keep the bullet on one line.
+        const description = llmMediaDescription(item, item.kind)
+          .split('\n')
+          .map((line, i, all) =>
+            i === all.length - 1 ? line.replace(/^\[([\s\S]*)\]$/, '$1') : line
+          )
+          .join(' ');
+        lines.push(`- ${description}`);
       });
     }
 
@@ -4937,7 +4953,8 @@
       if (value !== undefined && value !== null && value !== '') lines.push(`- ${label}: ${value}`);
     };
     row('Attached to', attachments.get(item.id) || 'unknown');
-    if (item.type === 'image') row('Alt', item.alt || item.exportAlt || item.originalAlt);
+    if (item.type === 'image')
+      row('Alt', markdownLineText(item.alt || item.exportAlt || item.originalAlt));
     row('Width', item.width);
     row('Height', item.height);
     if (item.type === 'video') {
