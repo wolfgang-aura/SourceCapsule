@@ -2642,8 +2642,19 @@
    * cards. Collapse only near quote repeats; the same tweet can be intentionally
    * embedded twice in different article sections, and those positions must be kept.
    * Then drop any top-level image that is already shown inside a quote card.
+   * Both steps run per thread post (a `thread-marker` starts a new segment), so one post
+   * quoting what an earlier post quoted, or quoting that post itself, loses nothing.
    */
   function dedupeQuoteCards(blocks) {
+    const segments = [];
+    for (const b of blocks) {
+      if (b.kind === 'thread-marker' || !segments.length) segments.push([]);
+      segments[segments.length - 1].push(b);
+    }
+    return segments.flatMap(dedupeQuoteCardsInSegment);
+  }
+
+  function dedupeQuoteCardsInSegment(blocks) {
     const nearDuplicateWindow = 3;
     const out = [];
     for (const b of blocks) {
@@ -2669,6 +2680,8 @@
       }
       out.push(b);
     }
+    // Only this post's own quote cards count: an article is one segment, where harvested
+    // quote media can sit far from its card, so the filter must see the whole segment.
     const quoteImgUrls = new Set();
     for (const b of out) if (b.kind === 'quote') collectQuoteImageUrls(b.blocks, quoteImgUrls);
     return out.filter((b) => !(b.kind === 'image' && quoteImgUrls.has(b.url)));

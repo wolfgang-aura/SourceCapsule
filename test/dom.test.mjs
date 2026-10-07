@@ -3681,6 +3681,34 @@ check('multi-line alt text stays on one line in the .llm.md and bundle embeds', 
   );
 });
 
+check('quote dedupe stays inside one thread post', () => {
+  const mk = (url) => ({
+    kind: 'quote',
+    sourceUrl: url,
+    author: {},
+    blocks: [{ kind: 'paragraph', html: 'q' }],
+  });
+  const marker = (index) => ({ kind: 'thread-marker', index, total: 2 });
+  const same = engine.dedupeQuoteCards([
+    marker(1),
+    { kind: 'paragraph', html: '1' },
+    mk('https://x.com/a/status/9'),
+    marker(2),
+    { kind: 'paragraph', html: '2' },
+    mk('https://x.com/a/status/9'),
+  ]);
+  assert.equal(same.filter((b) => b.kind === 'quote').length, 2);
+  const img = { kind: 'image', url: 'https://pbs.twimg.com/media/Mine.jpg' };
+  const later = engine.dedupeQuoteCards([
+    marker(1),
+    img,
+    marker(2),
+    { ...mk('https://x.com/a/status/10'), blocks: [{ ...img }] },
+  ]);
+  assert.equal(later.filter((b) => b.kind === 'image').length, 1);
+  assert.equal(later[1], img);
+});
+
 // ---------------------------------------------------------------------------
 // Reply context, parallel media downloads, link-card thumbnails.
 // ---------------------------------------------------------------------------
