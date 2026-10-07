@@ -5656,6 +5656,11 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     });
     created.mediaFilesUploaded = files.length;
     created.mediaBytesUploaded = mediaBytes;
+    // The copy a recipient actually sees. Raw video is never uploaded, so a video whose
+    // poster failed is missing there even though the local model has its bytes. Callers
+    // that report completeness must assess this, not the local model. Non-enumerable so it
+    // is never serialized with the link record.
+    Object.defineProperty(created, 'sharedModel', { value: sharedModel, enumerable: false });
     return created;
   }
 
@@ -5777,8 +5782,18 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       }
       const { created, model } = result;
       const stats = archiveStats(model);
-      const assessment = assessExportCompleteness(model);
+      // `complete` must describe the capsule that was uploaded, which the shared .md
+      // reports on too, not the richer local model.
+      const assessment = assessExportCompleteness(created.sharedModel || model);
       const warnings = [];
+      if (assessment.verdict !== 'clean' && created.sharedModel) {
+        const localVerdict = assessExportCompleteness(model).verdict;
+        if (localVerdict === 'clean') {
+          warnings.push(
+            'the shared copy is missing media the local capture holds (see shared .md)'
+          );
+        }
+      }
       if (stats.missingMedia) warnings.push(`${stats.missingMedia} media item(s) missing`);
       if (stats.incompleteMedia)
         warnings.push(`${stats.incompleteMedia} media item(s) incomplete (poster or link only)`);

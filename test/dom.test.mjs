@@ -5185,6 +5185,54 @@ await checkAsync(
   }
 );
 
+await checkAsync(
+  'a video whose poster failed is incomplete in the shared copy the gate reports on',
+  async () => {
+    const model = {
+      type: 'post',
+      title: 'Video no poster',
+      heading: 'Video no poster',
+      sourceUrl: STATUS_URL,
+      author: { name: 'Vega Hao', handle: '@Vegahao' },
+      blocks: [
+        {
+          kind: 'video',
+          url: 'https://video.twimg.com/v.mp4',
+          mode: 'video-inline',
+          dataUri: 'data:video/mp4;base64,AAAA',
+          videoFileCaptured: true,
+          posterDataUri: '',
+        },
+      ],
+    };
+    global.GM_xmlhttpRequest = (options) => {
+      const body =
+        options.method === 'POST' && options.url.endsWith('/api/capsules')
+          ? JSON.stringify({
+              uploadUrl: 'https://share.test/api/capsules/abc/files',
+              uploadToken: 't',
+              finalizeUrl: 'https://share.test/api/capsules/abc/finalize',
+              viewUrl: 'https://share.test/c/abc',
+            })
+          : '';
+      options.onload({ status: 200, responseText: body });
+    };
+    let created;
+    try {
+      created = await engine.createShareLink(model, '', 7);
+    } finally {
+      delete global.GM_xmlhttpRequest;
+    }
+    assert.equal(engine.assessExportCompleteness(model).verdict, 'clean', 'local copy is clean');
+    assert.equal(
+      engine.assessExportCompleteness(created.sharedModel).verdict,
+      'incomplete',
+      'the uploaded copy has no video and no poster'
+    );
+    assert.ok(!JSON.stringify(created).includes('sharedModel'), 'never serialized with the link');
+  }
+);
+
 await checkAsync('share uploads never carry the page debug diagnostics', async () => {
   const model = {
     type: 'post',
