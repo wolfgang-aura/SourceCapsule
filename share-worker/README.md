@@ -8,7 +8,7 @@ Full video files are deliberately excluded.
 
 The production deployment lives at `https://sourcecapsule-share.wolfgang-aura.workers.dev`
 (the userscript's default endpoint). Link creation is rate-limited per IP via a Workers
-rate-limiting binding (`CREATE_LIMITER` in `wrangler.toml`).
+rate-limiting binding (`CREATE_LIMITER` in `wrangler.toml`, IPv6 keyed on the /64). File uploads are limited per capsule by `UPLOAD_LIMITER`.
 
 ## Local development
 
