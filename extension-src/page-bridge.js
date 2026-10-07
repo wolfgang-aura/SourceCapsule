@@ -198,5 +198,28 @@
     };
   }
 
+  // The userscript runs in the isolated world under the extension, where X's own
+  // history.pushState/replaceState calls never reach its patch. Tell it about in-app
+  // navigation from here (MAIN world) so per-page capture state is reset.
+  const history = window.history;
+  if (history) {
+    for (const method of ['pushState', 'replaceState']) {
+      const original = history[method];
+      if (typeof original !== 'function') continue;
+      history[method] = function (...args) {
+        const result = original.apply(this, args);
+        try {
+          window.postMessage(
+            { source: 'SourceCapsule:navigation', contractVersion: 1, type: 'navigate' },
+            window.location.origin
+          );
+        } catch {
+          // Observation must never interfere with X's router.
+        }
+        return result;
+      };
+    }
+  }
+
   announce();
 })();

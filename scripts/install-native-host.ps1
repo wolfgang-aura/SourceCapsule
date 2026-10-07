@@ -67,6 +67,20 @@ if ($null -eq $node) {
     throw 'node was not found on PATH. Install Node 18+ and re-run.'
 }
 $nodeExe = $node.Source
+# The .cmd below is written as ASCII, which turns every non-ASCII character into '?' and
+# yields a host that cannot start (for example Node under C:\Users\José\). Use the 8.3 short
+# path when there is one, and refuse rather than write a broken file when there is not.
+if ($nodeExe -match '[^\x00-\x7F]') {
+    $short = $null
+    try { $short = (New-Object -ComObject Scripting.FileSystemObject).GetFile($nodeExe).ShortPath } catch { }
+    if ($short -and $short -notmatch '[^\x00-\x7F]') {
+        Write-Host "Node path is not ASCII; using its short path: $short"
+        $nodeExe = $short
+    }
+    else {
+        throw "The node.exe path contains non-ASCII characters and has no 8.3 short name: $nodeExe. Install Node to an ASCII-only path (for example C:\Program Files\nodejs) and re-run."
+    }
+}
 Write-Host "Node: $nodeExe"
 
 # The registered host is a two-line .cmd that runs the signed node.exe. Smart App Control
