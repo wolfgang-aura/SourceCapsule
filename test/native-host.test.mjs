@@ -249,6 +249,11 @@ async function transportChecks() {
 // Two hosts, one pipe (#70): the second must keep retrying and take over when the first
 // goes away, instead of sitting idle until its browser restarts.
 async function pipeTakeoverChecks() {
+  if (process.platform !== 'win32') {
+    // Off Windows the "pipe" is a socket file that outlives its owner, so B can never listen.
+    console.log('skip pipe takeover (Windows named pipes only)');
+    return;
+  }
   const takeoverPipe = String.raw`\\.\pipe\sourcecapsule-takeover-` + process.pid;
   const env = {
     ...process.env,
