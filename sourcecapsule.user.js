@@ -456,9 +456,24 @@
     }
   }
 
+  /** Single-line text: every whitespace run, including newlines, becomes one space. */
   function textFromHtml(html) {
+    return htmlToText(html).replace(/\s+/g, ' ').trim();
+  }
+
+  /** Text that keeps <br>, block-tag and literal newlines; collapses only spaces/tabs. */
+  function textBlockFromHtml(html) {
+    return htmlToText(html, true)
+      .replace(/[ \t\f\v\u00a0]+/g, ' ')
+      .replace(/ ?\n ?/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  function htmlToText(html, keepBreaks = false) {
     return String(html || '')
       .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/?(?:p|div|li|h[1-6])\b[^>]*>/gi, keepBreaks ? '\n' : ' ')
       .replace(/<[^>]+>/g, ' ')
       .replace(/&nbsp;/g, ' ')
       .replace(/&amp;/g, '&')
@@ -467,9 +482,7 @@
       .replace(/&quot;/g, '"')
       .replace(/&#39;/g, "'")
       .replace(/&#(\d+);/g, (match, code) => decodeHtmlCodePoint(match, code))
-      .replace(/&#x([0-9a-f]+);/gi, (match, code) => decodeHtmlCodePoint(match, code, 16))
-      .replace(/\s+/g, ' ')
-      .trim();
+      .replace(/&#x([0-9a-f]+);/gi, (match, code) => decodeHtmlCodePoint(match, code, 16));
   }
 
   function blockTextForLanguage(block) {
@@ -4310,7 +4323,16 @@
   }
 
   function markdownPlainText(value) {
-    return markdownLineText(value).replace(/\n{3,}/g, '\n\n');
+    return (
+      markdownLineText(value)
+        .replace(/ ?\n ?/g, '\n')
+        .replace(/\n{3,}/g, '\n\n')
+        // Post text must not open its own Markdown structure now that line breaks survive:
+        // an ATX heading, a setext underline, or a code fence at a line start.
+        .replace(/^(#{1,6})(?=\s|$)/gm, '\\$1')
+        .replace(/^(-{3,}|={3,})[ \t]*$/gm, '\\$1')
+        .replace(/^(```|~~~)/gm, '\\$1')
+    );
   }
 
   function markdownHeading(level, text) {
@@ -4718,12 +4740,13 @@
         if (articleDividerText(text)) lines.push('---');
         else {
           const heading = articleHeadingBlock(text);
+          const blockText = textBlockFromHtml(b.html);
           lines.push(
             heading
               ? markdownHeading(heading.level, heading.text)
               : linkOriginalPostLabels
-                ? replaceOriginalPostLabels(text, b.html, originalPostResolver)
-                : markdownPlainText(text)
+                ? replaceOriginalPostLabels(blockText, b.html, originalPostResolver)
+                : markdownPlainText(blockText)
           );
         }
       } else if (b.kind === 'divider') {

@@ -3538,25 +3538,6 @@ check('quote-tombstone renders honestly in HTML, Markdown, stats, and stays comp
 // ---------------------------------------------------------------------------
 // Model and render correctness (#56 #57 #58 #59 #62 #65).
 // ---------------------------------------------------------------------------
-function withPage(html, url, fn) {
-  const pageDom = new JSDOM(html, { url });
-  const prior = global.window;
-  global.window = pageDom.window;
-  global.document = pageDom.window.document;
-  global.Node = pageDom.window.Node;
-  global.location = pageDom.window.location;
-  global.localStorage = pageDom.window.localStorage;
-  try {
-    return fn();
-  } finally {
-    global.window = prior;
-    global.document = prior.document;
-    global.Node = prior.Node;
-    global.location = prior.location;
-    global.localStorage = prior.localStorage;
-  }
-}
-
 const RENDER_MODEL = (blocks) => ({
   type: 'post',
   title: 'Render post',
@@ -3585,6 +3566,19 @@ check('completeness verdict counts a truncated main post and not a caption-less 
   assert.match(md, /Status: COMPLETE/);
   assert.doesNotMatch(engine.assembleHtml(mediaOnly), /Incomplete capture/);
   assert.match(engine.renderLlmMarkdown(RENDER_MODEL([])), /Not captured: the main text/);
+});
+
+check('.llm.md keeps line breaks inside a post and cannot open its own sections', () => {
+  const md = engine.renderLlmMarkdown(
+    RENDER_MODEL([
+      {
+        kind: 'paragraph',
+        html: 'Three rules:\n1. Ship\n2. Measure<br>3. Repeat\n## Completeness\n',
+      },
+    ])
+  );
+  assert.match(md, /Three rules:\n1\. Ship\n2\. Measure\n3\. Repeat\n\\## Completeness/);
+  assert.equal((md.match(/^## Completeness/gm) || []).length, 1);
 });
 
 // ---------------------------------------------------------------------------
