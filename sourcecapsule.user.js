@@ -10194,9 +10194,28 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         try {
           const payload = await fetchFn(id);
           const text = decodeBasicEntities((payload && (payload.text || payload.full_text)) || '')
-            .replace(/\s+/g, ' ')
+            .replace(/\r\n?/g, '\n')
+            .replace(/[^\S\n]+/g, ' ')
+            .replace(/ ?\n ?/g, '\n')
+            .replace(/\n{3,}/g, '\n\n')
             .trim();
-          if (!text && !(payload && payload.mediaDetails)) return;
+          // A 200 whose payload is a tombstone is as authoritative as a 404: the post is
+          // gone on X. Record it instead of leaving the reply "uncaptured" with no reason.
+          const typename = String((payload && payload.__typename) || '');
+          if (!text && /Tombstone|Unavailable/i.test(typename)) {
+            patches.push({
+              id,
+              unavailable: true,
+              unavailableReason: `syndication ${typename}`,
+              provenance: 'syndication',
+            });
+            unavailable += 1;
+            return;
+          }
+          if (!text && !(payload && payload.mediaDetails)) {
+            errors.push(`${id}: syndication returned no text or media`);
+            return;
+          }
           const user = (payload && payload.user) || {};
           const handle = String(user.screen_name || '');
           patches.push({
@@ -10207,7 +10226,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
               ? `https://x.com/${handle}/status/${id}`
               : `https://x.com/i/web/status/${id}`,
             text: text.slice(0, REPLY_ARCHIVE_TEXT_MAX),
-            truncated: false,
+            // Syndication returns only a preview for long-form posts.
+            truncated: !!payload.note_tweet,
             createdAt: safeIsoTime(payload.created_at || ''),
             parentId: String(payload.in_reply_to_status_id_str || ''),
             mediaLinks: replyMediaLinksFromLegacy({

@@ -4292,6 +4292,36 @@ await checkAsync('syndication recovers replies X confirmed but never rendered', 
   assert.equal(outcome.attempted, 2);
 });
 
+await checkAsync(
+  'syndication reply recovery flags note previews, keeps line breaks, and records tombstones',
+  async () => {
+    const records = [
+      { id: '2000000000000000011', text: '', discoveredSurfaces: ['top'] },
+      { id: '2000000000000000012', text: '', discoveredSurfaces: ['top'] },
+    ];
+    const outcome = await engine.enrichReplyArchiveViaSyndication(records, async (id) =>
+      id === '2000000000000000011'
+        ? {
+            id_str: id,
+            text: 'First line\n\nSecond line',
+            note_tweet: { id: 'note' },
+            user: { screen_name: 'ghost' },
+          }
+        : {
+            __typename: 'TweetTombstone',
+            tombstone: { text: { text: 'This post is unavailable' } },
+          }
+    );
+    const byId = new Map(outcome.records.map((record) => [record.id, record]));
+    assert.equal(byId.get('2000000000000000011').truncated, true);
+    assert.equal(byId.get('2000000000000000011').text, 'First line\n\nSecond line');
+    assert.equal(byId.get('2000000000000000012').unavailable, true);
+    assert.match(byId.get('2000000000000000012').unavailableReason, /Tombstone/);
+    assert.equal(outcome.unavailable, 1);
+    assert.equal(outcome.recovered, 1);
+  }
+);
+
 // Regression: found on live X, invisible to every fixture test above.
 //
 // The `sourcecapsule` IndexedDB is SHARED — the library root folder handle already
