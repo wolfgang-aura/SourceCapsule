@@ -87,12 +87,46 @@ function Test-IgnoresLoadExtension([string]$exePath) {
 }
 
 # Only the browser's main process carries the user's command line. Every renderer, GPU,
-# and utility child is spawned with --type=... and must not be mistaken for it.
+# and utility child is spawned with --type=... and must not be mistaken for it. Only the
+# main process WITHOUT --user-data-dir is the owner's browser: a process with its own
+# profile directory (the chrome-devtools MCP Brave, a test profile) is someone else's, and
+# -Restart must never close it.
+function Test-IsDefaultProfileProcess($proc) {
+    return [bool]($proc.CommandLine -and $proc.CommandLine -notmatch '--user-data-dir')
+}
+
 function Get-BrowserMainProcesses([string]$exePath) {
     $exeName = Split-Path -Leaf $exePath
     $all = Get-CimInstance Win32_Process -Filter "Name='$exeName'" -ErrorAction SilentlyContinue
     if (-not $all) { return @() }
-    return @($all | Where-Object { $_.CommandLine -and $_.CommandLine -notmatch '--type=' })
+    return @($all | Where-Object { $_.CommandLine -and $_.CommandLine -notmatch '--type=' -and (Test-IsDefaultProfileProcess $_) })
+}
+
+# A native host is an orphan only when no browser is left in its ancestry (browser -> cmd.exe
+# -> node.exe). A host whose browser is still alive, including a different browser such as
+# Chrome or Edge running the extension, is not ours to stop. A parent pid can be reused, so
+# an ancestor must also be older than the process it is supposed to have spawned.
+function Get-OrphanedNativeHosts {
+    $browserNames = @('brave.exe', 'chrome.exe', 'msedge.exe')
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $byId = @{}
+    foreach ($p in $all) { $byId[[int]$p.ProcessId] = $p }
+    $hosts = @($all | Where-Object {
+        ($_.Name -eq 'sourcecapsule-host.exe') -or
+        ($_.Name -eq 'node.exe' -and $_.CommandLine -and $_.CommandLine.Contains('sourcecapsule-host'))
+    })
+    foreach ($h in $hosts) {
+        $alive = $false
+        $child = $h
+        for ($depth = 0; $depth -lt 6; $depth++) {
+            $parent = $byId[[int]$child.ParentProcessId]
+            if (-not $parent) { break }
+            if ($parent.CreationDate -and $child.CreationDate -and $parent.CreationDate -gt $child.CreationDate) { break }
+            if ($browserNames -contains $parent.Name) { $alive = $true; break }
+            $child = $parent
+        }
+        if (-not $alive) { $h }
+    }
 }
 
 # Windows occlusion tracking treats a fully covered window like a hidden tab: rendering
@@ -112,7 +146,9 @@ function Test-HasExtensionFlag($proc, [string]$extensionDir) {
     if ($proc.CommandLine -notmatch '--load-extension') { return $false }
     # Compare resolved paths, not raw strings: quoting and trailing slashes vary.
     $normalized = $extensionDir.TrimEnd('\', '/')
-    return $proc.CommandLine.Replace('/', '\') -like "*$normalized*"
+    # -like reads [ ] ? * in a path as wildcards, so a repo under "...\[work]" never matched itself.
+    $pattern = '*' + [System.Management.Automation.WildcardPattern]::Escape($normalized) + '*'
+    return $proc.CommandLine.Replace('/', '\') -like $pattern
 }
 
 # What "started correctly" means depends on the browser. Where --load-extension works, it
@@ -148,7 +184,9 @@ function New-BrowserShortcut([string]$path, [string]$exePath) {
 
 $browser = Resolve-BrowserPath
 $extensionFull = $ExtensionDir
-if (Test-Path $extensionFull) { $extensionFull = (Resolve-Path $extensionFull).Path }
+# Resolve-Path keeps a trailing backslash, and a backslash before the closing quote below is
+# read by Windows as an escaped quote, which merges every following flag into the path.
+if (Test-Path $extensionFull) { $extensionFull = (Resolve-Path $extensionFull).Path.TrimEnd('\', '/') }
 $loadUnpacked = Test-IgnoresLoadExtension $browser
 $launchArgs = "$occlusionFlag --restore-last-session"
 if (-not $loadUnpacked) { $launchArgs = "--load-extension=`"$extensionFull`" $launchArgs" }
@@ -205,11 +243,11 @@ if ($Status) {
     }
     if ($withoutFlag.Count -gt 0) {
         if ($loadUnpacked) {
+            # Same meaning as the exit 3 above. Exit 2 is reserved for "no extension".
             Write-Warning ('Chrome is running without ' + $occlusionFlag + '. Captures will still publish, but a thread will come back as its root post alone. Repair with -Restart -Verify.')
+            exit 3
         }
-        else {
-            Write-Warning 'The browser is running WITHOUT the extension. Unattended capture will fail.'
-        }
+        Write-Warning 'The browser is running WITHOUT the extension. Unattended capture will fail.'
         exit 2
     }
     Write-Host 'The browser is not running.'
@@ -256,24 +294,23 @@ else {
                 }
             }
         }
-        # Child processes outlive the main window briefly and would swallow the flag.
+        # Child processes outlive the main window briefly and would swallow the flag. Wait
+        # only on this profile's processes: another profile's browser may stay open.
+        $exeName = Split-Path -Leaf $browser
         $deadline = (Get-Date).AddSeconds(20)
-        while ((Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($browser)) -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
+        while ((Get-Date) -lt $deadline) {
+            $left = @(Get-CimInstance Win32_Process -Filter "Name='$exeName'" -ErrorAction SilentlyContinue | Where-Object { Test-IsDefaultProfileProcess $_ })
+            if ($left.Count -eq 0) { break }
             Start-Sleep -Milliseconds 500
         }
         Start-Sleep -Seconds 2
-        # Every browser is now closed, so any surviving host is an orphan by definition.
-        # It still owns \\.\pipe\sourcecapsule-capture, and the new browser's host would
-        # lose the race for it, leaving the CLI talking to a host with no extension.
-        Get-Process -Name 'sourcecapsule-host' -ErrorAction SilentlyContinue | ForEach-Object {
-            Write-Host "Stopping orphaned native host (pid $($_.Id))"
-            $_ | Stop-Process -Force
+        # A host whose browser is gone still owns \\.\pipe\sourcecapsule-capture, and the new
+        # browser's host would lose the race for it. Hosts of browsers that are still running
+        # (another profile, Chrome, Edge) are left alone; a host that lost the race retries.
+        foreach ($orphan in @(Get-OrphanedNativeHosts)) {
+            Write-Host "Stopping orphaned native host (pid $($orphan.ProcessId))"
+            Stop-Process -Id $orphan.ProcessId -Force -ErrorAction SilentlyContinue
         }
-        Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -like '*sourcecapsule-host*' } | ForEach-Object {
-                Write-Host "Stopping orphaned host process (pid $($_.ProcessId))"
-                Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-            }
     }
     Write-Host "Starting $browser $launchArgs"
     Start-Process -FilePath $browser -ArgumentList $launchArgs
