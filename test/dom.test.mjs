@@ -3536,6 +3536,58 @@ check('quote-tombstone renders honestly in HTML, Markdown, stats, and stays comp
 });
 
 // ---------------------------------------------------------------------------
+// Model and render correctness (#56 #57 #58 #59 #62 #65).
+// ---------------------------------------------------------------------------
+function withPage(html, url, fn) {
+  const pageDom = new JSDOM(html, { url });
+  const prior = global.window;
+  global.window = pageDom.window;
+  global.document = pageDom.window.document;
+  global.Node = pageDom.window.Node;
+  global.location = pageDom.window.location;
+  global.localStorage = pageDom.window.localStorage;
+  try {
+    return fn();
+  } finally {
+    global.window = prior;
+    global.document = prior.document;
+    global.Node = prior.Node;
+    global.location = prior.location;
+    global.localStorage = prior.localStorage;
+  }
+}
+
+const RENDER_MODEL = (blocks) => ({
+  type: 'post',
+  title: 'Render post',
+  heading: '',
+  author: { name: 'Author', handle: '@author' },
+  sourceUrl: 'https://x.com/author/status/1',
+  exportedAt: new Date('2026-07-10T00:00:00Z').toISOString(),
+  blocks,
+});
+
+check('completeness verdict counts a truncated main post and not a caption-less media post', () => {
+  const truncated = RENDER_MODEL([
+    { kind: 'paragraph', html: 'The start of a long note.' },
+    { kind: 'truncation-notice', sourceUrl: 'https://x.com/author/status/1' },
+  ]);
+  assert.doesNotMatch(engine.renderLlmMarkdown(truncated), /Status: COMPLETE/);
+  assert.match(engine.renderLlmMarkdown(truncated), /Possibly truncated/);
+  const mediaOnly = RENDER_MODEL([
+    {
+      kind: 'image',
+      url: 'https://pbs.twimg.com/media/A.jpg',
+      dataUri: 'data:image/png;base64,AA',
+    },
+  ]);
+  const md = engine.renderLlmMarkdown(mediaOnly);
+  assert.match(md, /Status: COMPLETE/);
+  assert.doesNotMatch(engine.assembleHtml(mediaOnly), /Incomplete capture/);
+  assert.match(engine.renderLlmMarkdown(RENDER_MODEL([])), /Not captured: the main text/);
+});
+
+// ---------------------------------------------------------------------------
 // Reply context, parallel media downloads, link-card thumbnails.
 // ---------------------------------------------------------------------------
 

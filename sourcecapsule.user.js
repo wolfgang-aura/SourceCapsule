@@ -4611,7 +4611,9 @@
     const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
     const count = (type) => stats.missing.filter((record) => record.type === type).length;
     const missing = [];
-    if (!stats.mainTextCaptured) missing.push('the main text');
+    // A caption-less photo/video/poll/quote post has no text to miss.
+    const hasOtherContent = stats.images + stats.videos + stats.polls + stats.quoteCards > 0;
+    if (!stats.mainTextCaptured && !hasOtherContent) missing.push('the main text');
     const quotes = count('quoted-post');
     if (quotes) missing.push(plural(quotes, 'quoted post', 'quoted posts'));
     const images = count('image');
@@ -4623,8 +4625,15 @@
     const truncated = allLlmQuotes(model.blocks).filter(
       (quote) => quote.truncated || (!quote.noteRecovered && isPossiblyTruncatedPost(quote))
     ).length;
+    // Top-level notices mark the exported post itself (one per thread post): its full
+    // long-form text never reached the browser.
+    const truncatedMain = (model.blocks || []).filter((b) => b.kind === 'truncation-notice').length;
     const parts = [];
     if (missing.length) parts.push(`Not captured: ${missing.join(', ')}.`);
+    if (truncatedMain)
+      parts.push(
+        `Possibly truncated: ${plural(truncatedMain, 'main post', 'main posts')} (only preview text was available).`
+      );
     if (truncated)
       parts.push(
         `Possibly truncated: ${plural(truncated, 'embedded post', 'embedded posts')} (only preview text was available).`
