@@ -2759,7 +2759,10 @@
     const blocks = [];
     const seenImg = new Set();
     const seenVideo = new Set();
-    const seenText = new Set();
+    // Node identity (seenCandidateNodes) already stops a DOM double-read of one block. Text
+    // equality is only checked against the PREVIOUS text block, so a repeated subheading such
+    // as "Pros" or "Summary" elsewhere in the article survives.
+    let lastTextKey = '';
     const richRoot = pick(root, CONFIG.selectors.articleTextRoot, { quiet: true });
     const quoteEls = findArticleEmbeddedTweetEls(root);
     const insideQuote = (el) => quoteEls.some((quoteEl) => quoteEl !== el && quoteEl.contains(el));
@@ -2771,8 +2774,8 @@
     const pushTextBlock = (el) => {
       const html = inlineHtmlFromArticleBlock(el);
       const key = html.replace(/\s+/g, ' ').trim();
-      if (!key || seenText.has(key)) return;
-      seenText.add(key);
+      if (!key || key === lastTextKey) return;
+      lastTextKey = key;
       const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
       if (articleDividerText(text)) blocks.push({ kind: 'divider' });
       else {
@@ -2794,9 +2797,8 @@
         .map((html) => html.replace(/\s+/g, ' ').trim())
         .filter(Boolean);
       const key = `${ordered ? 'ol' : 'ul'}:${cleanItems.join('|')}`;
-      if (cleanItems.length && !seenText.has(key)) {
-        cleanItems.forEach((item) => seenText.add(item));
-        seenText.add(key);
+      if (cleanItems.length && key !== lastTextKey) {
+        lastTextKey = key;
         blocks.push({ kind: 'list', ordered, items: cleanItems });
       }
     };
@@ -2808,8 +2810,8 @@
         .join('|')
         .replace(/\s+/g, ' ')
         .trim()}`;
-      if (innerBlocks.length && !seenText.has(key)) {
-        seenText.add(key);
+      if (innerBlocks.length && key !== lastTextKey) {
+        lastTextKey = key;
         blocks.push({ kind: 'blockquote', blocks: innerBlocks });
       }
     };
@@ -2862,6 +2864,7 @@
     for (let i = 0; i < candidates.length; i++) {
       const { kind, node, item } = candidates[i];
       if (kind !== 'quote' && node && insideQuote(node)) continue;
+      if (kind !== 'text' && kind !== 'blockquote') lastTextKey = '';
 
       if (kind === 'text') {
         const listType = articleListType(node);

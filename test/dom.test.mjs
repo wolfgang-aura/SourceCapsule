@@ -3581,6 +3581,57 @@ check('.llm.md keeps line breaks inside a post and cannot open its own sections'
   assert.equal((md.match(/^## Completeness/gm) || []).length, 1);
 });
 
+function withPage(html, url, fn) {
+  const pageDom = new JSDOM(html, { url });
+  const prior = global.window;
+  global.window = pageDom.window;
+  global.document = pageDom.window.document;
+  global.Node = pageDom.window.Node;
+  global.location = pageDom.window.location;
+  global.localStorage = pageDom.window.localStorage;
+  try {
+    return fn();
+  } finally {
+    global.window = prior;
+    global.document = prior.document;
+    global.Node = prior.Node;
+    global.location = prior.location;
+    global.localStorage = prior.localStorage;
+  }
+}
+
+check('article export keeps repeated headings and paragraphs, drops only adjacent doubles', () => {
+  const block = (text) => `<div data-block="true"><span data-text="true">${text}</span></div>`;
+  const page = `<!doctype html><html><body><div data-testid="primaryColumn">
+    <article data-testid="tweet" role="article">
+      <div data-testid="User-Name"><a href="/Vegahao"><span>Vega Hao</span></a><a href="/Vegahao"><span>@Vegahao</span></a></div>
+      <div data-testid="twitterArticleReadView">
+        <div data-testid="twitter-article-title"><span>Two laptops</span></div>
+        <div data-testid="longformRichTextComponent">
+          ${block('Pros')}${block('Great battery.')}${block('Cons')}${block('Heavy.')}
+          ${block('Pros')}${block('Great battery.')}${block('Cons')}${block('Heavy.')}${block('Heavy.')}
+        </div>
+      </div>
+      <a href="/Vegahao/status/2069733529785905289"><time datetime="2026-06-25T12:00:00Z">Jun 25</time></a>
+    </article></div></body></html>`;
+  const texts = withPage(page, ARTICLE_STATUS_URL, () =>
+    engine
+      .buildModelForArticle()
+      .blocks.filter((b) => b.kind === 'heading' || b.kind === 'paragraph')
+      .map((b) => b.text || b.html)
+  );
+  assert.deepEqual(texts, [
+    'Pros',
+    'Great battery.',
+    'Cons',
+    'Heavy.',
+    'Pros',
+    'Great battery.',
+    'Cons',
+    'Heavy.',
+  ]);
+});
+
 // ---------------------------------------------------------------------------
 // Reply context, parallel media downloads, link-card thumbnails.
 // ---------------------------------------------------------------------------
