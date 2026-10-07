@@ -5717,6 +5717,81 @@ check('a longer sighting keeps the handle, time, parent and media an earlier one
   assert.equal(record.mediaLinks.length, 1);
 });
 
+check('poll label fallback strips a trailing percentage', () => {
+  const host = document.createElement('article');
+  host.setAttribute('data-testid', 'tweet');
+  host.innerHTML = `
+    <div data-testid="tweetText" lang="en">Closed poll</div>
+    <div data-testid="cardPoll" role="radiogroup">
+      <div role="progressbar" aria-label="Yes, 60%"><span>60%</span></div>
+      <div role="progressbar" aria-label="No, 40%"><span>40%</span></div>
+      <span>Poll closed</span>
+    </div>
+    <a href="/poller/status/904"><time datetime="2026-07-01T00:03:00Z">Jul 1</time></a>`;
+  document.body.appendChild(host);
+  const poll = engine.buildTweetBlocks(host).blocks.find((block) => block.kind === 'poll');
+  host.remove();
+  assert.deepEqual(
+    poll.choices.map((choice) => choice.label),
+    ['Yes', 'No']
+  );
+});
+
+check('library zip entries carry the export date', () => {
+  const zip = engine.buildZip(
+    [{ name: 'a.txt', bytes: new TextEncoder().encode('hi') }],
+    new Date(2026, 9, 7, 13, 45, 30)
+  );
+  const view = new DataView(zip.buffer);
+  const time = view.getUint16(10, true);
+  const date = view.getUint16(12, true);
+  assert.deepEqual([(date >> 9) + 1980, (date >> 5) & 0xf, date & 0x1f], [2026, 10, 7]);
+  assert.deepEqual([time >> 11, (time >> 5) & 0x3f, (time & 0x1f) * 2], [13, 45, 30]);
+});
+
+check('two permalink-less quotes from one author are two blockers', () => {
+  const quote = (text) => ({
+    kind: 'quote',
+    author: { name: 'Same', handle: '@same' },
+    blocks: [{ kind: 'paragraph', html: text }],
+  });
+  const assessment = engine.assessExportCompleteness({
+    type: 'post',
+    sourceUrl: STATUS_URL,
+    blocks: [quote('first quoted post'), quote('second quoted post')],
+  });
+  assert.equal(assessment.counts.quotePermalinkMissing, 2);
+});
+
+await checkAsync('a share error carries the Worker message', async () => {
+  global.GM_xmlhttpRequest = (options) =>
+    options.onload({
+      status: 429,
+      responseText: JSON.stringify({
+        error: 'Too many new share links from this address. Try again in a minute.',
+      }),
+    });
+  try {
+    await assert.rejects(
+      engine.createShareLink(
+        {
+          type: 'post',
+          title: 'Rate',
+          heading: 'Rate',
+          sourceUrl: STATUS_URL,
+          author: { name: 'Vega Hao', handle: '@Vegahao' },
+          blocks: [{ kind: 'paragraph', html: 'Hello' }],
+        },
+        '',
+        7
+      ),
+      /HTTP 429\. Too many new share links/
+    );
+  } finally {
+    delete global.GM_xmlhttpRequest;
+  }
+});
+
 // REVIEW-TESTS-END
 
 if (failures) {
