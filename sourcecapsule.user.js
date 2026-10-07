@@ -133,6 +133,7 @@
         'div[data-testid="twitterArticleReader"]',
       ],
       articleTextRoot: ['div[data-testid="longformRichTextComponent"]'],
+      articleBlock: ['[data-block="true"]'],
       // Long-form Article title.
       articleTitle: [
         'div[data-testid="twitter-article-title"]',
@@ -263,6 +264,15 @@
       if (els.length) return Array.from(els);
     }
     return [];
+  }
+
+  /** Blocks of an Article's rich text root; warns when the root has text but no block matches. */
+  function articleBlocks(richRoot) {
+    const blocks = pickAll(richRoot, CONFIG.selectors.articleBlock);
+    if (!blocks.length && richRoot && (richRoot.textContent || '').trim()) {
+      warn('selector miss (none matched):', CONFIG.selectors.articleBlock.join('  ||  '));
+    }
+    return blocks;
   }
 
   /** Return matches for all selectors, including root, without stopping early. */
@@ -473,18 +483,21 @@
   }
 
   function htmlToText(html, keepBreaks = false) {
-    return String(html || '')
-      .replace(/<br\s*\/?>/gi, '\n')
-      .replace(/<\/?(?:p|div|li|h[1-6])\b[^>]*>/gi, keepBreaks ? '\n' : ' ')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&#(\d+);/g, (match, code) => decodeHtmlCodePoint(match, code))
-      .replace(/&#x([0-9a-f]+);/gi, (match, code) => decodeHtmlCodePoint(match, code, 16));
+    return (
+      String(html || '')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/?(?:p|div|li|h[1-6])\b[^>]*>/gi, keepBreaks ? '\n' : ' ')
+        .replace(/<[^>]+>/g, ' ')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&#(\d+);/g, (match, code) => decodeHtmlCodePoint(match, code))
+        .replace(/&#x([0-9a-f]+);/gi, (match, code) => decodeHtmlCodePoint(match, code, 16))
+        // Last, so a literal "&lt;" (encoded as "&amp;lt;") stays text instead of becoming "<".
+        .replace(/&amp;/g, '&')
+    );
   }
 
   function blockTextForLanguage(block) {
@@ -1024,9 +1037,14 @@
 
   /**
    * Build a store-only ZIP from `[{ name, bytes }]` -> Uint8Array. Names use forward slashes
-   * (e.g. "media/image-001.jpg") and must be ASCII. No timestamps (set to 0).
+   * (e.g. "media/image-001.jpg") and must be ASCII. Every entry gets `date` as its DOS
+   * timestamp (local time, 2-second resolution, clamped to the 1980 epoch).
    */
-  function buildZip(entries) {
+  function buildZip(entries, date = new Date()) {
+    const year = Math.min(Math.max(date.getFullYear(), 1980), 2107);
+    const dosTime =
+      (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2);
+    const dosDate = ((year - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate();
     const enc = new TextEncoder();
     const chunks = [];
     const central = [];
@@ -1043,8 +1061,8 @@
         ...u16(20), // version needed
         ...u16(0), // flags
         ...u16(0), // method: store
-        ...u16(0), // mod time
-        ...u16(0), // mod date
+        ...u16(dosTime), // mod time
+        ...u16(dosDate), // mod date
         ...u32(crc),
         ...u32(data.length), // compressed size
         ...u32(data.length), // uncompressed size
@@ -1065,8 +1083,8 @@
         ...u16(20), // version needed
         ...u16(0), // flags
         ...u16(0), // method: store
-        ...u16(0), // mod time
-        ...u16(0), // mod date
+        ...u16(dosTime), // mod time
+        ...u16(dosDate), // mod date
         ...u32(c.crc),
         ...u32(c.size),
         ...u32(c.size),
@@ -1115,17 +1133,21 @@
   /** Fetch a URL and return it as a data: URI (plus size for the cap check). */
   async function fetchAsDataUri(url) {
     const { bytes, mime } = await gmFetchBytes(url);
-    const sha256 = await sha256Hex(bytes);
+    return withDataUri({ bytes, size: bytes.length, mime });
+  }
+
+  /** Add the hash and data: URI to fetched bytes. Run it once, after any validation. */
+  async function withDataUri(fetched, mime = fetched.mime) {
+    const sha256 = await sha256Hex(fetched.bytes);
     return {
-      dataUri: `data:${mime};base64,${bytesToBase64(bytes)}`,
-      bytes,
-      size: bytes.length,
+      ...fetched,
       mime,
+      dataUri: `data:${mime};base64,${bytesToBase64(fetched.bytes)}`,
       sha256: sha256 ? `sha256:${sha256}` : '',
     };
   }
 
-  async function fetchAsDataUriFromPage(url) {
+  async function fetchBytesFromPage(url) {
     if (typeof fetch !== 'function') throw new Error('page fetch unavailable');
     if (!isAllowedMediaHost(url))
       throw new Error(`Refusing page fetch for non-twimg media: ${url}`);
@@ -1138,14 +1160,7 @@
     const bytes = new Uint8Array(await response.arrayBuffer());
     const headers = response.headers && response.headers.get('content-type');
     const mime = (headers || guessMime(url)).trim();
-    const sha256 = await sha256Hex(bytes);
-    return {
-      dataUri: `data:${mime};base64,${bytesToBase64(bytes)}`,
-      bytes,
-      size: bytes.length,
-      mime,
-      sha256: sha256 ? `sha256:${sha256}` : '',
-    };
+    return { bytes, size: bytes.length, mime };
   }
 
   function bytesAscii(bytes, offset, length) {
@@ -1250,13 +1265,9 @@
     let lastError = null;
     for (const candidate of imageFetchCandidates(url)) {
       try {
-        const fetched = await fetchAsDataUri(candidate);
-        const validatedMime = validateImageDownload(fetched);
-        if (validatedMime && validatedMime !== fetched.mime) {
-          fetched.mime = validatedMime;
-          fetched.dataUri = `data:${validatedMime};base64,${bytesToBase64(fetched.bytes)}`;
-        }
-        return fetched;
+        const { bytes, mime } = await gmFetchBytes(candidate);
+        const fetched = { bytes, size: bytes.length, mime };
+        return await withDataUri(fetched, validateImageDownload(fetched) || mime);
       } catch (e) {
         lastError = e;
       }
@@ -1265,13 +1276,8 @@
     // validation (for example a CDN challenge/error body). Give the page context
     // one chance with its normal X credentials before declaring the image missing.
     try {
-      const fetched = await fetchAsDataUriFromPage(url);
-      const validatedMime = validateImageDownload(fetched);
-      if (validatedMime && validatedMime !== fetched.mime) {
-        fetched.mime = validatedMime;
-        fetched.dataUri = `data:${validatedMime};base64,${bytesToBase64(fetched.bytes)}`;
-      }
-      return fetched;
+      const fetched = await fetchBytesFromPage(url);
+      return await withDataUri(fetched, validateImageDownload(fetched) || fetched.mime);
     } catch (e) {
       lastError = e;
     }
@@ -2195,7 +2201,7 @@
     findQuotedTweetEls(root).forEach(addQuote);
     const richRoot = pick(root, CONFIG.selectors.articleTextRoot, { quiet: true });
     if (richRoot) {
-      richRoot.querySelectorAll('[data-block="true"]').forEach((block) => {
+      articleBlocks(richRoot).forEach((block) => {
         if (!isTweetLikeBlock(block)) return;
         addQuote(block);
       });
@@ -2528,7 +2534,7 @@
                 line && !/^\d{1,3}(?:[.,]\d+)?\s*%$/.test(line) && !/^[\d,.]+\s+votes?$/i.test(line)
             ) ||
           combined
-            .replace(/\b\d{1,3}(?:[.,]\d+)?\s*%\b/g, '')
+            .replace(/\b\d{1,3}(?:[.,]\d+)?\s*%(?=\s|$)/g, '')
             .replace(
               /\b[\d,.]+\s+votes?(?=\s|poll|\d+\s+(?:days?|hours?|minutes?|seconds?)|$)/gi,
               ''
@@ -2862,7 +2868,7 @@
       candidates.push({ kind, node, y: absY(node) });
     };
     if (richRoot) {
-      richRoot.querySelectorAll('[data-block="true"]').forEach((node) => {
+      articleBlocks(richRoot).forEach((node) => {
         if (
           !isTweetLikeBlock(node) &&
           !pick(node, CONFIG.selectors.tweetPhoto, { quiet: true }) &&
@@ -4059,6 +4065,8 @@
    */
   function assessExportCompleteness(model) {
     const blockers = [];
+    // Kept off the blocker objects so post text never reaches the diagnostic bundle.
+    const dedupeText = new WeakMap();
     const walk = (blocks) => {
       (blocks || []).forEach((b) => {
         if (b.kind === 'quote') {
@@ -4074,13 +4082,15 @@
               } could not be captured (private, deleted, or fetch failed).`,
             });
           } else if (!hasCanonicalUrl) {
-            blockers.push({
+            const blocker = {
               kind: 'quote-permalink-missing',
               handle: (b.author && b.author.handle) || '',
               summary: `Embedded post ${
                 (b.author && b.author.handle) || 'from an unknown author'
               } has no canonical permalink; only the author profile link is available.`,
-            });
+            };
+            dedupeText.set(blocker, b.blocks.map(blockTextForLanguage).join(' ').trim());
+            blockers.push(blocker);
           }
           walk(b.blocks);
         } else if (b.kind === 'blockquote') {
@@ -4117,12 +4127,14 @@
     // same quote or media appears in multiple thread posts. Keeps counts honest.
     const seen = new Set();
     const deduped = [];
-    for (const b of blockers) {
-      const key = `${b.kind}|${b.handle || ''}|${b.mediaId || ''}|${b.sourceUrl || ''}|${b.url || ''}`;
-      if (seen.has(key)) continue;
+    blockers.forEach((b) => {
+      // `textKey` keeps two different permalink-less quotes by one author apart; the same
+      // quote repeated across thread posts still collapses to one row.
+      const key = `${b.kind}|${b.handle || ''}|${b.mediaId || ''}|${b.sourceUrl || ''}|${b.url || ''}|${dedupeText.get(b) || ''}`;
+      if (seen.has(key)) return;
       seen.add(key);
       deduped.push(b);
-    }
+    });
     const counts = {
       quotePermalinkMissing: deduped.filter((b) => b.kind === 'quote-permalink-missing').length,
       quoteContentMissing: deduped.filter((b) => b.kind === 'quote-content-missing').length,
@@ -5593,7 +5605,16 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
           if (response.status >= 200 && response.status < 300) {
             resolve(response.responseText || '');
           } else {
-            const failure = new Error(`Share service returned HTTP ${response.status}.`);
+            let detail = '';
+            try {
+              const parsed = JSON.parse(response.responseText || '');
+              if (parsed && typeof parsed.error === 'string') detail = parsed.error.trim();
+            } catch {
+              // Not JSON (for example a Cloudflare error page); the status alone will do.
+            }
+            const failure = new Error(
+              `Share service returned HTTP ${response.status}.${detail ? ` ${detail}` : ''}`
+            );
             failure.status = response.status;
             reject(failure);
           }

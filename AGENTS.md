@@ -159,7 +159,7 @@ timestamp, parent id, and media **links** — not just an inventory of reply ids
 - **Media is links only, on purpose.** Downloading media for thousands of replies is out
   of scope; the archive records image/video/poster URLs and lets the reader follow them.
 - **Gap recovery** (`enrichReplyArchiveViaSyndication`) runs *after* the first archive
-  write, capped at 250 ids / concurrency 3. A 404 is authoritative and becomes an honest
+  write, capped at 2,000 ids / concurrency 3. A 404 is authoritative and becomes an honest
   tombstone; other failures are returned in `errors`, never swallowed.
 - Coverage is **best effort** and the Markdown receipt says so, listing known-but-
   uncaptured reply ids. X's public reply counter is a reference, never a denominator.
