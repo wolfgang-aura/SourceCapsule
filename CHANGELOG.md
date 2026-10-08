@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.10] - 2026-10-08
+
 ### Fixed
 
 - Create AI link no longer aborts with `Invalid file path` when an image is AVIF, BMP, HEIC or
