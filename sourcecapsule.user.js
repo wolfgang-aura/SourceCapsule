@@ -890,6 +890,8 @@
         return 'gif';
       case 'image/webp':
         return 'webp';
+      case 'image/avif':
+        return 'avif';
       case 'image/svg+xml':
         return 'svg';
       case 'video/mp4':
@@ -5656,6 +5658,12 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     return { ...model, blocks: mapBlocks(model.blocks) };
   }
 
+  // Mirror of the Worker's `validFilePath` rule for media uploads. One rejected PUT aborts the
+  // whole share, so a name the Worker would answer 400 to must never reach the upload loop;
+  // that media is left out and the shared copy lists it as missing, like raw video (#80).
+  const SHARE_MEDIA_NAME =
+    /^media\/[A-Za-z0-9][A-Za-z0-9._-]{0,179}\.(?:jpe?g|png|gif|webp|avif)$/i;
+
   async function createShareLink(model, debugJson, expiryDays, onProgress) {
     const apiBase = getPrefs().shareApiBase.replace(/\/$/, '');
     // Share can be invoked from the receipt after a long/lazy Article capture. Do one
@@ -5677,7 +5685,18 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       });
       bundle = collectBundleMediaFiles(model);
     }
-    const { files, pathById } = bundle;
+    const { pathById } = bundle;
+    const files = bundle.files.filter((file) => SHARE_MEDIA_NAME.test(file.name));
+    const mediaFilesSkipped = bundle.files.length - files.length;
+    if (mediaFilesSkipped) {
+      const kept = new Set(files.map((file) => file.name));
+      pathById.forEach((name, mediaId) => {
+        if (!kept.has(name)) pathById.delete(mediaId);
+      });
+      warn(
+        `${mediaFilesSkipped} media file(s) have a type the share service does not accept; the shared copy lists them as missing.`
+      );
+    }
     const mediaBytes = files.reduce((sum, file) => sum + file.bytes.byteLength, 0);
     if (mediaBytes > CONFIG.share.maxBytes) {
       throw new Error(
@@ -5762,6 +5781,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       headers: { Authorization: `Bearer ${created.uploadToken}` },
     });
     created.mediaFilesUploaded = files.length;
+    created.mediaFilesSkipped = mediaFilesSkipped;
     created.mediaBytesUploaded = mediaBytes;
     // The copy a recipient actually sees. Raw video is never uploaded, so a video whose
     // poster failed is missing there even though the local model has its bytes. Callers
