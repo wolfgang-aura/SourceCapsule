@@ -9,6 +9,9 @@ module.exports = [
     ignores: [
       'node_modules/**',
       'dist/**',
+      // Agent worktrees the Claude desktop app leaves under .claude/ carry their own dist/.
+      '.claude/**',
+      '_scratch/**',
       'SourceCapsule/**',
       'share-worker/.wrangler/**',
       '*.export.html',

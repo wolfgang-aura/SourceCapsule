@@ -5473,6 +5473,81 @@ await checkAsync(
 );
 
 await checkAsync(
+  'share leaves out media whose file type the Worker rejects instead of aborting (#80)',
+  async () => {
+    // The Worker accepts only jpe?g|png|gif|webp|avif under media/. A BMP used to become
+    // media/<id>.bin, that PUT answered 400, and the share aborted after three uploads.
+    const BMP =
+      'data:image/bmp;base64,' +
+      Buffer.alloc(16, 0).fill(Buffer.from('BM'), 0, 2).toString('base64');
+    const AVIF =
+      'data:image/avif;base64,' +
+      Buffer.concat([
+        Buffer.from([0, 0, 0, 28]),
+        Buffer.from('ftypavif'),
+        Buffer.alloc(8),
+      ]).toString('base64');
+    const model = {
+      type: 'post',
+      title: 'Share skips bin',
+      heading: 'Share skips bin',
+      sourceUrl: STATUS_URL,
+      author: { name: 'Vega Hao', handle: '@Vegahao' },
+      blocks: [
+        { kind: 'paragraph', html: 'Hello' },
+        { kind: 'image', url: 'https://pbs.twimg.com/media/Bmp1.jpg', dataUri: BMP },
+        { kind: 'image', url: 'https://pbs.twimg.com/media/Avif1.jpg', dataUri: AVIF },
+      ],
+    };
+    const puts = [];
+    global.GM_xmlhttpRequest = (options) => {
+      if (options.method === 'POST' && options.url.endsWith('/api/capsules')) {
+        options.onload({
+          status: 200,
+          responseText: JSON.stringify({
+            uploadUrl: 'https://share.test/api/capsules/abc/files',
+            uploadToken: 't',
+            finalizeUrl: 'https://share.test/api/capsules/abc/finalize',
+            viewUrl: 'https://share.test/c/abc',
+          }),
+        });
+        return;
+      }
+      if (options.method === 'PUT') {
+        const name = decodeURIComponent(options.url.split('/files/')[1]);
+        puts.push(name);
+        if (name.startsWith('media/') && !/[.](?:jpe?g|png|gif|webp|avif)$/i.test(name)) {
+          options.onload({
+            status: 400,
+            responseText: JSON.stringify({ error: 'Invalid file path.' }),
+          });
+          return;
+        }
+      }
+      options.onload({ status: 200, responseText: '' });
+    };
+    let created;
+    try {
+      created = await engine.createShareLink(model, '', 7);
+    } finally {
+      delete global.GM_xmlhttpRequest;
+    }
+    assert.equal(engine.mimeToExt('image/avif'), 'avif');
+    const media = puts.filter((name) => name.startsWith('media/'));
+    assert.equal(media.length, 1, 'only the accepted image was uploaded');
+    assert.match(media[0], /^media[/]image-[0-9]+[.]avif$/, 'AVIF uploads under its own extension');
+    assert.equal(created.mediaFilesUploaded, 1);
+    assert.equal(created.mediaFilesSkipped, 1);
+    assert.equal(
+      engine.assessExportCompleteness(created.sharedModel).verdict,
+      'incomplete',
+      'the shared copy reports the left-out image as missing'
+    );
+    assert.match(model.blocks[1].dataUri, /^data:image[/]bmp/, 'the live model keeps its bytes');
+  }
+);
+
+await checkAsync(
   'receipt share keeps the saved note and tags, re-saves into the original folder, and survives a library error',
   async () => {
     // The prompt opens prefilled, so submitting only an expiry cannot wipe the metadata.

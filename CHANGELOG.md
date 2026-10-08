@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- Create AI link no longer aborts with `Invalid file path` when an image is AVIF, BMP, HEIC or
+  SVG. AVIF uploads under its own extension; media of a type the share Worker rejects is left
+  out and the shared copy lists it as missing, as it does for raw video (#80).
+
 ## [1.6.9] - 2026-10-07
 
 Fixes from the 2026-10-07 full-repo review.
