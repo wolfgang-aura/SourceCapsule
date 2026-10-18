@@ -8782,11 +8782,25 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * upgrading everything syndication did provide. Nested quote trees are
    * merged recursively so a poll inside a quote of a quote does not disappear.
    */
-  function mergeQuoteAfterSyndication(existing, fresh) {
+  function mergeQuoteAfterSyndication(existing, fresh, { nested = false } = {}) {
     if (!existing || !fresh) return fresh;
     const oldBlocks = existing.blocks || [];
-    const nextBlocks = (fresh.blocks || []).slice();
+    let nextBlocks = (fresh.blocks || []).slice();
     const extras = [];
+
+    // A nested quoted_tweet never carries note_tweet, so a rebuild from it cannot tell a
+    // preview from a full post. What this quote learned from its own payload stands:
+    // recovered long-form text, or the flag that only a preview was available.
+    if (nested && existing.noteRecovered && !fresh.noteRecovered) {
+      const fullText = oldBlocks.filter((block) => block.kind === 'paragraph');
+      if (fullText.length) {
+        nextBlocks = [...fullText, ...nextBlocks.filter((block) => block.kind !== 'paragraph')];
+        fresh.noteRecovered = true;
+        fresh.truncated = false;
+      }
+    } else if (nested && existing.truncated && !fresh.truncated) {
+      fresh.truncated = true;
+    }
 
     oldBlocks
       .filter((block) => block.kind === 'link-card')
@@ -8824,7 +8838,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         oldQuotes.find(
           (candidate) => freshId && statusIdFromUrl(candidate.sourceUrl) === freshId
         ) || oldQuotes[index];
-      if (oldQuote) mergeQuoteAfterSyndication(oldQuote, freshQuote);
+      if (oldQuote) mergeQuoteAfterSyndication(oldQuote, freshQuote, { nested: true });
     });
 
     if (extras.length) {
@@ -8834,14 +8848,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     // The payload is authoritative for what this post quotes only when it says something.
     // A protected or age-gated nested post, or one already gone, comes back with no
     // quoted_tweet at all, so keep what the DOM showed instead of dropping it (#102).
-    const payloadNamesNested = nextBlocks.some(
-      (block) => block.kind === 'quote' || block.kind === 'quote-tombstone'
+    const payloadNamesNested = nextBlocks.some((block) =>
+      ['quote', 'quote-tombstone', 'quote-chain-note'].includes(block.kind)
     );
     if (!payloadNamesNested) {
       const ownId = statusIdFromUrl(fresh.sourceUrl);
       oldBlocks
         .filter((block) => {
-          if (block.kind === 'quote-tombstone') return true;
+          if (block.kind === 'quote-tombstone' || block.kind === 'quote-chain-note') return true;
           const nestedId = block.kind === 'quote' && statusIdFromUrl(block.sourceUrl);
           return !!nestedId && nestedId !== ownId;
         })
@@ -9028,7 +9042,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * Replace each top-level quote block's content with authoritative syndication
    * data (by status id). On any failure the original DOM-extracted quote is kept.
    */
-  async function enrichQuotesViaSyndication(model, onProgress) {
+  async function enrichQuotesViaSyndication(model, onProgress, fetchTweet = fetchTweetSyndication) {
     const quotes = model.blocks.filter((b) => b.kind === 'quote' && b.sourceUrl);
     let done = 0;
     onProgress && onProgress(0, quotes.length);
@@ -9036,8 +9050,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const id = statusIdFromUrl(q.sourceUrl);
       if (id) {
         try {
-          const data = await fetchTweetSyndication(id);
-          if (data && data.user && (data.__typename === 'Tweet' || data.text != null)) {
+          const data = await fetchTweet(id);
+          if (isSyndicationTombstone(data) && q.blocks && q.blocks.length) {
+            recordSyndicationUnchecked(model, id, { status: 404, message: 'tombstone' });
+          } else if (data && data.user && (data.__typename === 'Tweet' || data.text != null)) {
             const fresh = mergeQuoteAfterSyndication(q, syndicationToQuoteBlock(data));
             q.author = fresh.author;
             q.blocks = fresh.blocks;

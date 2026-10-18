@@ -373,4 +373,69 @@ function findBlock(blocks, kind) {
   assert.equal(fresh.blocks.filter((b) => b.kind === 'quote-tombstone').length, 0);
 }
 
+// 10. A rebuild from A's payload (whose nested B never carries note_tweet) keeps what B
+//     learned from its own payload: recovered long-form text, a preview flag, a chain note.
+{
+  const [A, B, C] = CHAIN;
+  const oldA = () => ({
+    kind: 'quote',
+    author: { name: 'A', handle: '@hibtc37' },
+    sourceUrl: `https://x.com/hibtc37/status/${A.id}`,
+    blocks: [
+      { kind: 'paragraph', html: 'Post A text' },
+      {
+        kind: 'quote',
+        author: { name: 'B', handle: '@hibtc37' },
+        sourceUrl: `https://x.com/hibtc37/status/${B.id}`,
+        noteRecovered: true,
+        blocks: [
+          { kind: 'paragraph', html: 'Post B full long-form text' },
+          {
+            kind: 'quote',
+            author: { name: 'C', handle: '@hibtc37' },
+            sourceUrl: `https://x.com/hibtc37/status/${C.id}`,
+            truncated: true,
+            blocks: [
+              { kind: 'paragraph', html: 'Post C preview' },
+              { kind: 'quote-chain-note', reason: 'cap', statusId: C.id, limit: 2 },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+  const merged = engine.mergeQuoteAfterSyndication(
+    oldA(),
+    engine.syndicationToQuoteBlock(tweet(0))
+  );
+  const b = merged.blocks.find((x) => x.kind === 'quote');
+  assert.equal(b.noteRecovered, true, 'B keeps its recovered long-form text');
+  assert.match(b.blocks[0].html, /full long-form/);
+  assert.equal(b.truncated, false);
+  const c = b.blocks.find((x) => x.kind === 'quote');
+  assert.ok(c, 'C survives a one-level rebuild');
+  assert.equal(c.truncated, true, 'C still says only a preview was available');
+  assert.ok(
+    c.blocks.some((x) => x.kind === 'quote-chain-note'),
+    'the cap note survives'
+  );
+}
+
+// 11. A quote whose own fetch answers with a tombstone keeps its DOM card, and says it
+//     could not be cross-checked (#102, #99).
+{
+  const model = domModel();
+  const A = CHAIN[0];
+  await engine.enrichQuotesViaSyndication(model, null, async (id) =>
+    id === A.id ? { __typename: 'TweetTombstone', tombstone: { text: { text: 'Gone' } } } : null
+  );
+  const quote = model.blocks.find((b) => b.kind === 'quote');
+  assert.equal(quote.sourceUrl.split('/').pop(), A.id);
+  assert.match(quote.blocks[0].html, /Post A text/);
+  assert.ok(
+    (model.syndicationUnchecked || []).some((item) => item.statusId === A.id),
+    'the card is named as not cross-checked'
+  );
+}
+
 console.log('quote-chain test passed');
