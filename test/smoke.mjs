@@ -1193,10 +1193,14 @@ check('handles failed media with a visible placeholder', () => {
   assert.ok(html.includes('data-xa-missing-type="video"'));
   assert.ok(html.includes('Quoted post unavailable'));
   assert.ok(html.includes('data-xa-missing-type="quoted-post"'));
-  assert.equal(debugJson.capture.missingMedia, 6);
+  // Two of the six missing records are quoted posts, which are not media (#97).
+  assert.equal(debugJson.capture.missingMedia, 4);
   assert.equal(debugJson.capture.incompleteMedia, 3);
   assert.equal(debugJson.missing.length, 6);
-  assert.equal(debugJson.incomplete.length, 3);
+  assert.equal(debugJson.incomplete.length, 4);
+  // The fourth is the quote whose preview stops mid-sentence: the Status line already
+  // counted it as possibly truncated, and now the list the reader is sent to names it.
+  assert.equal(debugJson.incomplete[3].type, 'quoted-post-text');
   assert.deepEqual(
     debugJson.missing.map((item) => item.type),
     ['image', 'video', 'video-poster', 'video', 'quoted-post', 'quoted-post']

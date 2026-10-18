@@ -3890,6 +3890,13 @@
       recoveredNotes: 0,
       quoteCards: 0,
       quoteTombstones: 0,
+      // Posts above a reply (#92) are context for it, not posts it embeds (#97).
+      replyContextCards: 0,
+      replyContextTombstones: 0,
+      // Media, polls and embedded posts that belong to the exported post itself. A
+      // caption-less photo or quote post has no main text to miss; a reply-context
+      // card does not make a reply's missing text caption-less.
+      ownContent: 0,
       quoteChainsUnfollowed: 0,
       renderedTweetCards: 0,
       images: 0,
@@ -3923,21 +3930,27 @@
       if (!url) return;
       stats.mediaUrls.set(url, (stats.mediaUrls.get(url) || 0) + 1);
     };
-    const walk = (blocks) => {
+    // Main text is judged at depth 0 only: a quote card or reply-context card always
+    // carries a paragraph, and counting it hid a main post whose own text was lost (#97).
+    const walk = (blocks, depth = 0, inContext = false) => {
       (blocks || []).forEach((b) => {
+        if (!inContext && ['image', 'video', 'poll'].includes(b.kind)) stats.ownContent += 1;
         if (b.kind === 'heading') {
           stats.headings += 1;
-          stats.mainTextCaptured = stats.mainTextCaptured || !!String(b.text || '').trim();
+          if (depth === 0)
+            stats.mainTextCaptured = stats.mainTextCaptured || !!String(b.text || '').trim();
         } else if (b.kind === 'thread-marker') {
           if (b.sourceUrl) stats.sourceLinks.add(b.sourceUrl);
         } else if (b.kind === 'paragraph') {
           stats.paragraphs += 1;
-          stats.mainTextCaptured = stats.mainTextCaptured || !!textFromHtml(b.html);
+          if (depth === 0)
+            stats.mainTextCaptured = stats.mainTextCaptured || !!textFromHtml(b.html);
           hrefsFromHtml(b.html).forEach((href) => stats.sourceLinks.add(href));
         } else if (b.kind === 'list') {
           stats.lists += 1;
-          stats.mainTextCaptured =
-            stats.mainTextCaptured || (b.items || []).some((item) => !!textFromHtml(item));
+          if (depth === 0)
+            stats.mainTextCaptured =
+              stats.mainTextCaptured || (b.items || []).some((item) => !!textFromHtml(item));
           (b.items || []).forEach((item) =>
             hrefsFromHtml(item).forEach((href) => stats.sourceLinks.add(href))
           );
@@ -3961,7 +3974,8 @@
         } else if (b.kind === 'quote-tombstone') {
           // Informational, never missing/incomplete: the quoted post was gone on
           // X itself, so "complete" stays true - but the reader is told why.
-          stats.quoteTombstones += 1;
+          if (b.replyContext) stats.replyContextTombstones += 1;
+          else stats.quoteTombstones += 1;
           addNote(
             b.replyContext
               ? b.replyDepth > 1
@@ -3980,6 +3994,13 @@
           // A real gap: posts deeper in the chain exist (or may exist) and are not here.
           stats.quoteChainsUnfollowed += 1;
           stats.warnings.push(quoteChainNoteText(b));
+          stats.incomplete.push(
+            missingRecord('quote-chain', {
+              sourcePostId: b.statusId || statusIdFromSourceUrl(b.sourceUrl) || undefined,
+              sourceUrl: b.sourceUrl || undefined,
+              reason: b.reason === 'cap' ? 'depth_limit' : 'fetch_failed',
+            })
+          );
         } else if (b.kind === 'image') {
           stats.images += 1;
           markMediaUrl(b.url);
@@ -4019,7 +4040,9 @@
                 sourceLinkPreserved: !!b.sourceUrl,
               })
             );
-            stats.warnings.push(
+            // Poster + source link is an accepted outcome, not a gap (captureGaps), so it
+            // is a note; only a video with no poster is a warning.
+            (b.posterDataUri ? addNote : (warning) => stats.warnings.push(warning))(
               `Video ${b._xaMediaId || ''} was detected, but the video file was not preserved offline. ${
                 b.posterDataUri ? 'Only the poster' : 'No poster'
               } and ${b.sourceUrl ? 'source link were' : 'no source link was'} preserved.`.trim()
@@ -4052,7 +4075,11 @@
           }
           if (b.sourceUrl) stats.sourceLinks.add(b.sourceUrl);
         } else if (b.kind === 'quote') {
-          stats.quoteCards += 1;
+          if (b.replyContext) stats.replyContextCards += 1;
+          else {
+            stats.quoteCards += 1;
+            if (!inContext) stats.ownContent += 1;
+          }
           stats.renderedTweetCards += 1;
           if (b.noteRecovered) stats.recoveredNotes += 1;
           if (b.sourceUrl) stats.sourceLinks.add(b.sourceUrl);
@@ -4076,13 +4103,44 @@
               `Quoted post ${postId || b.sourceUrl || ''} was unavailable at export time.`.trim()
             );
           }
-          walk(b.blocks);
+          walk(b.blocks, depth + 1, inContext || !!b.replyContext);
         } else if (b.kind === 'blockquote') {
-          walk(b.blocks);
+          walk(b.blocks, depth, inContext);
         }
       });
     };
     walk(model.blocks);
+    // Text gaps captureGaps counts are listed too, so the Status line's "Details are under
+    // Missing / Incomplete Content" points at something, and the manifest warns (#97).
+    (model.blocks || [])
+      .filter((b) => b.kind === 'truncation-notice')
+      .forEach((b) => {
+        const postId = statusIdFromSourceUrl(b.sourceUrl || model.sourceUrl);
+        stats.incomplete.push(
+          missingRecord('post-text', {
+            sourcePostId: postId || undefined,
+            sourceUrl: b.sourceUrl || model.sourceUrl || undefined,
+            reason: 'long_form_preview_only',
+          })
+        );
+        stats.warnings.push(
+          `${postId ? `Post ${postId}` : 'The exported post'} is a long-form post; only its preview text was available at export (full text not included).`
+        );
+      });
+    allLlmQuotes(model.blocks)
+      .filter(
+        (quote) => quote.truncated || (!quote.noteRecovered && isPossiblyTruncatedPost(quote))
+      )
+      .forEach((quote) =>
+        stats.incomplete.push(
+          missingRecord('quoted-post-text', {
+            sourcePostId: statusIdFromSourceUrl(quote.sourceUrl) || undefined,
+            sourceUrl: quote.sourceUrl || undefined,
+            reason: quote.truncated ? 'long_form_preview_only' : 'possibly_truncated_preview',
+          })
+        )
+      );
+    llmTruncationWarnings(model).forEach((warning) => stats.warnings.push(warning));
     if (
       !(
         model.author &&
@@ -4101,14 +4159,18 @@
           sourceUrl: model.author.avatarUrl || undefined,
           reason: 'download_failed',
         },
-        'Main author avatar was unavailable at export time.'
+        undefined
       );
+      // Not a gap (captureGaps): the post reads the same without it.
+      addNote('Main author avatar was unavailable at export time.');
     }
     if (!stats.mainTextCaptured) stats.warnings.push('No main text content was captured.');
-    stats.missingMedia = stats.missing.length;
-    stats.incompleteMedia = stats.incomplete.length;
-    if (stats.missingMedia)
-      stats.warnings.push(`${stats.missingMedia} item(s) were unavailable at export time.`);
+    // Media counters count media: a quoted post is not media, and text gaps share the
+    // incomplete list only so the reader finds them in one place.
+    stats.missingMedia = stats.missing.filter((record) => record.type !== 'quoted-post').length;
+    stats.incompleteMedia = stats.incomplete.filter((record) => record.type === 'video').length;
+    const unavailable = stats.missing.filter((record) => record.type !== 'avatar').length;
+    if (unavailable) stats.warnings.push(`${unavailable} item(s) were unavailable at export time.`);
     if (media.some((item) => item.embedded && !item.sha256))
       addNote('Some embedded media could not be content-hashed in this browser.');
     if (duplicateMedia.length)
@@ -4394,6 +4456,7 @@
         polls: stats.polls,
         recoveredLongFormNotes: stats.recoveredNotes,
         quoteCards: stats.quoteCards,
+        replyContextCards: stats.replyContextCards,
         quoteChainsUnfollowed: stats.quoteChainsUnfollowed,
         renderedTweetCards: stats.renderedTweetCards,
         images: stats.images,
@@ -4411,6 +4474,10 @@
         note: String(model.userNote || ''),
         tags: Array.isArray(model.tags) ? model.tags : [],
       },
+      completeness: (() => {
+        const gaps = captureGaps(model, stats);
+        return { status: gaps.complete ? 'complete' : 'incomplete', summary: gaps.summary };
+      })(),
       media: stats.media,
       missing: stats.missing,
       incomplete: stats.incomplete,
@@ -4562,10 +4629,22 @@
     return directQuotes(model.blocks).filter((q) => !String(q._xaLlmNumber || '').includes('.'));
   }
 
+  // Reply-context cards and what they quote are the conversation above the post, not
+  // posts it embeds (#97), so they are counted apart.
   function llmQuoteCounts(model) {
-    const total = allLlmQuotes(model.blocks).length;
-    const direct = topLevelLlmQuotes(model).length;
-    return { total, direct, nested: total - direct };
+    let total = 0;
+    let context = 0;
+    const walk = (blocks) =>
+      (blocks || []).forEach((b) => {
+        if (b.kind === 'quote' && b.replyContext) context += 1;
+        else if (b.kind === 'quote') {
+          total += 1;
+          walk(b.blocks);
+        } else if (b.kind === 'blockquote') walk(b.blocks);
+      });
+    walk(model.blocks);
+    const direct = topLevelLlmQuotes(model).filter((q) => !q.replyContext).length;
+    return { total, direct, nested: total - direct, context };
   }
 
   function collectLlmSourceLinks(model) {
@@ -4775,7 +4854,7 @@
     const count = (type) => stats.missing.filter((record) => record.type === type).length;
     const missing = [];
     // A caption-less photo/video/poll/quote post has no text to miss.
-    const hasOtherContent = stats.images + stats.videos + stats.polls + stats.quoteCards > 0;
+    const hasOtherContent = stats.ownContent > 0;
     if (!stats.mainTextCaptured && !hasOtherContent) missing.push('the main text');
     const quotes = count('quoted-post');
     if (quotes) missing.push(plural(quotes, 'quoted post', 'quoted posts'));
@@ -5269,6 +5348,7 @@
       `- Embedded posts: ${quoteCounts.total} total`,
       `  - Direct embedded posts: ${quoteCounts.direct}`,
       `  - Nested quoted posts: ${quoteCounts.nested}`,
+      ...(quoteCounts.context ? [`- Conversation context posts: ${quoteCounts.context}`] : []),
       `- Polls: ${stats.polls}`,
       `- Images: ${imageMedia.filter((item) => item.embedded).length} captured, ${
         imageMedia.filter((item) => item.missing).length
@@ -5333,6 +5413,22 @@
       });
       (manifest.incomplete || []).forEach((item) => {
         const label = item.mediaId || item.sourcePostId || item.sourceUrl || item.type;
+        if (item.type === 'post-text' || item.type === 'quoted-post-text') {
+          lines.push(
+            `- ${item.type === 'post-text' ? 'Post' : 'Embedded post'} ${label}: ${
+              item.reason === 'long_form_preview_only'
+                ? 'long-form post, only the preview text was captured'
+                : 'text may be truncated (preview only)'
+            }.`
+          );
+          if (item.sourceUrl) lines.push(`  Source URL: ${item.sourceUrl}`);
+          return;
+        }
+        if (item.type === 'quote-chain') {
+          lines.push(`- Quote chain below post ${label}: not followed to the end.`);
+          if (item.reason) lines.push(`  Reason: ${item.reason}`);
+          return;
+        }
         if (item.type === 'video') {
           lines.push(
             `- ${label}: video file not preserved offline; ${
@@ -6044,7 +6140,13 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       if (stats.incompleteMedia)
         warnings.push(`${stats.incompleteMedia} media item(s) incomplete (poster or link only)`);
       if (stats.quoteTombstones)
-        warnings.push(`${stats.quoteTombstones} quoted post(s) deleted on X`);
+        warnings.push(
+          `${stats.quoteTombstones} quoted post(s) unavailable on X (deleted, protected or suspended)`
+        );
+      if (stats.replyContextTombstones)
+        warnings.push(
+          `${stats.replyContextTombstones} post(s) above this reply unavailable on X (deleted, protected or suspended)`
+        );
       if (networkCaptureDiagnostics.interestingResponses === 0)
         warnings.push('no passive GraphQL capture was observed for this page');
       // Thread scope was requested. Say plainly how much of the thread came back, and

@@ -363,6 +363,97 @@ check('AI_LINK.txt states the shared capsule verdict, not the local one', () => 
   assert.match(receipt, /Shared capsule status: INCOMPLETE\. Possibly truncated: 1 main post/);
 });
 
+// #97: every surface that reports on a capture must agree with the Status line.
+const reportModel = (blocks, extra = {}) => ({
+  type: 'post',
+  title: 'Report',
+  author: { name: 'R', handle: '@r' },
+  sourceUrl: 'https://x.com/r/status/2111000000000000005',
+  exportedAt: '2026-10-19T00:00:00Z',
+  blocks,
+  ...extra,
+});
+const mdSection = (md, heading) => {
+  const start = md.indexOf(`## ${heading}`);
+  const end = md.indexOf('\n## ', start + 3);
+  return md.slice(start, end < 0 ? undefined : end);
+};
+
+check('a truncated main post is listed where the Status line sends the reader', () => {
+  const model = reportModel([
+    { kind: 'paragraph', html: 'Long preview' },
+    { kind: 'truncation-notice', sourceUrl: 'https://x.com/r/status/2111000000000000005' },
+  ]);
+  const md = engine.renderLlmMarkdown(model);
+  assert.match(md, /Status: INCOMPLETE/);
+  const missing = mdSection(md, 'Missing / Incomplete Content');
+  assert.doesNotMatch(missing, /- None/);
+  assert.match(missing, /2111000000000000005/);
+  const manifest = JSON.parse(engine.renderArchiveManifestJson(model, ''));
+  assert.equal(manifest.completeness.status, 'incomplete');
+  assert.ok(
+    manifest.warnings.some((w) => /long-form/i.test(w)),
+    'the manifest warns too'
+  );
+});
+
+check('text in a reply-context card does not count as the reply main text', () => {
+  const model = reportModel([
+    {
+      kind: 'quote',
+      replyContext: true,
+      replyDepth: 1,
+      author: { name: 'P', handle: '@p' },
+      sourceUrl: 'https://x.com/p/status/2111000000000000004',
+      blocks: [{ kind: 'paragraph', html: 'The parent post' }],
+    },
+  ]);
+  const md = engine.renderLlmMarkdown(model);
+  assert.match(md, /Status: INCOMPLETE\. Not captured: the main text/);
+  assert.match(md, /- Main text: not detected/);
+});
+
+check('reply-context cards are conversation context, not embedded or gone quoted posts', () => {
+  const model = reportModel([
+    {
+      kind: 'quote-tombstone',
+      replyContext: true,
+      replyDepth: 1,
+      notice: 'This Post was deleted.',
+      sourceUrl: 'https://x.com/p/status/2111000000000000004',
+    },
+    { kind: 'paragraph', html: 'A reply' },
+  ]);
+  const stats = engine.archiveStats(model);
+  assert.equal(stats.quoteTombstones, 0, 'a gone parent is not a gone quoted post');
+  assert.equal(stats.replyContextTombstones, 1);
+  const model2 = reportModel([
+    {
+      kind: 'quote',
+      replyContext: true,
+      replyDepth: 1,
+      author: { name: 'P', handle: '@p' },
+      sourceUrl: 'https://x.com/p/status/2111000000000000004',
+      blocks: [{ kind: 'paragraph', html: 'Parent' }],
+    },
+    { kind: 'paragraph', html: 'A reply' },
+  ]);
+  const md = engine.renderLlmMarkdown(model2);
+  assert.match(md, /- Embedded posts: 0 total/);
+  assert.match(md, /- Conversation context posts: 1/);
+  assert.equal(engine.archiveStats(model2).quoteCards, 0);
+});
+
+check('a missing avatar is a note, not a warning, on a COMPLETE capture', () => {
+  const model = reportModel([{ kind: 'paragraph', html: 'Text' }]);
+  model.author.avatarUrl = 'https://pbs.twimg.com/profile_images/1/a.jpg';
+  model.author.avatarFailed = true;
+  const md = engine.renderLlmMarkdown(model);
+  assert.match(md, /Status: COMPLETE/);
+  assert.match(md, /- Warnings:\n {2}- None/);
+  assert.match(mdSection(md, 'Capture Summary'), /- Notes:\n {2}- Main author avatar/);
+});
+
 await checkAsync('media byte fetch retries transient userscript request failures', async () => {
   let calls = 0;
   global.GM_xmlhttpRequest = (options) => {
