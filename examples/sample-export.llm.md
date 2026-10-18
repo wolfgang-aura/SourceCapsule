@@ -48,7 +48,6 @@ The media bytes are embedded (base64) inside the companion file sample-export.ht
   - Quoted post 8 was unavailable at export time.
   - Embedded Post 1 text may be truncated because only preview text may have been available at export time.
   - 6 item(s) were unavailable at export time.
-  - Video video-003 was detected, but the video file was not preserved offline. Only the poster and source link were preserved.
 - Notes:
   - Video video-003 was detected, but the video file was not preserved offline. Only the poster and source link were preserved.
   - 1 duplicate media hash group(s) were detected.

@@ -444,6 +444,26 @@ check('reply-context cards are conversation context, not embedded or gone quoted
   assert.equal(engine.archiveStats(model2).quoteCards, 0);
 });
 
+// Seen live on 1913214683064197567 (two GIFs kept as poster + link): each message was
+// printed under Warnings and again under Notes.
+check('a poster-only video is noted once, not also warned about', () => {
+  const model = reportModel([
+    { kind: 'paragraph', html: 'Text' },
+    {
+      kind: 'video',
+      _xaMediaId: 'video-001',
+      posterUrl: 'https://pbs.twimg.com/tweet_video_thumb/Go0amycbQAAkrZ0.jpg',
+      posterDataUri: 'data:image/jpeg;base64,AAAA',
+      sourceUrl: 'https://x.com/r/status/2111000000000000005',
+      mode: 'poster-only',
+    },
+  ]);
+  const md = engine.renderLlmMarkdown(model);
+  const summary = mdSection(md, 'Capture Summary');
+  assert.equal(summary.split('Video video-001 was detected').length - 1, 1);
+  assert.match(summary, /- Warnings:\n {2}- None/);
+});
+
 check('a missing avatar is a note, not a warning, on a COMPLETE capture', () => {
   const model = reportModel([{ kind: 'paragraph', html: 'Text' }]);
   model.author.avatarUrl = 'https://pbs.twimg.com/profile_images/1/a.jpg';

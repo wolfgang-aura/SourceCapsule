@@ -4835,7 +4835,9 @@
               : `Video ${item.id} bytes were captured but not saved in this Markdown-only export; only metadata is available here (no playable file, transcript, or visual description).`
         );
       } else {
-        warnings.push(
+        // Poster + link is an accepted outcome (archiveStats notes it); only a video with
+        // no poster is a warning. Same text either way, so it is listed once (#97).
+        (item.posterCaptured ? notes : warnings).push(
           `Video ${item.id} was detected, but the video file was not preserved offline. ${
             item.posterCaptured ? 'Only the poster' : 'No poster'
           } and ${item.sourceLinkPreserved ? 'source link were' : 'no source link was'} preserved.`
