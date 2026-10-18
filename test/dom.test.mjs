@@ -2727,7 +2727,7 @@ check('threads can carry multiple poll blocks through HTML, Markdown, and manife
 });
 
 await checkAsync(
-  'persistent receipt copies retained Markdown, preserves local success on share failure, and dismisses with Escape',
+  'persistent receipt copies a pasted-copy Markdown, preserves local success on share failure, and dismisses with Escape',
   async () => {
     const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
     let copied = '';
@@ -2761,7 +2761,6 @@ await checkAsync(
     engine.showCaptureReceipt({
       model: receiptModel,
       savedLocation: 'Library/2026-07-01/r-1',
-      markdown: 'retained clean markdown',
       onShare: async () => {
         throw new Error('network unavailable');
       },
@@ -2772,7 +2771,10 @@ await checkAsync(
     assert.match(receipt.querySelector('.xa-receipt-grid').textContent, /Polls captured1/);
     receipt.querySelector('.xa-receipt-copy').click();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(copied, 'retained clean markdown');
+    // Rendered for the clipboard at click time, not the library bundle text (#104).
+    assert.match(copied, /Saved text/);
+    assert.match(copied, /pasted copy/);
+    assert.doesNotMatch(copied, /media\/ folder/);
     receipt.querySelector('.xa-receipt-share').click();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.match(

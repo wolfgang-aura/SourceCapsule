@@ -4114,6 +4114,8 @@
           walk(b.blocks, depth + 1, inContext || !!b.replyContext);
         } else if (b.kind === 'blockquote') {
           walk(b.blocks, depth, inContext);
+        } else if (b.kind === 'link-card') {
+          if (b.url) stats.sourceLinks.add(b.url);
         }
       });
     };
@@ -4184,9 +4186,15 @@
       addNote('Some embedded media could not be content-hashed in this browser.');
     if (duplicateMedia.length)
       addNote(`${duplicateMedia.length} duplicate media hash group(s) were detected.`);
+    // The .md lists these and the HTML and manifest count them: one list, so the three
+    // never disagree (#104).
+    const sourceLinkUrls = Array.from(stats.sourceLinks).filter(
+      (url) => url && !String(url).startsWith('data:')
+    );
     return {
       ...stats,
-      sourceLinks: stats.sourceLinks.size,
+      sourceLinks: sourceLinkUrls.length,
+      sourceLinkUrls,
     };
   }
 
@@ -4656,38 +4664,6 @@
     return { total, direct, nested: total - direct, context };
   }
 
-  function collectLlmSourceLinks(model) {
-    const links = new Set();
-    const add = (url) => {
-      if (url && !String(url).startsWith('data:')) links.add(String(url));
-    };
-    add(model.sourceUrl);
-    const walk = (blocks) => {
-      (blocks || []).forEach((b) => {
-        if (b.kind === 'thread-marker') {
-          add(b.sourceUrl);
-        } else if (b.kind === 'link-card') {
-          add(b.url);
-        } else if (b.kind === 'paragraph') {
-          hrefsFromHtml(b.html).forEach(add);
-        } else if (b.kind === 'list') {
-          (b.items || []).forEach((item) => hrefsFromHtml(item).forEach(add));
-        } else if (b.kind === 'image') {
-          add(b.sourceUrl);
-        } else if (b.kind === 'video') {
-          add(b.sourceUrl);
-        } else if (b.kind === 'quote') {
-          add(b.sourceUrl);
-          walk(b.blocks);
-        } else if (b.kind === 'blockquote') {
-          walk(b.blocks);
-        }
-      });
-    };
-    walk(model.blocks);
-    return Array.from(links);
-  }
-
   function collectLlmMediaAttachments(model) {
     const attachments = new Map();
     const walk = (blocks, attachedTo) => {
@@ -4832,7 +4808,9 @@
             ? `Video ${item.id} full video is NOT included in this bundle (an LLM cannot watch video); ${posterPath ? `its poster frame is ${posterPath}` : 'no poster frame was captured'} and the source link is provided (no transcript or visual description).`
             : llmCompanionHtml
               ? `Video ${item.id} bytes are embedded in the companion file ${llmCompanionHtml}; this markdown holds only metadata (no video bytes, transcript, or visual description).`
-              : `Video ${item.id} bytes were captured but not saved in this Markdown-only export; only metadata is available here (no playable file, transcript, or visual description).`
+              : llmPastedCopy
+                ? `Video ${item.id} bytes are not in this pasted copy; only metadata is available here (no playable file, transcript, or visual description).`
+                : `Video ${item.id} bytes were captured but not saved in this Markdown-only export; only metadata is available here (no playable file, transcript, or visual description).`
         );
       } else {
         // Poster + link is an accepted outcome (archiveStats notes it); only a video with
@@ -4958,7 +4936,9 @@
       pieces.push(
         llmCompanionHtml
           ? `bytes embedded in companion file ${llmCompanionHtml}, not in this markdown`
-          : 'bytes captured but not saved in this Markdown-only export; metadata only'
+          : llmPastedCopy
+            ? 'bytes not in this pasted copy; metadata only'
+            : 'bytes captured but not saved in this Markdown-only export; metadata only'
       );
     else {
       pieces.push(
@@ -5222,7 +5202,7 @@
           'Bytes location',
           llmCompanionHtml
             ? `embedded in companion file ${llmCompanionHtml} (not in this markdown)`
-            : 'captured but not saved (Markdown-only export); metadata only'
+            : llmNotSavedHere()
         );
       } else {
         row('Video file MIME', 'unavailable');
@@ -5242,7 +5222,7 @@
             'Pixels location',
             llmCompanionHtml
               ? `embedded in companion file ${llmCompanionHtml} (not in this markdown)`
-              : 'captured but not saved (Markdown-only export); metadata only'
+              : llmNotSavedHere()
           );
       }
     }
@@ -5265,18 +5245,28 @@
   // Set per render for the "Save to library" bundle: Map<mediaId, "media/...">. When present, the
   // markdown references the real sidecar files. Precedence: mediaFiles > companionHtmlFilename > md.
   let llmMediaFiles = null;
+  // A clipboard copy (#104): no media/ folder or companion file travels with it, and the
+  // capture may have saved files elsewhere, so it must not claim a Markdown-only export.
+  let llmPastedCopy = false;
+
+  function llmNotSavedHere() {
+    return llmPastedCopy
+      ? 'not in this pasted copy; metadata only'
+      : 'captured but not saved (Markdown-only export); metadata only';
+  }
 
   function renderLlmMarkdown(model, debugJson = '', options = {}) {
     llmCompanionHtml = options.companionHtmlFilename || '';
     llmCompanionArchive = options.companionArchiveFilename || '';
     llmMediaFiles = options.mediaFiles instanceof Map ? options.mediaFiles : null;
+    llmPastedCopy = options.pastedCopy === true && !llmMediaFiles && !llmCompanionHtml;
     prepareArchiveModel(model);
     assignLlmQuoteNumbers(model);
     const documentLang = inferDocumentLang(model);
     const media = collectMediaManifest(model);
     const stats = archiveStats(model, media);
     const manifest = buildArchiveManifest(model, debugJson, stats, documentLang);
-    const links = collectLlmSourceLinks(model);
+    const links = stats.sourceLinkUrls;
     const share = options.share || null;
     const attachments = collectLlmMediaAttachments(model);
     const title = markdownLineText(model.heading || model.title || 'X Export');
@@ -5335,7 +5325,13 @@
           ? llmCompanionArchive
             ? `The media bytes are embedded (base64) inside the companion file ${llmCompanionHtml}, packaged together with this markdown inside ${llmCompanionArchive}. Extract both files before moving or sharing them so the pair stays together.`
             : `The media bytes are embedded (base64) inside the companion file ${llmCompanionHtml}, downloaded alongside this markdown. If you also have that file, the media is available there; if you only have this markdown, it is not.`
-          : 'This was a Markdown-only export, so the media bytes were not saved to any file. Only the metadata and the original source URLs below remain; use those URLs to retrieve the media from the source.';
+          : llmPastedCopy
+            ? `This is a pasted copy of the capture's Markdown, so it holds no media bytes.${
+                options.savedLocation
+                  ? ` Any media the capture saved is in its saved files (${markdownLineText(options.savedLocation)}).`
+                  : ''
+              } The original source URLs below point at the media on X.`
+            : 'This was a Markdown-only export, so the media bytes were not saved to any file. Only the metadata and the original source URLs below remain; use those URLs to retrieve the media from the source.';
     lines.push(
       'Capture note: This file preserves content visible to the logged-in user at export time. It may not include unavailable, private, deleted, failed, or unloaded content.',
       '',
@@ -6018,6 +6014,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     // that report completeness must assess this, not the local model. Non-enumerable so it
     // is never serialized with the link record.
     Object.defineProperty(created, 'sharedModel', { value: sharedModel, enumerable: false });
+    Object.defineProperty(created, 'publicMedia', { value: publicMedia, enumerable: false });
     return created;
   }
 
@@ -6915,6 +6912,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         : '';
     const receipt = document.querySelector('.xa-capture-receipt');
     if (receipt) {
+      // Copy for AI reads this, so a copy made after the share carries the link (#104).
+      receipt._xaShare = created;
       const verdictEl = receipt.querySelector('.xa-receipt-status');
       if (incompleteText && verdictEl) {
         verdictEl.classList.add('warning');
@@ -7352,7 +7351,6 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     model,
     debugJson = '',
     savedLocation = '',
-    markdown = '',
     videosPreservedOffline,
     onShare,
   }) {
@@ -7371,7 +7369,21 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     // a poster-only video is listed there but is not a gap.
     const gaps = captureVerdict(model);
     const complete = gaps.complete;
-    const retainedMarkdown = markdown || renderLlmMarkdown(model, debugJson);
+    const clipboardMarkdown = () => {
+      const created = backdrop._xaShare;
+      if (created && created.sharedModel && created.publicMedia) {
+        return renderLlmMarkdown(created.sharedModel, '', {
+          mediaFiles: created.publicMedia,
+          sharedLink: true,
+          share: shareMetadataFromCreated(created),
+        });
+      }
+      return renderLlmMarkdown(model, debugJson, {
+        pastedCopy: true,
+        savedLocation,
+        share: created ? shareMetadataFromCreated(created) : null,
+      });
+    };
     const backdrop = document.createElement('div');
     backdrop.className = 'xa-modal-backdrop xa-capture-receipt';
     backdrop.innerHTML = `<section class="xa-modal" role="dialog" aria-modal="true" aria-labelledby="xa-receipt-title"><h2 id="xa-receipt-title">Capture saved</h2>${
@@ -7414,7 +7426,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     done.addEventListener('click', close);
     backdrop.querySelector('.xa-receipt-copy').addEventListener('click', async () => {
       try {
-        await copyText(retainedMarkdown);
+        await copyText(clipboardMarkdown());
         setReceiptActionStatus('Clean Markdown copied for AI.');
       } catch (error) {
         setReceiptActionStatus(`Copy failed: ${error.message}`, { error: true });
@@ -12545,7 +12557,6 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           model,
           debugJson,
           savedLocation: saved.location,
-          markdown: saved.markdown,
           videosPreservedOffline: saved.videosPreservedOffline,
           onShare: () => shareFromReceipt(saved),
         });
@@ -12585,7 +12596,6 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           model,
           debugJson,
           savedLocation: saved.location,
-          markdown: saved.markdown,
           videosPreservedOffline: saved.videosPreservedOffline,
           onShare: () => shareFromReceipt(saved),
         });
@@ -12606,7 +12616,6 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const basename = `${slugify(model.title)}.${nowStamp()}`;
       const htmlFilename = `${basename}.html`;
       const saved = [];
-      let receiptMarkdown = '';
       if (outputType === 'both') {
         const html = assembleHtml(model, debugJson);
         const zipFilename = `${basename}.zip`;
@@ -12615,7 +12624,6 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           companionHtmlFilename: htmlFilename,
           companionArchiveFilename: zipFilename,
         });
-        receiptMarkdown = markdown;
         downloadBlob(
           zipFilename,
           new Blob(
@@ -12645,7 +12653,6 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         if (outputType === 'md') {
           // A Markdown-only export has no companion on disk, so it must not claim one.
           const markdown = renderLlmMarkdown(model, debugJson);
-          receiptMarkdown = markdown;
           const markdownFilename = `${basename}.llm.md`;
           downloadBlob(
             markdownFilename,
@@ -12655,12 +12662,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           log('markdown', markdownFilename, humanBytes(markdown.length));
         }
       }
-      if (!receiptMarkdown) receiptMarkdown = renderLlmMarkdown(model, debugJson);
       showCaptureReceipt({
         model,
         debugJson,
         savedLocation: saved.join(' and '),
-        markdown: receiptMarkdown,
         videosPreservedOffline:
           outputType === 'html' || outputType === 'both'
             ? archiveStats(model).videosPreservedOffline

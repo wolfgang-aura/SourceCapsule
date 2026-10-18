@@ -27,6 +27,10 @@ All notable changes to this project are documented here. The format is based on
 - A post or quote whose cross-check against X failed is named in the capture's notes. It
   used to look fully checked (#99).
 - Animated GIFs that scrolled out of the page are recovered like other media (#100).
+- **Copy for AI** copies Markdown that stands on its own. It no longer points at `media/` files
+  a paste doesn't carry, and once a link exists the copy includes it. The `.md`, HTML and
+  manifest now agree on the source-link count (#104).
+- A video kept as poster plus link is listed once, as a note, not also as a warning (#97).
 - An unattended capture that times out can no longer publish a capsule afterwards (#79).
 - `npm test` no longer writes fake capture replies into the real native-host log (#105).
 

@@ -35,7 +35,7 @@ The media bytes are embedded (base64) inside the companion file sample-export.ht
 - Video posters captured: 2
 - Video source links preserved: 5
 - Incomplete media: 3
-- Source links: 13
+- Source links: 14
 - Duplicate media groups: 1
 - Warnings:
   - Image image-002 was unavailable at export time.
@@ -321,13 +321,14 @@ Text:
 1. https://x.com/ada/article/12345
 2. https://example.com
 3. https://example.org/path
-4. https://x.com/ada/status/999
-5. https://x.com/ada/status/1000
-6. https://x.com/ada/status/deleted-video
-7. https://x.com/ada/status/1001
-8. https://x.com/ada/status/1002
-9. https://x.com/charles/status/42
-10. https://x.com/nested/status/43
-11. https://x.com/private/status/7
-12. https://x.com/deleted/status/8
-13. https://x.com/ada/status/1234567890
+4. https://x.com/ada/status/12345
+5. https://x.com/ada/status/999
+6. https://x.com/ada/status/1000
+7. https://x.com/ada/status/deleted-video
+8. https://x.com/ada/status/1001
+9. https://x.com/ada/status/1002
+10. https://x.com/charles/status/42
+11. https://x.com/nested/status/43
+12. https://x.com/private/status/7
+13. https://x.com/deleted/status/8
+14. https://x.com/ada/status/1234567890

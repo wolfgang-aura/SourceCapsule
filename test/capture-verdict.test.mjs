@@ -228,6 +228,80 @@ await check('an open receipt takes the shared copy verdict after a share', () =>
   receipt.remove();
 });
 
+// Copy for AI puts Markdown on a clipboard, where no media/ folder or companion file
+// travels with it (#104).
+let clipboard = '';
+Object.defineProperty(globalThis, 'navigator', {
+  configurable: true,
+  value: { clipboard: { writeText: async (text) => void (clipboard = text) } },
+});
+const copyFromReceipt = async () => {
+  clipboard = '';
+  document.querySelector('.xa-capture-receipt .xa-receipt-copy').click();
+  for (let i = 0; i < 20 && !clipboard; i += 1) await new Promise((r) => setTimeout(r, 5));
+  return clipboard;
+};
+const withImage = () =>
+  base([
+    { kind: 'paragraph', html: 'Main' },
+    {
+      kind: 'image',
+      src: 'https://pbs.twimg.com/media/A.jpg',
+      dataUri: 'data:image/png;base64,iVBORw0KGgo=',
+      sourceUrl: 'https://x.com/r/status/5',
+    },
+  ]);
+
+await check('Copy for AI copies a pasted copy, not the library bundle text', async () => {
+  engine.showCaptureReceipt({
+    model: withImage(),
+    savedLocation: 'Library/2026-07-01/r-5',
+    markdown: 'bundle markdown that names media/image-001.png',
+  });
+  const copied = await copyFromReceipt();
+  document.querySelector('.xa-capture-receipt').remove();
+  assert.ok(copied.includes('## Completeness'), 'a full capsule .md is copied');
+  assert.doesNotMatch(copied, /media\/ folder|media\/image-/, 'no files a paste does not carry');
+  assert.doesNotMatch(
+    copied,
+    /Markdown-only export/,
+    'a library save is not a Markdown-only export'
+  );
+  assert.match(copied, /pasted copy/i);
+  assert.ok(copied.includes('Library/2026-07-01/r-5'), 'it says where the saved files are');
+});
+
+await check('Copy for AI after a share carries the AI readable link', async () => {
+  const local = withImage();
+  engine.showCaptureReceipt({ model: local, savedLocation: 'x.zip' });
+  engine.showShareResult(
+    {
+      viewUrl: `${WORKER}/c/cap3`,
+      markdownUrl: `${WORKER}/c/cap3.md`,
+      expiresAt: '2026-08-08T12:00:00.000Z',
+      sharedModel: local,
+    },
+    { copied: true }
+  );
+  document.querySelector('.xa-share-result')?.remove();
+  const copied = await copyFromReceipt();
+  document.querySelector('.xa-capture-receipt').remove();
+  assert.ok(copied.includes(`AI readable link: ${WORKER}/c/cap3`), copied.slice(0, 600));
+});
+
+await check('the .md and the manifest count the same source links', () => {
+  const model = base([
+    { kind: 'paragraph', html: 'Main <a href="https://example.com/a">a</a>' },
+    { kind: 'link-card', url: 'https://example.com/card', title: 'Card', domain: 'example.com' },
+  ]);
+  const md = engine.renderLlmMarkdown(model);
+  const manifest = JSON.parse(engine.renderArchiveManifestJson(model));
+  const mdCount = Number((md.match(/^- Source links: (\d+)/m) || [])[1]);
+  const manifestCount = manifest.capture.sourceLinks;
+  assert.equal(mdCount, 3, md.match(/^- Source links.*$/m)?.[0]);
+  assert.equal(manifestCount, mdCount, 'the two files disagree on how many links they hold');
+});
+
 console.log('');
 if (failures) {
   console.error(`${failures} capture-verdict check(s) failed`);
