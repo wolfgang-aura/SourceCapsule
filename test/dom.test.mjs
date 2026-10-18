@@ -2617,7 +2617,10 @@ check('receipt expands honest incomplete-media details', () => {
     markdown: 'incomplete',
   });
   const receipt = document.querySelector('.xa-capture-receipt');
-  assert.match(receipt.querySelector('.xa-receipt-status').textContent, /missing/);
+  assert.match(
+    receipt.querySelector('.xa-receipt-status').textContent,
+    /Incomplete — Not captured: 1 image/
+  );
   assert.equal(receipt.querySelector('.xa-receipt-details').open, true);
   const style = document.getElementById('sourcecapsule-style').textContent;
   assert.match(style, /\.xa-modal\{[^}]*max-height:[^}]*overflow:auto/s);
@@ -3980,6 +3983,15 @@ await checkAsync(
       assert.doesNotMatch(note.notice, /no longer available/);
       assert.match(note.notice, /could not be fetched/);
       assert.match(note.notice, /@someone/);
+      // The surrounding copy must not contradict the notice (#25).
+      assert.doesNotMatch(engine.assembleHtml(model), /already gone on X/);
+      assert.doesNotMatch(engine.renderLlmMarkdown(model), /already unavailable/i);
+      // Nor may the counters behind the receipt and the CLI warning call it deleted.
+      assert.equal(engine.archiveStats(model).quoteTombstones, 0);
+      engine.showCaptureReceipt({ model, savedLocation: 'x.html', markdown: 'md' });
+      const receipt = document.querySelector('.xa-capture-receipt');
+      assert.doesNotMatch(receipt.textContent, /gone on X/);
+      receipt.remove();
     }
   }
 );
@@ -4001,6 +4013,106 @@ await checkAsync('reply context skips a parent already captured in the thread', 
     return { __typename: 'Tweet', text: 'post two', in_reply_to_status_id_str: '100' };
   });
   assert.ok(!model.blocks.some((b) => b.replyContext), 'no duplicate context card');
+});
+
+// #92: a reply deep in a conversation used to keep only its immediate parent.
+// 400 replies to 300, which replies to 200, which replies to 100 (the root).
+const conversationFetch =
+  (fail = {}) =>
+  async (id) => {
+    if (fail[id])
+      throw Object.assign(new Error(`syndication: HTTP ${fail[id]}`), { status: fail[id] });
+    const parent = { 400: '300', 300: '200', 200: '100' }[id];
+    return {
+      __typename: 'Tweet',
+      id_str: id,
+      text: `post ${id}`,
+      user: { name: `U${id}`, screen_name: `u${id}` },
+      ...(parent
+        ? { in_reply_to_status_id_str: parent, in_reply_to_screen_name: `u${parent}` }
+        : {}),
+    };
+  };
+const deepReply = () => ({
+  type: 'post',
+  author: { name: 'U400', handle: '@u400' },
+  sourceUrl: 'https://x.com/u400/status/400',
+  exportedAt: '2026-10-19T00:00:00Z',
+  blocks: [{ kind: 'paragraph', html: 'post 400' }],
+});
+
+await checkAsync('reply context walks the whole conversation above, oldest first', async () => {
+  const model = deepReply();
+  await engine.enrichReplyContextViaSyndication(model, null, conversationFetch());
+  const cards = model.blocks.filter((b) => b.replyContext);
+  assert.deepEqual(
+    cards.map((b) => b.sourceUrl),
+    [
+      'https://x.com/u100/status/100',
+      'https://x.com/u200/status/200',
+      'https://x.com/u300/status/300',
+    ]
+  );
+  assert.equal(model.blocks[3].kind, 'paragraph', 'the exported post follows its ancestors');
+  const html = engine.assembleHtml(model);
+  assert.equal((html.match(/Earlier in the conversation/g) || []).length, 2);
+  assert.equal((html.match(/In reply to/g) || []).length, 1, 'only the direct parent');
+  const md = engine.renderLlmMarkdown(model);
+  ['Reply Context Post 1', 'Reply Context Post 2', 'Reply Context Post 3'].forEach((label) =>
+    assert.ok(md.includes(label), label)
+  );
+  assert.match(md, /Status: COMPLETE/);
+});
+
+await checkAsync(
+  'reply context stops at the cap with a link onward, not a capture gap',
+  async () => {
+    const model = deepReply();
+    await engine.enrichReplyContextViaSyndication(model, null, conversationFetch(), {
+      maxDepth: 2,
+    });
+    assert.equal(model.blocks[0].kind, 'reply-context-note');
+    assert.deepEqual(
+      model.blocks.filter((b) => b.replyContext && b.kind === 'quote').map((b) => b.sourceUrl),
+      ['https://x.com/u200/status/200', 'https://x.com/u300/status/300']
+    );
+    const html = engine.assembleHtml(model);
+    assert.match(html, /x\.com\/i\/status\/100/, 'the note links to the next post up');
+    const md = engine.renderLlmMarkdown(model);
+    assert.match(md, /Earlier conversation/);
+    assert.match(md, /Status: COMPLETE/, 'context the post does not contain is not a gap');
+  }
+);
+
+await checkAsync('a failed fetch mid-conversation ends the walk honestly', async () => {
+  const model = deepReply();
+  await engine.enrichReplyContextViaSyndication(model, null, conversationFetch({ 200: 500 }));
+  assert.equal(model.blocks[0].kind, 'quote-tombstone');
+  assert.match(model.blocks[0].notice, /could not be fetched/);
+  assert.match(model.blocks[0].notice, /@u200/);
+  assert.equal(model.blocks[1].sourceUrl, 'https://x.com/u300/status/300');
+});
+
+await checkAsync('reply context sits right above the exported post inside a thread', async () => {
+  // The thread holds 200 and the exported post 400; 300 sits between them in the
+  // conversation, so its card belongs after post 200 and before 400.
+  const model = {
+    type: 'post',
+    sourceUrl: 'https://x.com/u400/status/400',
+    blocks: [
+      { kind: 'thread-marker', statusId: '200', sourceUrl: 'https://x.com/u200/status/200' },
+      { kind: 'paragraph', html: 'post 200' },
+      { kind: 'thread-marker', statusId: '400', sourceUrl: 'https://x.com/u400/status/400' },
+      { kind: 'paragraph', html: 'post 400' },
+    ],
+    thread: { capturedPosts: 2 },
+  };
+  await engine.enrichReplyContextViaSyndication(model, null, conversationFetch());
+  assert.deepEqual(
+    model.blocks.map((b) => b.statusId || (b.replyContext && b.sourceUrl) || b.html),
+    ['200', 'post 200', 'https://x.com/u300/status/300', '400', 'post 400'],
+    'the 300 card must come after post 200, which it replies to'
+  );
 });
 
 check('extension controller accepts the replyContext preference', () => {
