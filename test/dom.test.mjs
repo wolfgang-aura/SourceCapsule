@@ -3083,6 +3083,33 @@ await checkAsync(
   }
 );
 
+await checkAsync('recovered media and links go above the post’s quote card (#88)', async () => {
+  const model = {
+    type: 'post',
+    sourceUrl: 'https://x.com/a/status/556',
+    blocks: [
+      { kind: 'paragraph', html: 'post text' },
+      {
+        kind: 'quote',
+        author: { handle: '@q' },
+        sourceUrl: 'https://x.com/q/status/557',
+        blocks: [{ kind: 'paragraph', html: 'quoted' }],
+      },
+    ],
+  };
+  await engine.enrichFocusedPostViaSyndication(model, null, async () => ({
+    __typename: 'Tweet',
+    text: 'post text',
+    entities: { urls: [{ url: 'https://t.co/x', expanded_url: 'https://example.com/a' }] },
+    mediaDetails: [{ type: 'photo', media_url_https: 'https://pbs.twimg.com/media/BELOW.jpg' }],
+  }));
+  assert.deepEqual(
+    model.blocks.map((b) => b.kind),
+    ['paragraph', 'image', 'link-card', 'quote'],
+    'X order: text, media, card, then the quote'
+  );
+});
+
 await checkAsync(
   'focused-post syndication rebuilds a quote card the DOM never mounted',
   async () => {

@@ -122,6 +122,16 @@ function findBlock(blocks, kind) {
   assert.match(md, /- Embedded posts: 6 total/);
   const html = engine.assembleHtml(model);
   assert.equal((html.match(/class="[^"]*xa-nested-tweet-card/g) || []).length, 5, 'nested cards');
+  // Each card's permalink sits in its own header, above what it quotes (#89). In a footer
+  // they came out innermost first, stacked below the whole chain.
+  const links = [...html.matchAll(/class="xa-quote-link" href="[^"]*\/status\/(\d+)"/g)].map(
+    (m) => m[1]
+  );
+  assert.deepEqual(
+    links,
+    CHAIN.map((link) => link.id),
+    'quote permalinks read top-down, outermost first'
+  );
 }
 
 // 2. Past the hop cap: a visible note, a receipt that is not COMPLETE, and no blocker.

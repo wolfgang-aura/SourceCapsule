@@ -222,7 +222,7 @@ async function main() {
     exts.includes(PINNED_ID),
     exts.replace(/\n/g, ' | ')
   );
-  check('extension reports v1.6.11 Enabled', /v1\.6\.11 .*Enabled|Enabled .*v1\.6\.11/.test(exts));
+  check('extension reports v1.6.12 Enabled', /v1\.6\.12 .*Enabled|Enabled .*v1\.6\.12/.test(exts));
 
   const pages0 = await listPages();
   const mainId = Number(pages0.find((p) => !p.isSw).id);
