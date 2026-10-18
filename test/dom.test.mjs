@@ -2617,7 +2617,10 @@ check('receipt expands honest incomplete-media details', () => {
     markdown: 'incomplete',
   });
   const receipt = document.querySelector('.xa-capture-receipt');
-  assert.match(receipt.querySelector('.xa-receipt-status').textContent, /missing/);
+  assert.match(
+    receipt.querySelector('.xa-receipt-status').textContent,
+    /Incomplete — Not captured: 1 image/
+  );
   assert.equal(receipt.querySelector('.xa-receipt-details').open, true);
   const style = document.getElementById('sourcecapsule-style').textContent;
   assert.match(style, /\.xa-modal\{[^}]*max-height:[^}]*overflow:auto/s);

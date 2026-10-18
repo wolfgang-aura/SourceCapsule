@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- The unattended `complete` field and the in-page receipt now give the same verdict as the
+  capsule's `Status:` line. Both used to say complete for a capsule holding truncated long-form
+  text or a missing quoted post, and the receipt flagged poster-only videos the capsule accepts (#91).
+
 ## [1.6.12] - 2026-10-18
 
 ### Fixed

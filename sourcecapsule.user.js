@@ -4773,6 +4773,13 @@
     return { complete: !parts.length, summary: parts.join(' ') };
   }
 
+  // The one completeness verdict (#91): what the capsule's `Status:` line says. The receipt
+  // modal and the unattended result report this too, so neither can call a capsule complete
+  // that calls itself incomplete. Strict assessment is the export gate, not this.
+  function captureVerdict(model) {
+    return captureGaps(model, archiveStats(model));
+  }
+
   function renderCompletenessBanner(gaps) {
     if (gaps.complete) return '';
     return `<aside class="xa-completeness" role="note" aria-label="Incomplete capture"><strong>Incomplete capture</strong><p>${escapeHtml(
@@ -5967,25 +5974,23 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       }
       const { created, model } = result;
       const stats = archiveStats(model);
-      // `complete` must describe the capsule that was uploaded, which the shared .md
-      // reports on too, not the richer local model.
-      const assessment = assessExportCompleteness(created.sharedModel || model);
+      // `complete` is the uploaded capsule's own Status line (#91), so it is judged on the
+      // shared copy a recipient sees, not the richer local model. The strict assessment
+      // already gated the export; it is not a verdict on what the capsule holds.
+      const verdict = captureVerdict(created.sharedModel || model);
       const warnings = [];
-      if (assessment.verdict !== 'clean' && created.sharedModel) {
-        const localVerdict = assessExportCompleteness(model).verdict;
-        if (localVerdict === 'clean') {
+      if (!verdict.complete) {
+        warnings.push(`capsule status INCOMPLETE: ${verdict.summary}`);
+        if (created.sharedModel && captureVerdict(model).complete) {
           warnings.push(
             'the shared copy is missing media the local capture holds (see shared .md)'
           );
         }
       }
-      if (stats.missingMedia) warnings.push(`${stats.missingMedia} media item(s) missing`);
       if (stats.incompleteMedia)
         warnings.push(`${stats.incompleteMedia} media item(s) incomplete (poster or link only)`);
       if (stats.quoteTombstones)
         warnings.push(`${stats.quoteTombstones} quoted post(s) deleted on X`);
-      if (stats.quoteChainsUnfollowed)
-        warnings.push(`${stats.quoteChainsUnfollowed} quote chain(s) not followed to the end`);
       if (networkCaptureDiagnostics.interestingResponses === 0)
         warnings.push('no passive GraphQL capture was observed for this page');
       // Thread scope was requested. Say plainly how much of the thread came back, and
@@ -6001,7 +6006,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
         viewUrl: created.viewUrl,
         markdownUrl: created.markdownUrl,
         expiresAt: created.expiresAt,
-        complete: assessment.verdict === 'clean',
+        complete: verdict.complete,
         capturedPosts,
         conversation,
         warnings,
@@ -7165,8 +7170,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const savedOfflineVideos = Number.isFinite(videosPreservedOffline)
       ? videosPreservedOffline
       : stats.videosPreservedOffline;
-    const complete =
-      stats.missingMedia === 0 && stats.incompleteMedia === 0 && !stats.quoteChainsUnfollowed;
+    // Same verdict as the capsule's Status line (#91). The media rows above stay as detail:
+    // a poster-only video is listed there but is not a gap.
+    const gaps = captureVerdict(model);
+    const complete = gaps.complete;
     const retainedMarkdown = markdown || renderLlmMarkdown(model, debugJson);
     const backdrop = document.createElement('div');
     backdrop.className = 'xa-modal-backdrop xa-capture-receipt';
@@ -7184,16 +7191,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         : ''
     }</dl><p class="xa-receipt-status ${complete ? '' : 'warning'}">${
       complete
-        ? `Complete — no missing media detected${
+        ? `Complete — no capture gaps detected${
             stats.quoteTombstones
               ? `; ${stats.quoteTombstones} quoted post(s) already gone on X`
               : ''
           }`
-        : `${stats.missingMedia} missing and ${stats.incompleteMedia} incomplete item(s)${
-            stats.quoteChainsUnfollowed
-              ? `; ${stats.quoteChainsUnfollowed} quote chain(s) not followed to the end`
-              : ''
-          }`
+        : `Incomplete — ${escapeHtml(gaps.summary)}`
     }</p><details class="xa-receipt-details" ${complete ? '' : 'open'}><summary>Capture details</summary><ul>${
       stats.warnings.length
         ? stats.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')

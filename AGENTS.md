@@ -227,6 +227,10 @@ the finished AI readable link as JSON, with no clicks, prompts, or clipboard use
   syndication layers that answer 404 (authoritative in both, so no recovery can succeed).
 - **stdout is a contract.** `formatResult` allowlists the published fields so transport
   details (the correlation id) can never leak into what another program parses.
+- **`complete` is the capsule's own `Status:` line** (`captureVerdict`, #91), judged on the
+  shared copy. It is not the strict assessment: that only gates the export, and on the `ok: true`
+  path it is always clean. The receipt modal uses the same verdict, so no surface can call a
+  capsule complete that calls itself INCOMPLETE.
 - If the bridge reports `Specified native messaging host not found`, the usual cause is that
   the extension is not actually running, not a bad registration. Launching the browser with
   `--load-extension=dist/sourcecapsule-extension` is the reliable fix.
