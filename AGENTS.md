@@ -54,6 +54,15 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
    lazily-lost image that never produced a DOM block is still recovered. Successful
    payloads are cached per export (`syndicationSuccessCache`; failures never cached), and
    replies prepend their parent post via `enrichReplyContextViaSyndication` (pref-gated).
+   **Quote chains** (#85): a payload carries ONE level of `quoted_tweet`, and the nested object
+   has no id for the next hop, so `followQuoteChainsViaSyndication` fetches every leaf quote by
+   id and appends its `quoted_tweet` until a post quotes nothing. It runs last in the syndication
+   block and before `inlineMedia`. Cap: `CONFIG.quoteChainMaxDepth` (8 levels below the main
+   post); a cycle stops silently, and reply-context cards are not followed. A chain past the cap,
+   or a non-404 failure, leaves a `quote-chain-note` that makes the receipt INCOMPLETE; a 404
+   leaves a `quote-tombstone` (`chainEnd`). Neither is a strict-mode blocker, since a deeper hop
+   is only discoverable by fetching and a blocker would turn unattended captures into
+   `needs_owner`. The leaf's own blocks are never replaced, so DOM-only polls and cards survive.
 4. **Ship-blocker layer** (strict export): `assessExportCompleteness(model)` walks the
    fully-recovered model and returns any dead-end the reader would see (missing quote
    permalinks, uncaptured quote content, failed images, videos with no bytes or poster).

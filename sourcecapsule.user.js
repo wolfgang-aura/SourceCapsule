@@ -200,6 +200,11 @@
     // to get its authoritative text + media, instead of scraping the fragile,
     // virtualized article DOM. This is what makes quote media reliably correct.
     useSyndication: true,
+    // Quote levels below the main post that followQuoteChainsViaSyndication will fetch.
+    // Each syndication payload carries one level of quoted_tweet, so every hop past the
+    // second costs one request. A chain that goes deeper gets an honest note and makes
+    // the receipt INCOMPLETE; it is never a strict-mode blocker.
+    quoteChainMaxDepth: 8,
     share: {
       // Hosted share service (Cloudflare Worker + R2). Point this at a local
       // `npm run dev:share` (http://127.0.0.1:8787) through the userscript-manager
@@ -3686,7 +3691,23 @@
         }</p>`;
       case 'note-recovered':
         return `<p class="xa-note-recovered" data-xa-note-recovered="1">&#10003; Long-form post &mdash; the full text above was recovered from data X delivered to this browser while the page was open.</p>`;
+      case 'quote-chain-note': {
+        const href = safeUrl(b.nextId ? `https://x.com/i/status/${b.nextId}` : b.sourceUrl);
+        return `<p class="xa-truncated xa-quote-chain-note" ${renderAttrs({
+          'data-xa-quote-chain': b.reason,
+          'data-xa-source-post-id': b.statusId,
+        })}>&#9888; ${escapeHtml(quoteChainNoteText(b))}${
+          href
+            ? ` <a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">Continue on X &rarr;</a>`
+            : ''
+        }</p>`;
+      }
       case 'quote-tombstone': {
+        if (b.chainEnd) {
+          return `<p class="xa-truncated xa-quote-chain-end" data-xa-missing-type="quoted-post-tombstone">${escapeHtml(
+            b.notice || ''
+          )}</p>`;
+        }
         const label = b.replyContext
           ? 'Replied-to post unavailable on X'
           : 'Quoted post unavailable on X';
@@ -3830,6 +3851,7 @@
       recoveredNotes: 0,
       quoteCards: 0,
       quoteTombstones: 0,
+      quoteChainsUnfollowed: 0,
       renderedTweetCards: 0,
       images: 0,
       videos: 0,
@@ -3901,10 +3923,16 @@
           addNote(
             b.replyContext
               ? 'The post this reply answers was already unavailable on X at capture time. Nothing was capturable.'
-              : `A quoted post was already unavailable on X at capture time (${
-                  b.notice || 'This Post is unavailable.'
-                }). Nothing was capturable.`
+              : b.chainEnd
+                ? `${b.notice} Nothing further was capturable.`
+                : `A quoted post was already unavailable on X at capture time (${
+                    b.notice || 'This Post is unavailable.'
+                  }). Nothing was capturable.`
           );
+        } else if (b.kind === 'quote-chain-note') {
+          // A real gap: posts deeper in the chain exist (or may exist) and are not here.
+          stats.quoteChainsUnfollowed += 1;
+          stats.warnings.push(quoteChainNoteText(b));
         } else if (b.kind === 'image') {
           stats.images += 1;
           markMediaUrl(b.url);
@@ -4316,6 +4344,7 @@
         polls: stats.polls,
         recoveredLongFormNotes: stats.recoveredNotes,
         quoteCards: stats.quoteCards,
+        quoteChainsUnfollowed: stats.quoteChainsUnfollowed,
         renderedTweetCards: stats.renderedTweetCards,
         images: stats.images,
         videos: stats.videos,
@@ -4350,6 +4379,9 @@
       row('Main text', stats.mainTextCaptured ? 'Captured' : 'Not detected'),
       row('Embedded posts', stats.quoteCards),
       ...(stats.quoteTombstones ? [row('Quoted posts gone on X', stats.quoteTombstones)] : []),
+      ...(stats.quoteChainsUnfollowed
+        ? [row('Quote chains not followed to the end', stats.quoteChainsUnfollowed)]
+        : []),
       row('Polls', stats.polls),
       row('Images', stats.images),
       row('Videos found', stats.videos),
@@ -4711,6 +4743,10 @@
     const truncatedMain = (model.blocks || []).filter((b) => b.kind === 'truncation-notice').length;
     const parts = [];
     if (missing.length) parts.push(`Not captured: ${missing.join(', ')}.`);
+    if (stats.quoteChainsUnfollowed)
+      parts.push(
+        `Quote chain cut short: ${plural(stats.quoteChainsUnfollowed, 'chain was', 'chains were')} not followed to the end, so deeper quoted posts may be missing.`
+      );
     if (truncatedMain)
       parts.push(
         `Possibly truncated: ${plural(truncatedMain, 'main post', 'main posts')} (only preview text was available).`
@@ -4858,6 +4894,10 @@
           pollLines.push('- Results were unavailable at capture time; no values were inferred.');
         if (b.sourceUrl) pollLines.push(`- Source: ${b.sourceUrl}`);
         lines.push(pollLines.join('\n'));
+      } else if (b.kind === 'quote-chain-note') {
+        lines.push(`Warning: ${quoteChainNoteText(b)}`);
+      } else if (b.kind === 'quote-tombstone' && b.chainEnd) {
+        lines.push(`Note: ${markdownLineText(b.notice || '')}`);
       } else if (b.kind === 'quote-tombstone') {
         lines.push(
           b.replyContext
@@ -5507,7 +5547,8 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
 .xa-disclaimer{font-size:12px;opacity:.85}
 .xa-install-cta{display:flex;flex-direction:column;align-items:flex-start;gap:4px;margin-top:18px;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--card)}
 .xa-install-cta strong{color:var(--fg)}.xa-install-cta a{margin-top:4px;font-weight:700}
-@media (max-width:520px){.xa-doc{padding:24px 14px 64px}.xa-capture dl{grid-template-columns:1fr}.xa-body{font-size:17px}.xa-title{font-size:26px}}
+@media (max-width:520px){.xa-doc{padding:24px 14px 64px}.xa-capture dl{grid-template-columns:1fr}.xa-body{font-size:17px}.xa-title{font-size:26px}
+.xa-nested-tweet-card{margin:1em 0 0;padding:2px 0 2px 12px;border-width:0 0 0 2px;border-radius:0;background:transparent}}
 @media print{
   :root{--bg:#fff;--fg:#000;--muted:#444;--line:#bbb;--card:#fff;--accent:#000;--quoteline:#999}
   body{background:#fff;color:#000}
@@ -5926,6 +5967,8 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
         warnings.push(`${stats.incompleteMedia} media item(s) incomplete (poster or link only)`);
       if (stats.quoteTombstones)
         warnings.push(`${stats.quoteTombstones} quoted post(s) deleted on X`);
+      if (stats.quoteChainsUnfollowed)
+        warnings.push(`${stats.quoteChainsUnfollowed} quote chain(s) not followed to the end`);
       if (networkCaptureDiagnostics.interestingResponses === 0)
         warnings.push('no passive GraphQL capture was observed for this page');
       // Thread scope was requested. Say plainly how much of the thread came back, and
@@ -7105,7 +7148,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const savedOfflineVideos = Number.isFinite(videosPreservedOffline)
       ? videosPreservedOffline
       : stats.videosPreservedOffline;
-    const complete = stats.missingMedia === 0 && stats.incompleteMedia === 0;
+    const complete =
+      stats.missingMedia === 0 && stats.incompleteMedia === 0 && !stats.quoteChainsUnfollowed;
     const retainedMarkdown = markdown || renderLlmMarkdown(model, debugJson);
     const backdrop = document.createElement('div');
     backdrop.className = 'xa-modal-backdrop xa-capture-receipt';
@@ -7117,6 +7161,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       stats.quoteTombstones
         ? `<dt>Quoted posts gone on X</dt><dd>${stats.quoteTombstones}</dd>`
         : ''
+    }${
+      stats.quoteChainsUnfollowed
+        ? `<dt>Quote chains cut short</dt><dd>${stats.quoteChainsUnfollowed}</dd>`
+        : ''
     }</dl><p class="xa-receipt-status ${complete ? '' : 'warning'}">${
       complete
         ? `Complete — no missing media detected${
@@ -7124,7 +7172,11 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
               ? `; ${stats.quoteTombstones} quoted post(s) already gone on X`
               : ''
           }`
-        : `${stats.missingMedia} missing and ${stats.incompleteMedia} incomplete item(s)`
+        : `${stats.missingMedia} missing and ${stats.incompleteMedia} incomplete item(s)${
+            stats.quoteChainsUnfollowed
+              ? `; ${stats.quoteChainsUnfollowed} quote chain(s) not followed to the end`
+              : ''
+          }`
     }</p><details class="xa-receipt-details" ${complete ? '' : 'open'}><summary>Capture details</summary><ul>${
       stats.warnings.length
         ? stats.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join('')
@@ -9106,6 +9158,138 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     }
     onProgress && onProgress(1, 1);
     return model;
+  }
+
+  /**
+   * Follow quote chains past the two levels the DOM and one syndication payload give
+   * us (#85). A payload carries exactly one level of quoted_tweet, and that nested object
+   * has no id for the hop after it, so the only way down a chain is to fetch each leaf
+   * quote by id. Walks every quote (top level, thread segments, blockquotes) and, for each
+   * leaf with a canonical permalink, appends its payload's quoted_tweet as a nested quote
+   * until a post quotes nothing.
+   *
+   * A leaf's own blocks are never replaced, so DOM-only polls and cards survive. Gaps are
+   * honest but never strict-mode blockers: a deeper hop is only discoverable by fetching,
+   * and a new blocker class would turn unattended captures into needs_owner.
+   *   - past `maxDepth` levels below the main post, or a non-404 failure: a
+   *     `quote-chain-note`, counted so the receipt stops saying COMPLETE;
+   *   - a 404 on the leaf, or a tombstoned quoted_tweet: a `quote-tombstone`.
+   * A cycle stops silently, since the post is already shown above it. Reply-context cards
+   * are not followed: they are context for the exported post, not part of what it quotes.
+   * Must run before inlineMedia so the new cards' media and avatars are inlined.
+   */
+  async function followQuoteChainsViaSyndication(
+    model,
+    onProgress,
+    fetchTweet = fetchTweetSyndication,
+    { maxDepth = CONFIG.quoteChainMaxDepth, lookupNote = getCapturedNoteTweet } = {}
+  ) {
+    if (!model || !Array.isArray(model.blocks)) return model;
+    const ends = new Set(['quote', 'quote-tombstone', 'quote-chain-note']);
+    const rootId = statusIdFromUrl(model.sourceUrl);
+    const leaves = [];
+    let segmentId = rootId;
+    const collect = (blocks, depth, path) => {
+      (blocks || []).forEach((b) => {
+        if (b.kind === 'thread-marker' && depth === 0) {
+          segmentId = b.statusId || rootId;
+        } else if (b.kind === 'blockquote') {
+          collect(b.blocks, depth, path);
+        } else if (b.kind === 'quote' && !b.replyContext) {
+          const id = statusIdFromUrl(b.sourceUrl);
+          const chainPath = (depth === 0 ? [rootId, segmentId] : path).concat(id ? [id] : []);
+          if ((b.blocks || []).some((child) => ends.has(child.kind))) {
+            collect(b.blocks, depth + 1, chainPath);
+          } else if (id && b.blocks && b.blocks.length) {
+            leaves.push({ quote: b, depth: depth + 1, path: chainPath });
+          }
+        }
+      });
+    };
+    collect(model.blocks, 0, []);
+
+    let done = 0;
+    let total = leaves.length;
+    let followed = 0;
+    onProgress && onProgress(0, total);
+    while (leaves.length) {
+      const { quote, depth, path } = leaves.shift();
+      const id = statusIdFromUrl(quote.sourceUrl);
+      try {
+        const data = await fetchTweet(id);
+        const qt = data && data.quoted_tweet;
+        const nextId = qt ? String(qt.id_str || data.quoted_status_id_str || '') : '';
+        if (!qt || (nextId && path.includes(nextId))) {
+          // The chain ends here, or loops back to a post already shown above.
+        } else if (depth >= maxDepth) {
+          quote.blocks.push({
+            kind: 'quote-chain-note',
+            reason: 'cap',
+            statusId: id,
+            nextId,
+            limit: maxDepth,
+            sourceUrl: quote.sourceUrl,
+          });
+        } else if (!qt.user || qt.__typename === 'TweetTombstone') {
+          const tombstoneText = qt.tombstone && qt.tombstone.text && qt.tombstone.text.text;
+          quote.blocks.push({
+            kind: 'quote-tombstone',
+            notice: tombstoneText || 'This Post is unavailable.',
+            sourceUrl: quote.sourceUrl,
+          });
+        } else {
+          const child = syndicationToQuoteBlock(qt);
+          if (!statusIdFromUrl(child.sourceUrl)) {
+            child.sourceUrl =
+              nextId && qt.user.screen_name
+                ? `https://x.com/${qt.user.screen_name}/status/${nextId}`
+                : '';
+          }
+          if (child.truncated) recoverQuoteNoteText(child, lookupNote(nextId));
+          quote.blocks.push(child);
+          followed += 1;
+          if (statusIdFromUrl(child.sourceUrl)) {
+            leaves.push({ quote: child, depth: depth + 1, path: path.concat([nextId]) });
+            total += 1;
+          }
+        }
+      } catch (e) {
+        if (e && e.status === 404) {
+          // X says this post is gone, so whatever it quotes cannot be reached through it.
+          // Its text above came from the parent's payload and stays.
+          quote.blocks.push({
+            kind: 'quote-tombstone',
+            chainEnd: true,
+            notice: `Post ${id} is no longer available on X, so any post it quotes could not be followed.`,
+            sourceUrl: quote.sourceUrl,
+          });
+        } else {
+          warn('quote chain fetch failed for', id, '-', e && e.message);
+          quote.blocks.push({
+            kind: 'quote-chain-note',
+            reason: 'error',
+            statusId: id,
+            error: String((e && e.message) || 'fetch failed'),
+            sourceUrl: quote.sourceUrl,
+          });
+        }
+      }
+      done += 1;
+      onProgress && onProgress(done, total);
+    }
+    if (followed) log(`quote chain pass: followed ${followed} deeper quote level(s)`);
+    return model;
+  }
+
+  /** Reader-facing text for a quote chain the export stopped following. */
+  function quoteChainNoteText(b) {
+    return b.reason === 'cap'
+      ? `Quote chain not followed past ${b.statusId}: this post quotes another post${
+          b.nextId ? ` (${b.nextId})` : ''
+        }, and the export stops after ${b.limit || CONFIG.quoteChainMaxDepth} levels of quotes.`
+      : `Quote chain not followed past ${b.statusId}: X did not answer (${
+          b.error || 'fetch failed'
+        }), so it is unknown whether this post quotes another one.`;
   }
 
   // On-page UI strings — kept in sync with popup.js STRINGS (zh subset).
@@ -11782,6 +11966,13 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             showToast('Fetching reply context...', { sticky: true })
           );
         }
+        // After every quote is rebuilt and before inlineMedia, so deeper levels'
+        // media is inlined like any other block.
+        await followQuoteChainsViaSyndication(model, (done, total) =>
+          showToast(total ? `Following quote chains... ${done}/${total}` : 'Reading page...', {
+            sticky: true,
+          })
+        );
         log('model after syndication', model);
       }
 
@@ -12833,6 +13024,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       enrichThreadViaSyndication,
       enrichFocusedPostViaSyndication,
       enrichReplyContextViaSyndication,
+      followQuoteChainsViaSyndication,
       repairExportBlockers,
       runWithConcurrency,
       inlineMedia,
