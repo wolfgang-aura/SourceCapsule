@@ -4802,7 +4802,11 @@
 
   function isPossiblyTruncatedPost(block) {
     if (!block || !block.blocks || !block.blocks.length) return false;
-    const text = markdownPlainText(llmPostText(block));
+    // Only the post's own words: a poll, link card or nested quote below them is not
+    // where its text ends, and a poll's "counts as of … UTC" line read as cut off (#94).
+    const own = block.blocks.filter((b) => ['paragraph', 'heading', 'list'].includes(b.kind));
+    if (!own.length) return false;
+    const text = markdownPlainText(llmPostText({ blocks: own }));
     const compact = text.replace(/\s+/g, ' ').trim();
     if (compact.length < 80) return false;
     if (/[0-9]+[.)\u3001]$/.test(compact)) return true;

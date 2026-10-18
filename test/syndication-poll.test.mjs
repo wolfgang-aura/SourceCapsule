@@ -185,6 +185,26 @@ await check('a focused post whose poll never reached the DOM gets it back', asyn
   assert.equal(model.blocks.filter((b) => b.kind === 'poll').length, 1);
 });
 
+// Seen live on 2111862427415650671 as a reply-context card: the poll's own lines ("…UTC")
+// were read as the end of the post's text, and the card was flagged as possibly truncated.
+await check('a poll under a finished sentence does not make the post look truncated', () => {
+  const quote = engine.syndicationToQuoteBlock({
+    ...pollTweet(),
+    text:
+      'As my 10k swing account challenge comes to an end here soon hitting $20,000; I will be ' +
+      'doing the challenge account again for a third time. Like and vote below or comment an idea!',
+  });
+  const model = {
+    type: 'post',
+    title: 'Poll context',
+    author: { name: 'M', handle: '@m' },
+    sourceUrl: 'https://x.com/m/status/2111862427415651000',
+    exportedAt: '2026-10-19T00:00:00Z',
+    blocks: [{ kind: 'paragraph', html: 'Main' }, quote],
+  };
+  assert.match(engine.renderLlmMarkdown(model), /Status: COMPLETE/);
+});
+
 console.log('');
 if (failures) {
   console.error(`${failures} syndication-poll check(s) failed`);
