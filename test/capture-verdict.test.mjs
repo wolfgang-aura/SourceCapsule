@@ -289,6 +289,30 @@ await check('Copy for AI after a share carries the AI readable link', async () =
   assert.ok(copied.includes(`AI readable link: ${WORKER}/c/cap3`), copied.slice(0, 600));
 });
 
+await check('Copy for AI after a real share copies the shared capsule Markdown', async () => {
+  const local = withImage();
+  engine.showCaptureReceipt({ model: local, savedLocation: 'x.zip' });
+  // Shaped like createShareLink's result: both extras are non-enumerable.
+  const mediaUrl = `${WORKER}/c/cap4/media/image-001.png`;
+  const created = {
+    viewUrl: `${WORKER}/c/cap4`,
+    markdownUrl: `${WORKER}/c/cap4.md`,
+    expiresAt: '2026-08-08T12:00:00.000Z',
+  };
+  Object.defineProperty(created, 'sharedModel', { value: withImage(), enumerable: false });
+  Object.defineProperty(created, 'publicMedia', {
+    value: new Map([['image-001', mediaUrl]]),
+    enumerable: false,
+  });
+  engine.showShareResult(created, { copied: true });
+  document.querySelector('.xa-share-result')?.remove();
+  const copied = await copyFromReceipt();
+  document.querySelector('.xa-capture-receipt').remove();
+  assert.ok(copied.includes(`AI readable link: ${WORKER}/c/cap4`), 'the link is in the copy');
+  assert.ok(copied.includes(mediaUrl), 'media points at the hosted copy');
+  assert.doesNotMatch(copied, /pasted copy/i);
+});
+
 await check('the .md and the manifest count the same source links', () => {
   const model = base([
     { kind: 'paragraph', html: 'Main <a href="https://example.com/a">a</a>' },
