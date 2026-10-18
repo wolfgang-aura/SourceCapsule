@@ -205,6 +205,10 @@
     // second costs one request. A chain that goes deeper gets an honest note and makes
     // the receipt INCOMPLETE; it is never a strict-mode blocker.
     quoteChainMaxDepth: 8,
+    // Posts above a reply that enrichReplyContextViaSyndication will fetch, one request each
+    // (#92). Past it the export links onward to X. Ancestors are context the post does not
+    // contain, so stopping here is a note, never a capture gap.
+    replyContextMaxDepth: 8,
     share: {
       // Hosted share service (Cloudflare Worker + R2). Point this at a local
       // `npm run dev:share` (http://127.0.0.1:8787) through the userscript-manager
@@ -3708,6 +3712,14 @@
             b.notice || ''
           )}</p>`;
         }
+        if (b.replyContext && b.fetchFailed) {
+          return `<article class="xa-missing xa-quote-missing" ${renderAttrs({
+            'data-xa-missing-type': 'reply-context-unfetched',
+            'data-xa-reply-context': '1',
+          })}><strong>Earlier post not fetched</strong><span>${escapeHtml(
+            b.notice || ''
+          )}</span><span>X did not answer when this was saved. The post may still exist; open the reply on X to read the conversation.</span></article>`;
+        }
         const label = b.replyContext
           ? 'Replied-to post unavailable on X'
           : 'Quoted post unavailable on X';
@@ -3718,6 +3730,16 @@
           'data-xa-missing-type': 'quoted-post-tombstone',
           'data-xa-reply-context': b.replyContext ? '1' : '',
         })}><strong>${label}</strong><span>${detail}</span><span>The post was already gone on X at capture time (deleted, suspended, or restricted account) &mdash; there was nothing to capture.</span></article>`;
+      }
+      case 'reply-context-note': {
+        const href = safeUrl(b.statusId ? `https://x.com/i/status/${b.statusId}` : '');
+        return `<p class="xa-truncated xa-reply-context-note" data-xa-reply-context="1">${escapeHtml(
+          replyContextNoteText(b)
+        )}${
+          href
+            ? ` <a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">Continue on X &rarr;</a>`
+            : ''
+        }</p>`;
       }
       case 'code':
         return `<pre class="xa-code"><code>${escapeHtml(b.text)}</code></pre>`;
@@ -3792,7 +3814,12 @@
             : 'xa-tweet-card xa-quote') + (b.replyContext ? ' xa-reply-context' : '');
         // Reply context reads top-down: label the card so the reader knows the
         // exported post ANSWERS this one (not the usual embedded-quote relation).
-        const replyLabel = b.replyContext ? '<p class="xa-reply-label">In reply to</p>' : '';
+        // Only the direct parent is "In reply to"; older ancestors read as the thread above it.
+        const replyLabel = b.replyContext
+          ? `<p class="xa-reply-label">${
+              b.replyDepth > 1 ? 'Earlier in the conversation' : 'In reply to'
+            }</p>`
+          : '';
         // The permalink and time sit under the author, above anything this post quotes
         // (#89). In a footer they rendered after the nested cards, so a chain ended in a
         // stack of "View on X" links that only indentation told apart.
@@ -3934,13 +3961,20 @@
           stats.quoteTombstones += 1;
           addNote(
             b.replyContext
-              ? 'The post this reply answers was already unavailable on X at capture time. Nothing was capturable.'
+              ? b.fetchFailed
+                ? b.notice
+                : b.replyDepth > 1
+                  ? `${b.notice} Nothing further up was capturable.`
+                  : 'The post this reply answers was already unavailable on X at capture time. Nothing was capturable.'
               : b.chainEnd
                 ? `${b.notice} Nothing further was capturable.`
                 : `A quoted post was already unavailable on X at capture time (${
                     b.notice || 'This Post is unavailable.'
                   }). Nothing was capturable.`
           );
+        } else if (b.kind === 'reply-context-note') {
+          // Context the exported post does not hold: informational, never a gap.
+          addNote(replyContextNoteText(b));
         } else if (b.kind === 'quote-chain-note') {
           // A real gap: posts deeper in the chain exist (or may exist) and are not here.
           stats.quoteChainsUnfollowed += 1;
@@ -4920,6 +4954,20 @@
         lines.push(`Warning: ${quoteChainNoteText(b)}`);
       } else if (b.kind === 'quote-tombstone' && b.chainEnd) {
         lines.push(`Note: ${markdownLineText(b.notice || '')}`);
+      } else if (b.kind === 'reply-context-note') {
+        lines.push(`Note: ${replyContextNoteText(b)}`);
+      } else if (
+        b.kind === 'quote-tombstone' &&
+        b.replyContext &&
+        (b.fetchFailed || b.replyDepth > 1)
+      ) {
+        lines.push(
+          `Note: ${markdownLineText(b.notice || '')}${
+            b.fetchFailed
+              ? ' X did not answer when this was saved, so the post may still exist; this is a fetch failure, not a deleted post.'
+              : ' No content exists to include; this is not a capture failure.'
+          }`
+        );
       } else if (b.kind === 'quote-tombstone') {
         lines.push(
           b.replyContext
@@ -4970,7 +5018,12 @@
   function renderLlmPost(block, level = 3) {
     const lines = [markdownHeading(level, quoteLabel(block))];
     if (block.replyContext) {
-      lines.push('', 'This is the post the exported post was replying to (conversation context).');
+      lines.push(
+        '',
+        block.replyDepth > 1
+          ? `This post is earlier in the conversation, ${block.replyDepth} replies above the exported post (conversation context).`
+          : 'This is the post the exported post was replying to (conversation context).'
+      );
     }
     const postId = statusIdFromSourceUrl(block.sourceUrl);
     const author = block.author || {};
@@ -9104,92 +9157,132 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   }
 
   /**
-   * If the exported post is a reply, prepend the post it replies to as a
-   * labelled "In reply to" context card - a reply archived alone often loses
-   * its meaning. Applies to the model's ROOT post only (thread continuations
-   * reply to their own previous posts, which the thread capture already holds).
-   * A parent that is gone on X gets an honest reply-context tombstone note,
-   * never a strict-gate blocker. Controlled by the `replyContext` pref
-   * (default on); the root fetch is served from the per-export syndication
-   * cache, so this usually costs one extra request (the parent) at most.
+   * If the exported post is a reply, prepend the conversation above it as labelled context
+   * cards, oldest first: a reply archived alone often loses its meaning. Each syndication
+   * payload names only its own parent, so the walk costs one request per ancestor (#92).
+   * Applies to the model's ROOT post only (thread continuations reply to their own previous
+   * posts, which the thread capture already holds), and stops at an ancestor the thread
+   * already captured. A post that is gone on X, or that could not be fetched, ends the walk
+   * with an honest reply-context tombstone. Past `maxDepth` a `reply-context-note` links
+   * onward to X. None of these is a capture gap or a strict-gate blocker: the ancestors are
+   * context, not content the post holds. Controlled by the `replyContext` pref (default on).
    */
   async function enrichReplyContextViaSyndication(
     model,
     onProgress,
-    fetchTweet = fetchTweetSyndication
+    fetchTweet = fetchTweetSyndication,
+    { maxDepth = CONFIG.replyContextMaxDepth } = {}
   ) {
     if (!model || model.type !== 'post' || !Array.isArray(model.blocks)) return model;
     if (
       model.blocks.some(
-        (b) => (b.kind === 'quote' || b.kind === 'quote-tombstone') && b.replyContext
+        (b) =>
+          (b.kind === 'quote' || b.kind === 'quote-tombstone' || b.kind === 'reply-context-note') &&
+          b.replyContext
       )
     ) {
       return model;
     }
     const rootId = statusIdFromUrl(model.sourceUrl);
     if (!rootId) return model;
+    // A same-author thread export may already contain an ancestor as a captured post;
+    // prepending it again would duplicate content.
+    const capturedIds = new Set(
+      model.blocks.filter((b) => b.kind === 'thread-marker').map((b) => b.statusId)
+    );
+    const nextHop = (data) => {
+      const inline = data && data.parent && data.parent.id_str ? data.parent : null;
+      return {
+        id: String((data && data.in_reply_to_status_id_str) || (inline && inline.id_str) || ''),
+        handle:
+          (data && data.in_reply_to_screen_name) ||
+          (inline && inline.user && inline.user.screen_name) ||
+          '',
+        inline,
+      };
+    };
+    const ancestors = []; // nearest first
     onProgress && onProgress(0, 1);
     try {
-      const data = await fetchTweet(rootId);
-      const inlineParent = data && data.parent && data.parent.id_str ? data.parent : null;
-      const parentId =
-        (data && data.in_reply_to_status_id_str) || (inlineParent && inlineParent.id_str) || '';
-      if (!parentId) return model;
-      // A same-author thread export may already contain the parent as a
-      // captured post - prepending it again would duplicate content.
-      const capturedIds = new Set(
-        model.blocks.filter((b) => b.kind === 'thread-marker').map((b) => b.statusId)
-      );
-      if (capturedIds.has(parentId)) return model;
-      const parentHandle =
-        (data && data.in_reply_to_screen_name) ||
-        (inlineParent && inlineParent.user && inlineParent.user.screen_name) ||
-        '';
-      let parentData = null;
-      // Only a 404 is X saying the parent is gone. Any other failure (5xx,
-      // timeout, network) says nothing about the parent, so it must not be
-      // reported as deleted.
-      let parentFetchInconclusive = false;
-      try {
-        // Full fetch first: the inline `parent` payload is a slimmer shape that
-        // can lack media; fall back to it only when the id fetch fails.
-        parentData = await fetchTweet(parentId);
-      } catch (e) {
-        warn('reply-context parent fetch failed for', parentId, '-', e.message);
-        parentData = inlineParent;
-        parentFetchInconclusive = !(e && e.status === 404);
-      }
-      if (
-        parentData &&
-        parentData.user &&
-        (parentData.__typename === 'Tweet' || parentData.text != null)
-      ) {
-        const card = syndicationToQuoteBlock(parentData);
-        card.replyContext = true;
-        if (!statusIdFromUrl(card.sourceUrl) && parentHandle) {
-          card.sourceUrl = `https://x.com/${parentHandle}/status/${parentId}`;
+      let hop = nextHop(await fetchTweet(rootId));
+      const seen = new Set([rootId]);
+      while (hop.id && !seen.has(hop.id) && !capturedIds.has(hop.id)) {
+        if (ancestors.length >= maxDepth) {
+          ancestors.push({
+            kind: 'reply-context-note',
+            replyContext: true,
+            statusId: hop.id,
+            handle: hop.handle,
+            limit: maxDepth,
+          });
+          break;
         }
-        if (card.truncated) recoverQuoteNoteText(card, getCapturedNoteTweet(parentId));
-        model.blocks.unshift(card);
-        log('reply context: prepended parent post', parentId);
-      } else {
-        // We KNOW it is a reply (X said so). Say "gone" only when X answered
-        // 404; otherwise be honest that the parent just could not be fetched.
-        const who = parentHandle ? `a post by @${parentHandle}` : 'a post';
-        model.blocks.unshift({
-          kind: 'quote-tombstone',
-          replyContext: true,
-          notice: parentFetchInconclusive
-            ? `This post replies to ${who}, but that post could not be fetched when this was saved.`
-            : `This post replies to ${who} that is no longer available on X.`,
-          sourceUrl: model.sourceUrl,
-        });
+        seen.add(hop.id);
+        const depth = ancestors.length + 1;
+        let parentData = null;
+        // Only a 404 is X saying the post is gone. Any other failure (5xx, timeout,
+        // network) says nothing about it, so it must not be reported as deleted.
+        let fetchInconclusive = false;
+        try {
+          // Full fetch first: the inline `parent` payload is a slimmer shape that can lack
+          // media; fall back to it only when the id fetch fails.
+          parentData = await fetchTweet(hop.id);
+        } catch (e) {
+          warn('reply-context fetch failed for', hop.id, '-', e.message);
+          parentData = hop.inline;
+          fetchInconclusive = !(e && e.status === 404);
+        }
+        if (
+          parentData &&
+          parentData.user &&
+          (parentData.__typename === 'Tweet' || parentData.text != null)
+        ) {
+          const card = syndicationToQuoteBlock(parentData);
+          card.replyContext = true;
+          card.replyDepth = depth;
+          if (!statusIdFromUrl(card.sourceUrl) && hop.handle) {
+            card.sourceUrl = `https://x.com/${hop.handle}/status/${hop.id}`;
+          }
+          if (card.truncated) recoverQuoteNoteText(card, getCapturedNoteTweet(hop.id));
+          ancestors.push(card);
+          hop = nextHop(parentData);
+        } else {
+          // We KNOW there is a post here (X named it). Say "gone" only when X answered
+          // 404; otherwise be honest that it just could not be fetched.
+          const who = hop.handle ? `a post by @${hop.handle}` : 'a post';
+          const subject =
+            depth === 1 ? 'This post replies to' : 'The conversation above continues with';
+          ancestors.push({
+            kind: 'quote-tombstone',
+            replyContext: true,
+            replyDepth: depth,
+            fetchFailed: fetchInconclusive,
+            notice: fetchInconclusive
+              ? `${subject} ${who}, but that post could not be fetched when this was saved.`
+              : `${subject} ${who} that is no longer available on X.`,
+            sourceUrl: model.sourceUrl,
+          });
+          break;
+        }
       }
     } catch (e) {
       warn('reply-context check failed for', rootId, '-', e.message);
     }
+    if (ancestors.length) {
+      model.blocks.unshift(...ancestors.reverse());
+      log(`reply context: prepended ${ancestors.length} post(s) from the conversation above`);
+    }
     onProgress && onProgress(1, 1);
     return model;
+  }
+
+  /** Reader-facing text for a conversation the reply-context walk stopped climbing. */
+  function replyContextNoteText(b) {
+    return `Earlier conversation not included: this export keeps the ${
+      b.limit || CONFIG.replyContextMaxDepth
+    } posts directly above the reply. The conversation continues with ${
+      b.handle ? `a post by @${b.handle}` : 'another post'
+    }${b.statusId ? ` (${b.statusId})` : ''}.`;
   }
 
   /**

@@ -53,7 +53,7 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
    `enrichFocusedPostViaSyndication` (both share `applySyndicationDataToSegment`), so a
    lazily-lost image that never produced a DOM block is still recovered. Successful
    payloads are cached per export (`syndicationSuccessCache`; failures never cached), and
-   replies prepend their parent post via `enrichReplyContextViaSyndication` (pref-gated).
+   replies prepend the conversation above them via `enrichReplyContextViaSyndication` (pref-gated).
    **Quote chains** (#85): a payload carries ONE level of `quoted_tweet`, and the nested object
    has no id for the next hop, so `followQuoteChainsViaSyndication` fetches every leaf quote by
    id and appends its `quoted_tweet` until a post quotes nothing. It runs last in the syndication
@@ -117,9 +117,13 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
   `replyContext` bool) live in `localStorage`. Toggled via userscript-manager
   **menu commands** (`registerSettingsMenu`) OR the MV3 popup — no in-app panel.
   `strictExport` defaults on; when on, the ship-blocker layer runs before assembly.
-  `replyContext` defaults on; when on, a reply export prepends the replied-to post as a
-  labelled context card (`enrichReplyContextViaSyndication`; honest tombstone note when
-  the parent is gone on X, skipped when the parent is already a captured thread post).
+  `replyContext` defaults on; when on, a reply export prepends the conversation above it,
+  oldest first, as labelled context cards (`enrichReplyContextViaSyndication`, #92). A payload
+  names only its own parent, so the walk is one fetch per ancestor, capped at
+  `CONFIG.replyContextMaxDepth` (8); past it a `reply-context-note` links onward to X. It stops
+  at an ancestor that is already a captured thread post. A 404 ends it with a "gone on X"
+  tombstone; any other failure ends it with a `fetchFailed` tombstone that never claims the
+  post is gone (#25). None of these is a capture gap: ancestors are context, not content.
 - Status-page quick save captures the visible same-author thread by default. It progressively
   scrolls from the top and keeps cloned tweet nodes so X virtualization does not erase earlier
   posts. Capture remains best-effort and is labelled as such. Every focused-post button also

@@ -11,6 +11,10 @@ All notable changes to this project are documented here. The format is based on
 - The unattended `complete` field and the in-page receipt now give the same verdict as the
   capsule's `Status:` line. Both used to say complete for a capsule holding truncated long-form
   text or a missing quoted post, and the receipt flagged poster-only videos the capsule accepts (#91).
+- A reply deeper in a conversation now carries every post above it as context, oldest first,
+  up to 8 posts, instead of only the post it answers. Past that, a note links onward to X (#92).
+- A reply-context post that could not be fetched no longer renders as "already gone on X"; that
+  copy is kept for a real 404 (#25).
 
 ## [1.6.12] - 2026-10-18
 
