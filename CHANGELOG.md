@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.11] - 2026-10-18
+
+### Fixed
+
+- Quote chains deeper than two levels are followed to the end, up to 8 levels below the main
+  post. Each hop costs one syndication request. A chain cut short by the cap or a failed
+  request leaves a visible note and the receipt no longer says COMPLETE (#85).
+
 ## [1.6.10] - 2026-10-08
 
 ### Fixed
