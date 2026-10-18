@@ -235,4 +235,43 @@ function findBlock(blocks, kind) {
   );
 }
 
+// 7. A level built from its parent's nested quoted_tweet has no `card` or `note_tweet`:
+// real payloads drop both there. The leaf's own by-id payload, already fetched to find the
+// next hop, supplies its poll and long-form flag (#94).
+{
+  const model = domModel();
+  const B = CHAIN[1];
+  const s = (value) => ({ string_value: value, type: 'STRING' });
+  const { fetchTweet } = stubFetch({
+    [B.id]: () => ({
+      ...tweet(1),
+      note_tweet: { id: 'note-b' },
+      card: {
+        name: 'poll2choice_text_only',
+        binding_values: {
+          choice1_label: s('Up'),
+          choice1_count: s('3'),
+          choice2_label: s('Down'),
+          choice2_count: s('1'),
+          counts_are_final: { boolean_value: true, type: 'BOOLEAN' },
+        },
+      },
+    }),
+  });
+  const lookupNote = (id) => (id === B.id ? { text: 'Post B full long-form text' } : null);
+  await engine.followQuoteChainsViaSyndication(model, null, fetchTweet, { lookupNote });
+  const quoteB = model.blocks[1].blocks.find((b) => b.kind === 'quote');
+  assert.equal(quoteB.sourceUrl.split('/').pop(), B.id);
+  const poll = quoteB.blocks.find((b) => b.kind === 'poll');
+  assert.ok(poll, 'level B keeps the poll its own payload carries');
+  assert.equal(poll.choices[0].percentage, '75%');
+  assert.equal(quoteB.noteRecovered, true, 'level B gets its full long-form text');
+  assert.match(engine.renderLlmMarkdown(model), /Post B full long-form text/);
+  assert.deepEqual(
+    chainIds(model),
+    CHAIN.map((link) => link.id),
+    'the chain still continues'
+  );
+}
+
 console.log('quote-chain test passed');

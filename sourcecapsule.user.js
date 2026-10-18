@@ -9415,6 +9415,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const id = statusIdFromUrl(quote.sourceUrl);
       try {
         const data = await fetchTweet(id);
+        applyLeafPayloadToQuote(quote, data, lookupNote(id));
         const qt = data && data.quoted_tweet;
         const nextId = qt ? String(qt.id_str || data.quoted_status_id_str || '') : '';
         if (!qt || (nextId && path.includes(nextId))) {
@@ -9477,6 +9478,27 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     }
     if (followed) log(`quote chain pass: followed ${followed} deeper quote level(s)`);
     return model;
+  }
+
+  /**
+   * A quote built from its parent's nested quoted_tweet lacks `card` and `note_tweet`:
+   * real payloads drop both at that level. The leaf's own by-id payload, already fetched
+   * to find the next hop, supplies its poll and its long-form flag (#94).
+   */
+  function applyLeafPayloadToQuote(quote, data, note) {
+    if (!quote || !data) return;
+    const payloadPoll = syndicationPollBlock(data, quote.sourceUrl);
+    if (payloadPoll) {
+      const at = (quote.blocks || []).findIndex((b) => b.kind === 'poll');
+      if (at < 0) quote.blocks.push(payloadPoll);
+      else if (quote.blocks[at].resultsUnavailable && !payloadPoll.resultsUnavailable) {
+        quote.blocks[at] = payloadPoll;
+      }
+    }
+    if (data.note_tweet && !quote.truncated && !quote.noteRecovered) {
+      quote.truncated = true;
+      recoverQuoteNoteText(quote, note);
+    }
   }
 
   /** Reader-facing text for a quote chain the export stopped following. */
