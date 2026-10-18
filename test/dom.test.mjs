@@ -4246,6 +4246,42 @@ await checkAsync(
   }
 );
 
+// #99: a post whose syndication cross-check failed used to leave no trace, though that
+// check is what recovers media and quotes that never mounted in the DOM.
+await checkAsync('a failed syndication cross-check is a note in the capture', async () => {
+  const fail = (status) => async () => {
+    throw Object.assign(new Error(`syndication: HTTP ${status}`), { status });
+  };
+  const focused = deepReply();
+  await engine.enrichFocusedPostViaSyndication(focused, null, fail(429), () => null);
+  let md = engine.renderLlmMarkdown(focused);
+  assert.match(md, /Status: COMPLETE/, 'unverified is not the same as missing');
+  assert.match(
+    mdSection(md, 'Capture Summary'),
+    /post 400.*X did not answer \(syndication: HTTP 429\)/i
+  );
+
+  const thread = {
+    ...deepReply(),
+    blocks: [
+      { kind: 'thread-marker', statusId: '300', sourceUrl: 'https://x.com/u400/status/300' },
+      { kind: 'paragraph', html: 'post 300' },
+      { kind: 'thread-marker', statusId: '400', sourceUrl: 'https://x.com/u400/status/400' },
+      { kind: 'paragraph', html: 'post 400' },
+    ],
+    thread: { capturedPosts: 2 },
+  };
+  await engine.enrichThreadViaSyndication(
+    thread,
+    null,
+    async (id) => (id === '300' ? fail(404)() : conversationFetch()(id)),
+    () => null
+  );
+  md = engine.renderLlmMarkdown(thread);
+  assert.match(mdSection(md, 'Capture Summary'), /post 300.*not available/i);
+  assert.doesNotMatch(mdSection(md, 'Capture Summary'), /post 400 could not/i);
+});
+
 await checkAsync('reply context sits right above the exported post inside a thread', async () => {
   // The thread holds 200 and the exported post 400; 300 sits between them in the
   // conversation, so its card belongs after post 200 and before 400.

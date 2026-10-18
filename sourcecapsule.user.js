@@ -4176,6 +4176,7 @@
     stats.incompleteMedia = stats.incomplete.filter((record) => record.type === 'video').length;
     const unavailable = stats.missing.filter((record) => record.type !== 'avatar').length;
     if (unavailable) stats.warnings.push(`${unavailable} item(s) were unavailable at export time.`);
+    (model.syndicationUnchecked || []).forEach((item) => addNote(syndicationUncheckedText(item)));
     if (media.some((item) => item.embedded && !item.sha256))
       addNote('Some embedded media could not be content-hashed in this browser.');
     if (duplicateMedia.length)
@@ -9295,6 +9296,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         }
       } catch (e) {
         warn('thread syndication check failed for post', marker.statusId, '-', e.message);
+        recordSyndicationUnchecked(model, marker.statusId, e);
       }
       done++;
       onProgress && onProgress(done, markers.length);
@@ -9324,6 +9326,29 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * are skipped (their body has no tweet syndication payload); failures keep
    * the DOM capture as-is.
    */
+  /**
+   * The per-post syndication check is what recovers media, link cards and quotes that never
+   * mounted in the DOM, and flags long-form previews. When it fails, the capture is
+   * unverified, not known to be missing anything, so it is a note, never a gap or a strict
+   * blocker: under a 429 every unattended capture would become needs_owner (#99).
+   */
+  function recordSyndicationUnchecked(model, statusId, error) {
+    if (!model || !statusId) return;
+    const list = model.syndicationUnchecked || (model.syndicationUnchecked = []);
+    if (list.some((item) => item.statusId === String(statusId))) return;
+    list.push({
+      statusId: String(statusId),
+      status: (error && error.status) || 0,
+      error: String((error && error.message) || 'fetch failed'),
+    });
+  }
+
+  function syndicationUncheckedText(item) {
+    return item.status === 404
+      ? `X's public copy of post ${item.statusId} is not available (protected or removed), so media or quotes that never loaded on the page could not be recovered from it.`
+      : `Post ${item.statusId} could not be cross-checked: X did not answer (${item.error}), so media or quotes that never loaded on the page may be missing.`;
+  }
+
   async function enrichFocusedPostViaSyndication(
     model,
     onProgress,
@@ -9354,6 +9379,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       }
     } catch (e) {
       warn('post syndication check failed for', statusId, '-', e.message);
+      recordSyndicationUnchecked(model, statusId, e);
     }
     onProgress && onProgress(1, 1);
     return model;
