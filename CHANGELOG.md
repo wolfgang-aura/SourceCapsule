@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.12] - 2026-10-18
+
+### Fixed
+
+- A post's own images and link cards render above its quoted post again. Media recovered
+  through syndication used to land after the quote card, below the whole quote chain (#88).
+- Each quote card shows its time and View on X link under its author, naming the handle.
+  They used to sit in a footer after the nested quotes, so a deep chain ended in a stack of
+  identical links (#89).
+
 ## [1.6.11] - 2026-10-18
 
 ### Fixed
