@@ -3769,9 +3769,9 @@
         // back to the author's profile so the reader never sees a dead-end card.
         const quoteLinkHref = quoteSourceHref || authorHref;
         const quoteLinkLabel = quoteSourceHref
-          ? 'View on X &rarr;'
+          ? 'View on X &nearr;'
           : b.author && b.author.handle
-            ? `View ${escapeHtml(b.author.handle)} on X &rarr;`
+            ? `View ${escapeHtml(b.author.handle)} on X &nearr;`
             : '';
         if (!b.blocks || !b.blocks.length) {
           return `<article class="xa-missing xa-quote-missing" ${renderAttrs({
@@ -3793,15 +3793,37 @@
         // Reply context reads top-down: label the card so the reader knows the
         // exported post ANSWERS this one (not the usual embedded-quote relation).
         const replyLabel = b.replyContext ? '<p class="xa-reply-label">In reply to</p>' : '';
+        // The permalink and time sit under the author, above anything this post quotes
+        // (#89). In a footer they rendered after the nested cards, so a chain ended in a
+        // stack of "View on X" links that only indentation told apart.
+        const quoteTime = safeIsoTime(b.publishedAt);
+        const meta = [
+          quoteLinkHref
+            ? `<a class="xa-quote-link" href="${escapeHtml(quoteLinkHref)}" target="_blank" rel="noopener">${quoteLinkLabel}</a>`
+            : '',
+          quoteTime
+            ? `<time class="xa-quote-time" datetime="${escapeAttr(quoteTime)}">${escapeHtml(
+                readableUtcTime(b.publishedAt)
+              )}</time>`
+            : '',
+        ].filter(Boolean);
+        // The long-form notice describes this post's text, so it goes before a nested quote.
+        const nestedAt = (b.blocks || []).findIndex(
+          (child) => child.kind === 'quote' || child.kind === 'quote-tombstone'
+        );
+        const ownBlocks = nestedAt < 0 ? b.blocks || [] : b.blocks.slice(0, nestedAt);
+        const nestedBlocks = nestedAt < 0 ? [] : b.blocks.slice(nestedAt);
         return `${replyLabel}<article class="${className}" ${renderAttrs({
           'data-xa-post-id': sourcePostId,
           'data-xa-source-url': b.sourceUrl,
           'data-xa-source-fallback': quoteSourceHref ? '' : authorHref ? 'author-profile' : '',
-          'data-xa-published-at': safeIsoTime(b.publishedAt),
+          'data-xa-published-at': quoteTime,
           'data-xa-reply-context': b.replyContext ? '1' : '',
-        })}>${renderAuthorLine(b.author)}<div class="xa-quote-body">${
-          b.blocks ? renderBlocks(b.blocks, qctx) : ''
-        }</div>${
+        })}>${renderAuthorLine(b.author)}${
+          meta.length
+            ? `<p class="xa-quote-meta">${meta.join('<span aria-hidden="true">&middot;</span>')}</p>`
+            : ''
+        }<div class="xa-quote-body">${renderBlocks(ownBlocks, qctx)}${
           b.truncated
             ? `<p class="xa-truncated" data-xa-truncated="1">&#9888; Long-form post &mdash; only the preview above was available at export; X did not expose the full text.${
                 quoteLinkHref
@@ -3813,17 +3835,7 @@
             : b.noteRecovered
               ? `<p class="xa-note-recovered" data-xa-note-recovered="1">&#10003; Long-form post &mdash; full text recovered from data X delivered to this browser.</p>`
               : ''
-        }${
-          safeIsoTime(b.publishedAt)
-            ? `<time class="xa-quote-time" datetime="${escapeAttr(safeIsoTime(b.publishedAt))}">${escapeHtml(
-                readableUtcTime(b.publishedAt)
-              )}</time>`
-            : ''
-        }${
-          quoteLinkHref
-            ? `<a class="xa-quote-link" href="${escapeHtml(quoteLinkHref)}" target="_blank" rel="noopener">${quoteLinkLabel}</a>`
-            : ''
-        }</article>`;
+        }${renderBlocks(nestedBlocks, qctx)}</div></article>`;
       }
       default:
         return '';
@@ -5510,19 +5522,21 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
 .xa-video figcaption,.xa-video-fallback figcaption{font-size:13px;color:var(--muted);margin-top:6px}
 .xa-quote{border:1px solid var(--quoteline);border-radius:16px;padding:14px 16px;background:var(--card);margin:1.4em 0}
 .xa-nested-tweet-card{margin-left:12px}
+.xa-quote-body>.xa-quote:last-child{margin-bottom:0}
 .xa-quote .xa-author{font-size:14px}
 .xa-quote .xa-avatar{width:24px;height:24px}
 .xa-quote-body{font-size:16px}
 .xa-quote-body .xa-media{margin:.85em 0}
 .xa-quote-body .xa-media-single img,.xa-quote-body .xa-gallery{border-radius:12px}
 .xa-quote-body figure video{border-radius:12px}
-.xa-quote-link{display:inline-block;margin-top:6px;font-size:14px;color:var(--accent);text-decoration:none}
+.xa-quote-meta{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 6px;margin:-2px 0 10px;font-size:13px;color:var(--muted)}
+.xa-quote-link{color:var(--accent);text-decoration:none}
 .xa-truncated{margin:8px 0 0;padding:8px 10px;border-radius:8px;font-size:13px;line-height:1.4;
   background:rgba(255,180,0,.12);border:1px solid rgba(255,180,0,.35);color:var(--fg)}
 .xa-truncated a{color:var(--accent);text-decoration:none}
 .xa-note-recovered{margin:8px 0 0;padding:8px 10px;border-radius:8px;font-size:13px;line-height:1.4;
   background:rgba(0,186,124,.10);border:1px solid rgba(0,186,124,.35);color:var(--fg)}
-.xa-quote-time{display:block;margin-top:8px;font-size:13px;color:var(--muted)}
+.xa-quote-time{color:var(--muted)}
 .xa-card-link{display:flex;flex-direction:column;gap:2px;margin:10px 0;padding:10px 14px;
   border:1px solid var(--quoteline);border-radius:12px;background:var(--card);text-decoration:none;color:var(--fg)}
 .xa-card-link:hover{border-color:var(--accent)}
@@ -8955,7 +8969,19 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       while (insertAt > index + 1 && model.blocks[insertAt - 1].kind === 'truncation-notice') {
         insertAt--;
       }
-      model.blocks.splice(insertAt, 0, ...additions);
+      // X lays a post out as text, media, card, then the quoted post (#88). A rebuilt
+      // quote card goes last; everything else goes above the post's first quote.
+      const quoteAdditions = additions.filter((b) => b.kind === 'quote');
+      const otherAdditions = additions.filter((b) => b.kind !== 'quote');
+      model.blocks.splice(insertAt, 0, ...quoteAdditions);
+      let firstQuote = insertAt;
+      for (let j = index + 1; j < insertAt + quoteAdditions.length; j++) {
+        if (model.blocks[j].kind === 'quote' || model.blocks[j].kind === 'quote-tombstone') {
+          firstQuote = j;
+          break;
+        }
+      }
+      model.blocks.splice(firstQuote, 0, ...otherAdditions);
     }
     return { recovered, recoveredQuote, truncatedPost, recoveredNote };
   }
