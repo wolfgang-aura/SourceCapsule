@@ -1982,6 +1982,69 @@ check('mediaKeyFromUrl canonicalizes DOM and syndication URL shapes to one key',
   assert.equal(engine.mediaKeyFromUrl('https://pbs.twimg.com/profile_images/1/a.jpg'), '');
 });
 
+// #100: real GIF URLs (from 2110683893837799707) carry an alphanumeric key, not digits.
+check('a GIF poster and its MP4 share one media key', () => {
+  const poster = engine.mediaKeyFromUrl(
+    'https://pbs.twimg.com/tweet_video_thumb/HUqnzksX0AAofGB.jpg'
+  );
+  assert.equal(poster, 'gif:HUqnzksX0AAofGB');
+  assert.equal(
+    engine.mediaKeyFromUrl('https://video.twimg.com/tweet_video/HUqnzksX0AAofGB.mp4'),
+    poster
+  );
+});
+
+await checkAsync('a GIF that never mounted is recovered from syndication, once', async () => {
+  const gif = {
+    type: 'animated_gif',
+    media_url_https: 'https://pbs.twimg.com/tweet_video_thumb/HUqnzksX0AAofGB.jpg',
+    original_info: { width: 480, height: 270 },
+    video_info: {
+      variants: [
+        {
+          bitrate: 0,
+          content_type: 'video/mp4',
+          url: 'https://video.twimg.com/tweet_video/HUqnzksX0AAofGB.mp4',
+        },
+      ],
+    },
+  };
+  const payload = {
+    __typename: 'Tweet',
+    id_str: '2110683893837799707',
+    text: 'me when',
+    user: { name: 'G', screen_name: 'g' },
+    mediaDetails: [gif],
+  };
+  const post = (blocks) => ({
+    type: 'post',
+    sourceUrl: 'https://x.com/g/status/2110683893837799707',
+    blocks: [{ kind: 'paragraph', html: 'me when' }, ...blocks],
+  });
+  const lost = post([]);
+  await engine.enrichFocusedPostViaSyndication(
+    lost,
+    null,
+    async () => payload,
+    () => null
+  );
+  assert.equal(lost.blocks.filter((b) => b.kind === 'video').length, 1, 'the lost GIF is back');
+  const mounted = post([
+    {
+      kind: 'video',
+      posterUrl: 'https://pbs.twimg.com/tweet_video_thumb/HUqnzksX0AAofGB.jpg',
+      mp4Url: 'https://video.twimg.com/tweet_video/HUqnzksX0AAofGB.mp4',
+    },
+  ]);
+  await engine.enrichFocusedPostViaSyndication(
+    mounted,
+    null,
+    async () => payload,
+    () => null
+  );
+  assert.equal(mounted.blocks.filter((b) => b.kind === 'video').length, 1, 'no twin');
+});
+
 await checkAsync(
   'thread media enrichment recovers lazy-load losses into the right post, no dupes',
   async () => {

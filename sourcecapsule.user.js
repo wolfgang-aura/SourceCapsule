@@ -664,7 +664,10 @@
     const match = value.match(
       /(?:amplify_video_thumb|amplify_video|ext_tw_video_thumb|ext_tw_video|tweet_video_thumb|tweet_video)\/(\d+)/i
     );
-    return match ? match[1] : '';
+    if (match) return match[1];
+    // Animated GIFs: the poster and MP4 share an alphanumeric key (#100).
+    const gif = value.match(/\/tweet_video(?:_thumb)?\/([A-Za-z0-9_-]+)\.\w+(?:[?#]|$)/);
+    return gif ? gif[1] : '';
   }
 
   function structuredPosterUrl(value) {
@@ -9011,6 +9014,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (match) return `media:${match[1]}`;
     match = value.match(/\/(?:ext_tw_video_thumb|amplify_video_thumb|tweet_video_thumb)\/(\d+)\//);
     if (match) return `video:${match[1]}`;
+    // An animated GIF's poster and MP4 share an alphanumeric key, not a numeric id (#100):
+    // tweet_video_thumb/<key>.jpg and video.twimg.com/tweet_video/<key>.mp4.
+    match = value.match(/\/tweet_video(?:_thumb)?\/([A-Za-z0-9_-]+)\.\w+(?:[?#]|$)/);
+    if (match) return `gif:${match[1]}`;
     return '';
   }
 
