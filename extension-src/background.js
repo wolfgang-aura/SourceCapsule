@@ -153,7 +153,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage)
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { allowedUrl, handleMessage, PRODUCTION_HOSTS };
+  module.exports = { allowedUrl, handleMessage, PRODUCTION_HOSTS, captureShare };
 }
 
 // --- Local automation bridge -----------------------------------------------------
@@ -230,39 +230,49 @@ async function captureShare(request) {
     };
   }
   const timeoutMs = Math.min(Number(request.timeoutMs) || 300000, 900000);
+  // The deadline starts BEFORE the window opens (#79). windows.create can take seconds, and
+  // outside the deadline a 3s request went on to publish a capsule 9s later.
+  const started = Date.now();
+  let timedOut = false;
+  let deadlineTimer = null;
+  const deadline = new Promise((resolve) => {
+    deadlineTimer = setTimeout(() => {
+      timedOut = true;
+      resolve({
+        ok: false,
+        error: 'timeout',
+        message: `The capture did not finish within ${timeoutMs}ms.`,
+      });
+    }, timeoutMs);
+  });
   // A hidden tab gets rAF paused and timers throttled, which starves the media
   // force-load pass and manufactures strict-mode blockers. An ACTIVE tab in an
   // UNFOCUSED window is not throttled and still never steals focus from the owner.
-  const window = await chrome.windows.create({
+  const opened = chrome.windows.create({
     url: request.url,
     focused: false,
     state: 'normal',
     width: 1280,
     height: 900,
   });
-  const tabId = window.tabs && window.tabs[0] && window.tabs[0].id;
-  if (!tabId) {
-    return { ok: false, error: 'no_tab', message: 'Could not open a capture tab.' };
-  }
-  // chrome.tabs.sendMessage waits as long as the capture runs, so bound it ourselves. The
-  // finally below closes the capture window, which is what actually stops the capture.
-  let deadlineTimer = null;
-  const deadline = new Promise((resolve) => {
-    deadlineTimer = setTimeout(
-      () =>
-        resolve({
-          ok: false,
-          error: 'timeout',
-          message: `The capture did not finish within ${timeoutMs}ms.`,
-        }),
-      timeoutMs
-    );
-  });
   try {
     const result = await Promise.race([
       deadline,
       (async () => {
-        await waitForContentScript(tabId, Math.min(timeoutMs, 90000));
+        const window = await opened;
+        const tabId = window && window.tabs && window.tabs[0] && window.tabs[0].id;
+        if (!tabId) {
+          return { ok: false, error: 'no_tab', message: 'Could not open a capture tab.' };
+        }
+        await waitForContentScript(
+          tabId,
+          Math.max(0, Math.min(timeoutMs - (Date.now() - started), 90000))
+        );
+        // Past the deadline the reply has already gone out as a timeout: never start the
+        // capture, or it publishes a capsule the caller was told did not happen.
+        if (timedOut) return null;
+        // chrome.tabs.sendMessage waits as long as the capture runs, so the race bounds it.
+        // The finally below closes the capture window, which is what actually stops it.
         return chrome.tabs.sendMessage(tabId, {
           type: 'sourcecapsule:controller',
           version: 1,
@@ -276,11 +286,17 @@ async function captureShare(request) {
     return { ok: false, error: 'capture_failed', message: error.message };
   } finally {
     clearTimeout(deadlineTimer);
-    try {
-      await chrome.windows.remove(window.id);
-    } catch (error) {
-      console.warn('[SourceCapsule] could not close capture window:', error.message);
-    }
+    // Close the window whenever it opens, even after the reply went out: a timeout must not
+    // leave a capture window behind, nor wait for windows.create to answer.
+    opened.then(
+      (window) =>
+        chrome.windows
+          .remove(window.id)
+          .catch((error) =>
+            console.warn('[SourceCapsule] could not close capture window:', error.message)
+          ),
+      (error) => console.warn('[SourceCapsule] capture window never opened:', error.message)
+    );
   }
 }
 
