@@ -30,6 +30,9 @@ All notable changes to this project are documented here. The format is based on
 - **Copy for AI** copies Markdown that stands on its own. It no longer points at `media/` files
   a paste doesn't carry, and once a link exists the copy includes it. The `.md`, HTML and
   manifest now agree on the source-link count (#104).
+- A quoted post that is gone on X shows as a "post unavailable" note wherever X's public data
+  rebuilds the quote. It used to become an empty card that blocked the export. A nested quote
+  or note the page showed is kept when X's public data leaves it out (#102).
 - A video kept as poster plus link is listed once, as a note, not also as a warning (#97).
 - An unattended capture that times out can no longer publish a capsule afterwards (#79).
 - `npm test` no longer writes fake capture replies into the real native-host log (#105).

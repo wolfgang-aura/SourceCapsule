@@ -8724,6 +8724,22 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   }
 
   /** Turn a syndication tweet object into a `quote` model block. */
+  // A quoted_tweet with no author is a post gone on X (deleted, protected or suspended).
+  // It renders as an honest tombstone; an empty quote with no URL is a strict-mode blocker
+  // that no repair can clear (#102).
+  function isSyndicationTombstone(t) {
+    return !!t && (t.__typename === 'TweetTombstone' || !t.user);
+  }
+
+  function syndicationTombstoneBlock(t, sourceUrl) {
+    const text = t && t.tombstone && t.tombstone.text && t.tombstone.text.text;
+    return {
+      kind: 'quote-tombstone',
+      notice: text || 'This Post is unavailable.',
+      sourceUrl: sourceUrl || '',
+    };
+  }
+
   function syndicationToQuoteBlock(t) {
     const user = t.user || {};
     const sourceUrl = user.screen_name
@@ -8736,7 +8752,13 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     syndicationLinkBlocks(t, sourceUrl).forEach((b) => blocks.push(b));
     const poll = syndicationPollBlock(t, sourceUrl);
     if (poll) blocks.push(poll);
-    if (t.quoted_tweet) blocks.push(syndicationToQuoteBlock(t.quoted_tweet));
+    if (t.quoted_tweet) {
+      blocks.push(
+        isSyndicationTombstone(t.quoted_tweet)
+          ? syndicationTombstoneBlock(t.quoted_tweet, sourceUrl)
+          : syndicationToQuoteBlock(t.quoted_tweet)
+      );
+    }
     return {
       kind: 'quote',
       author: {
@@ -8808,6 +8830,22 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (extras.length) {
       const nestedAt = nextBlocks.findIndex((block) => block.kind === 'quote');
       nextBlocks.splice(nestedAt < 0 ? nextBlocks.length : nestedAt, 0, ...extras);
+    }
+    // The payload is authoritative for what this post quotes only when it says something.
+    // A protected or age-gated nested post, or one already gone, comes back with no
+    // quoted_tweet at all, so keep what the DOM showed instead of dropping it (#102).
+    const payloadNamesNested = nextBlocks.some(
+      (block) => block.kind === 'quote' || block.kind === 'quote-tombstone'
+    );
+    if (!payloadNamesNested) {
+      const ownId = statusIdFromUrl(fresh.sourceUrl);
+      oldBlocks
+        .filter((block) => {
+          if (block.kind === 'quote-tombstone') return true;
+          const nestedId = block.kind === 'quote' && statusIdFromUrl(block.sourceUrl);
+          return !!nestedId && nestedId !== ownId;
+        })
+        .forEach((block) => nextBlocks.push(block));
     }
     fresh.blocks = nextBlocks;
     return fresh;
@@ -9644,13 +9682,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             limit: maxDepth,
             sourceUrl: quote.sourceUrl,
           });
-        } else if (!qt.user || qt.__typename === 'TweetTombstone') {
-          const tombstoneText = qt.tombstone && qt.tombstone.text && qt.tombstone.text.text;
-          quote.blocks.push({
-            kind: 'quote-tombstone',
-            notice: tombstoneText || 'This Post is unavailable.',
-            sourceUrl: quote.sourceUrl,
-          });
+        } else if (isSyndicationTombstone(qt)) {
+          quote.blocks.push(syndicationTombstoneBlock(qt, quote.sourceUrl));
         } else {
           const child = syndicationToQuoteBlock(qt);
           if (!statusIdFromUrl(child.sourceUrl)) {

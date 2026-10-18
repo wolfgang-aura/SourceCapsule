@@ -294,4 +294,83 @@ function findBlock(blocks, kind) {
   );
 }
 
+// 8. A quoted post that is gone on X renders as a tombstone, never an empty quote (#102).
+{
+  const A = CHAIN[0];
+  const payload = {
+    ...tweet(0, { nested: false }),
+    quoted_tweet: {
+      __typename: 'TweetTombstone',
+      tombstone: { text: { text: 'This Post was deleted by the Post author.' } },
+    },
+  };
+  const card = engine.syndicationToQuoteBlock(payload);
+  assert.equal(card.sourceUrl.split('/').pop(), A.id);
+  assert.equal(
+    card.blocks.filter((b) => b.kind === 'quote').length,
+    0,
+    'no empty quote with no URL'
+  );
+  const tomb = card.blocks.find((b) => b.kind === 'quote-tombstone');
+  assert.ok(tomb, 'the gone post is an honest tombstone');
+  assert.match(tomb.notice, /deleted/);
+  const model = {
+    ...domModel(),
+    blocks: [{ kind: 'paragraph', html: 'Main post' }, card],
+  };
+  const assessment = engine.assessExportCompleteness(model);
+  assert.equal(assessment.blockers.length, 0, JSON.stringify(assessment.blockers));
+}
+
+// 9. Content the DOM had and syndication left out survives the merge (#102).
+{
+  const A = CHAIN[0];
+  const B = CHAIN[1];
+  const dom = {
+    kind: 'quote',
+    author: { name: 'A', handle: '@hibtc37' },
+    sourceUrl: `https://x.com/hibtc37/status/${A.id}`,
+    blocks: [
+      { kind: 'paragraph', html: 'Post A text' },
+      { kind: 'quote-tombstone', notice: 'This Post is unavailable.' },
+    ],
+  };
+  const merged = engine.mergeQuoteAfterSyndication(
+    dom,
+    engine.syndicationToQuoteBlock(tweet(0, { nested: false }))
+  );
+  assert.ok(
+    merged.blocks.some((b) => b.kind === 'quote-tombstone'),
+    'a DOM tombstone is kept when the payload says nothing'
+  );
+
+  const withNested = {
+    ...dom,
+    blocks: [
+      { kind: 'paragraph', html: 'Post A text' },
+      {
+        kind: 'quote',
+        author: { name: 'B', handle: '@hibtc37' },
+        sourceUrl: `https://x.com/hibtc37/status/${B.id}`,
+        blocks: [{ kind: 'paragraph', html: 'Post B text' }],
+      },
+    ],
+  };
+  const kept = engine.mergeQuoteAfterSyndication(
+    withNested,
+    engine.syndicationToQuoteBlock(tweet(0, { nested: false }))
+  );
+  const nested = kept.blocks.find((b) => b.kind === 'quote');
+  assert.ok(nested, 'a DOM nested quote the payload omits is kept');
+  assert.equal(nested.sourceUrl.split('/').pop(), B.id);
+
+  // But a payload that has its own nested quote is authoritative: no twin.
+  const fresh = engine.mergeQuoteAfterSyndication(
+    withNested,
+    engine.syndicationToQuoteBlock(tweet(0))
+  );
+  assert.equal(fresh.blocks.filter((b) => b.kind === 'quote').length, 1, 'no duplicate nest');
+  assert.equal(fresh.blocks.filter((b) => b.kind === 'quote-tombstone').length, 0);
+}
+
 console.log('quote-chain test passed');
