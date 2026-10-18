@@ -4345,6 +4345,33 @@ await checkAsync('a failed syndication cross-check is a note in the capture', as
   assert.doesNotMatch(mdSection(md, 'Capture Summary'), /post 400 could not/i);
 });
 
+await checkAsync('a quote whose own cross-check failed says so', async () => {
+  const previous = global.GM_xmlhttpRequest;
+  global.GM_xmlhttpRequest = (options) =>
+    options.onload({ status: 404, responseText: '', response: '', responseHeaders: '' });
+  try {
+    const model = {
+      ...deepReply(),
+      blocks: [
+        { kind: 'paragraph', html: 'post 400' },
+        {
+          kind: 'quote',
+          author: { name: 'Q', handle: '@q' },
+          sourceUrl: 'https://x.com/q/status/2111000000000000777',
+          blocks: [{ kind: 'paragraph', html: 'Quoted text from the page.' }],
+        },
+      ],
+    };
+    await engine.enrichQuotesViaSyndication(model, null);
+    assert.match(
+      mdSection(engine.renderLlmMarkdown(model), 'Capture Summary'),
+      /post 2111000000000000777 is not available/i
+    );
+  } finally {
+    global.GM_xmlhttpRequest = previous;
+  }
+});
+
 await checkAsync('reply context sits right above the exported post inside a thread', async () => {
   // The thread holds 200 and the exported post 400; 300 sits between them in the
   // conversation, so its card belongs after post 200 and before 400.

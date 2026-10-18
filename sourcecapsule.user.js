@@ -8995,6 +8995,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           }
         } catch (e) {
           warn('syndication enrich failed for', id, '-', e.message);
+          // An empty card is already a strict blocker; one that kept its DOM text would
+          // otherwise ship with whatever media never loaded, and no note (#99).
+          if (q.blocks && q.blocks.length) recordSyndicationUnchecked(model, id, e);
         }
       }
       done++;
@@ -13438,6 +13441,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       mediaKeyFromUrl,
       enrichThreadViaSyndication,
       enrichFocusedPostViaSyndication,
+      enrichQuotesViaSyndication,
       enrichReplyContextViaSyndication,
       followQuoteChainsViaSyndication,
       repairExportBlockers,
