@@ -6027,7 +6027,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
         return { ok: false, error: 'no_capsule', message: 'The export produced no share link.' };
       }
       const { created, model } = result;
-      const stats = archiveStats(model);
+      const stats = archiveStats(created.sharedModel || model);
       // `complete` is the uploaded capsule's own Status line (#91), so it is judged on the
       // shared copy a recipient sees, not the richer local model. The strict assessment
       // already gated the export; it is not a verdict on what the capsule holds.
@@ -6318,6 +6318,13 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       '- Full video files are not uploaded; images and video poster frames may be included.',
       '',
       'Capture status:',
+      ...(created.status
+        ? [
+            `- Shared capsule status: ${
+              created.status.complete ? 'COMPLETE' : `INCOMPLETE. ${created.status.summary}`
+            }`,
+          ]
+        : []),
       `- Missing media: ${stats.missingMedia}`,
       `- Incomplete media: ${stats.incompleteMedia}`,
     ];
@@ -6334,6 +6341,9 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       markdownUrl: created.markdownUrl || '',
       createdAt: created.createdAt || new Date().toISOString(),
       expiresAt: created.expiresAt || '',
+      // The published copy's own Status line, for AI_LINK.txt (the local bundle can hold
+      // media the shared copy leaves out).
+      ...(created.sharedModel ? { status: captureVerdict(created.sharedModel) } : {}),
     };
   }
 
@@ -6778,8 +6788,21 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const viewUrl = safeUrl(created && created.viewUrl);
     if (!viewUrl) throw new Error('Share service returned an invalid public link.');
     ensureStyle();
+    // A recipient opens the shared copy (raw video and some local media are left out), so
+    // its own verdict is the one to show here, not the local capture's.
+    const sharedVerdict =
+      created && created.sharedModel ? captureVerdict(created.sharedModel) : null;
+    const incompleteText =
+      sharedVerdict && !sharedVerdict.complete
+        ? `Incomplete (shared capsule) — ${sharedVerdict.summary}`
+        : '';
     const receipt = document.querySelector('.xa-capture-receipt');
     if (receipt) {
+      const verdictEl = receipt.querySelector('.xa-receipt-status');
+      if (incompleteText && verdictEl) {
+        verdictEl.classList.add('warning');
+        verdictEl.textContent = incompleteText;
+      }
       const status = receipt.querySelector('.xa-receipt-action-status');
       status.classList.remove('error');
       status.textContent = copied
@@ -6815,6 +6838,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     status.textContent = copied
       ? 'Copied to your clipboard.'
       : 'Chrome could not copy automatically. Use Copy link below.';
+    const verdict = document.createElement('p');
+    verdict.className = 'xa-receipt-status warning';
+    verdict.textContent = incompleteText;
     const label = document.createElement('label');
     label.setAttribute('for', 'xa-share-url');
     label.textContent = 'AI readable link';
@@ -6841,7 +6867,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     openLink.rel = 'noopener';
     openLink.textContent = 'Open link';
     actions.append(closeButton, copyButton, openLink);
-    modal.append(title, status, label, input, actions);
+    modal.append(title, status, ...(incompleteText ? [verdict] : []), label, input, actions);
     backdrop.appendChild(modal);
 
     const close = () => backdrop.remove();
@@ -13121,6 +13147,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       deleteSharedCapsule,
       shareLinkExpired,
       aiLinkReceiptText,
+      shareMetadataFromCreated,
       showRecentShareLinks,
       renderArchiveManifestJson,
       createShareLink,

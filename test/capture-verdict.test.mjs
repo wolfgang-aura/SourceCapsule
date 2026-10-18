@@ -188,6 +188,46 @@ await check('the receipt modal does not flag a poster-only video the capsule acc
   assert.equal(receiptVerdict(model).verdict, 'COMPLETE');
 });
 
+const truncatedQuote = () =>
+  base([
+    { kind: 'paragraph', html: 'Main' },
+    {
+      kind: 'quote',
+      author: { name: 'W', handle: '@w' },
+      sourceUrl: 'https://x.com/w/status/6',
+      truncated: true,
+      blocks: [{ kind: 'paragraph', html: 'Preview only' }],
+    },
+  ]);
+const created = (sharedModel) => ({
+  viewUrl: `${WORKER}/c/cap2`,
+  expiresAt: '2026-08-08T12:00:00.000Z',
+  sharedModel,
+});
+
+await check('the share result says when the published capsule is incomplete', () => {
+  engine.showShareResult(created(truncatedQuote()), { copied: true });
+  const modal = document.querySelector('.xa-share-result');
+  assert.match(modal.textContent, /incomplete/i);
+  assert.match(modal.textContent, /truncated/i);
+  modal.remove();
+  engine.showShareResult(created(base([{ kind: 'paragraph', html: 'Main' }])), { copied: true });
+  const clean = document.querySelector('.xa-share-result');
+  assert.doesNotMatch(clean.textContent, /incomplete/i);
+  clean.remove();
+});
+
+await check('an open receipt takes the shared copy verdict after a share', () => {
+  const local = base([{ kind: 'paragraph', html: 'Main' }]);
+  engine.showCaptureReceipt({ model: local, savedLocation: 'x.zip', markdown: 'md' });
+  engine.showShareResult(created(truncatedQuote()), { copied: true });
+  const receipt = document.querySelector('.xa-capture-receipt');
+  const status = receipt.querySelector('.xa-receipt-status');
+  assert.ok(status.classList.contains('warning'), 'the receipt must stop saying Complete');
+  assert.match(status.textContent, /shared/i);
+  receipt.remove();
+});
+
 console.log('');
 if (failures) {
   console.error(`${failures} capture-verdict check(s) failed`);

@@ -347,6 +347,22 @@ check('AI readable link receipt records expiry, URLs, and missing media warnings
   assert.match(receipt, /Re-export from X/);
 });
 
+check('AI_LINK.txt states the shared capsule verdict, not the local one', () => {
+  const sharedModel = {
+    title: 'Shared',
+    sourceUrl: STATUS_URL,
+    blocks: [{ kind: 'paragraph', html: 'Main' }, { kind: 'truncation-notice' }],
+  };
+  const created = { viewUrl: 'https://sourcecapsule-share.example/c/abc', expiresAt: '' };
+  Object.defineProperty(created, 'sharedModel', { value: sharedModel, enumerable: false });
+  const receipt = engine.aiLinkReceiptText(engine.shareMetadataFromCreated(created), {
+    title: 'Local',
+    sourceUrl: STATUS_URL,
+    blocks: [{ kind: 'paragraph', html: 'Main' }],
+  });
+  assert.match(receipt, /Shared capsule status: INCOMPLETE\. Possibly truncated: 1 main post/);
+});
+
 await checkAsync('media byte fetch retries transient userscript request failures', async () => {
   let calls = 0;
   global.GM_xmlhttpRequest = (options) => {
