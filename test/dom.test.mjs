@@ -4200,6 +4200,52 @@ await checkAsync('a failed fetch mid-conversation ends the walk honestly', async
   assert.equal(model.blocks[1].sourceUrl, 'https://x.com/u300/status/300');
 });
 
+// #98: the walk used to stop without a trace in both of these.
+await checkAsync('a failed root fetch says the conversation was not checked', async () => {
+  const model = deepReply();
+  await engine.enrichReplyContextViaSyndication(model, null, conversationFetch({ 400: 503 }));
+  assert.equal(model.blocks[0].kind, 'reply-context-note');
+  const md = engine.renderLlmMarkdown(model);
+  assert.match(md, /could not check whether this post replies to another/i);
+  assert.match(md, /Status: COMPLETE/, 'an unanswered check is a note, not a gap');
+});
+
+await checkAsync(
+  'an ancestor shown from the slim inline copy says its media may be missing',
+  async () => {
+    const model = deepReply();
+    const base = conversationFetch({ 300: 500 });
+    await engine.enrichReplyContextViaSyndication(model, null, async (id) => {
+      const data = await base(id);
+      // The reply's own payload carries a slim copy of its parent, without media.
+      if (id === '400') {
+        data.parent = {
+          id_str: '300',
+          text: 'post 300',
+          user: { name: 'U300', screen_name: 'u300' },
+          in_reply_to_status_id_str: '200',
+          in_reply_to_screen_name: 'u200',
+        };
+      }
+      return data;
+    });
+    const cards = model.blocks.filter((b) => b.kind === 'quote' && b.replyContext);
+    assert.deepEqual(
+      cards.map((b) => b.sourceUrl),
+      [
+        'https://x.com/u100/status/100',
+        'https://x.com/u200/status/200',
+        'https://x.com/u300/status/300',
+      ],
+      'the walk continues past the slim copy'
+    );
+    const card300 = cards[2];
+    const note = (card300.blocks || []).find((b) => b.kind === 'reply-context-note');
+    assert.ok(note, 'the card built from the slim copy carries a note');
+    assert.match(engine.renderLlmMarkdown(model), /without its media/i);
+  }
+);
+
 await checkAsync('reply context sits right above the exported post inside a thread', async () => {
   // The thread holds 200 and the exported post 400; 300 sits between them in the
   // conversation, so its card belongs after post 200 and before 400.

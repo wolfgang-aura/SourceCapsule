@@ -3737,7 +3737,9 @@
           replyContextNoteText(b)
         )}${
           href
-            ? ` <a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">Continue on X &rarr;</a>`
+            ? ` <a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${
+                b.reason === 'partial' ? 'Open on X' : 'Continue on X'
+              } &rarr;</a>`
             : ''
         }</p>`;
       }
@@ -3990,6 +3992,9 @@
         } else if (b.kind === 'reply-context-note') {
           // Context the exported post does not hold: informational, never a gap.
           addNote(replyContextNoteText(b));
+        } else if (b.kind === 'quote-chain-note' && inContext) {
+          // Inside the conversation above a reply: context, not the exported post (#98).
+          addNote(quoteChainNoteText(b));
         } else if (b.kind === 'quote-chain-note') {
           // A real gap: posts deeper in the chain exist (or may exist) and are not here.
           stats.quoteChainsUnfollowed += 1;
@@ -9421,6 +9426,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         // Only a 404 is X saying the post is gone. Any other failure (5xx, timeout,
         // network) says nothing about it, so it must not be reported as deleted.
         let fetchInconclusive = false;
+        let fromInline = false;
         try {
           // Full fetch first: the inline `parent` payload is a slimmer shape that can lack
           // media; fall back to it only when the id fetch fails.
@@ -9428,6 +9434,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         } catch (e) {
           warn('reply-context fetch failed for', hop.id, '-', e.message);
           parentData = hop.inline;
+          fromInline = !!hop.inline;
           fetchInconclusive = !(e && e.status === 404);
         }
         if (
@@ -9442,6 +9449,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             card.sourceUrl = `https://x.com/${hop.handle}/status/${hop.id}`;
           }
           if (card.truncated) recoverQuoteNoteText(card, getCapturedNoteTweet(hop.id));
+          // The slim copy carries text and the next hop but no mediaDetails (#98).
+          if (fromInline) {
+            card.blocks.push({
+              kind: 'reply-context-note',
+              replyContext: true,
+              reason: 'partial',
+              statusId: hop.id,
+            });
+          }
           ancestors.push(card);
           hop = nextHop(parentData);
         } else {
@@ -9464,7 +9480,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         }
       }
     } catch (e) {
+      // Only the root fetch reaches here. The DOM has no reliable reply signal, so all the
+      // export can say is that it could not check (#98).
       warn('reply-context check failed for', rootId, '-', e.message);
+      ancestors.push({
+        kind: 'reply-context-note',
+        replyContext: true,
+        reason: 'unchecked',
+        error: String((e && e.message) || 'fetch failed'),
+      });
     }
     if (ancestors.length) {
       // Directly above the exported post: inside a thread that is its own marker, so a
@@ -9479,6 +9503,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 
   /** Reader-facing text for a conversation the reply-context walk stopped climbing. */
   function replyContextNoteText(b) {
+    if (b.reason === 'unchecked') {
+      return `Could not check whether this post replies to another: X did not answer when this was saved (${
+        b.error || 'fetch failed'
+      }).`;
+    }
+    if (b.reason === 'partial') {
+      return `Post ${b.statusId || ''} could not be fetched in full, so it is shown from the reply's own copy of it: its text, without its media.`;
+    }
     return `Earlier conversation not included: this export keeps the ${
       b.limit || CONFIG.replyContextMaxDepth
     } posts directly above the reply. The conversation continues with ${
@@ -9501,7 +9533,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    *     `quote-chain-note`, counted so the receipt stops saying COMPLETE;
    *   - a 404 on the leaf, or a tombstoned quoted_tweet: a `quote-tombstone`.
    * A cycle stops silently, since the post is already shown above it. Reply-context cards
-   * are not followed: they are context for the exported post, not part of what it quotes.
+   * are followed too (#98): they used to stop one level down with no note. A gap inside
+   * one is context, so archiveStats reports it as a note, not a capture gap.
    * Must run before inlineMedia so the new cards' media and avatars are inlined.
    */
   async function followQuoteChainsViaSyndication(
@@ -9521,7 +9554,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           segmentId = b.statusId || rootId;
         } else if (b.kind === 'blockquote') {
           collect(b.blocks, depth, path);
-        } else if (b.kind === 'quote' && !b.replyContext) {
+        } else if (b.kind === 'quote') {
           const id = statusIdFromUrl(b.sourceUrl);
           const chainPath = (depth === 0 ? [rootId, segmentId] : path).concat(id ? [id] : []);
           if ((b.blocks || []).some((child) => ends.has(child.kind))) {

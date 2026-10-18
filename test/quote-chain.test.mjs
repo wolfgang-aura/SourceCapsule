@@ -201,20 +201,40 @@ function findBlock(blocks, kind) {
   assert.match(engine.renderLlmMarkdown(gone), /Status: COMPLETE/);
 }
 
-// 5. A cycle stops without a note, and a reply-context card is not followed.
+// 5. A cycle stops without a note.
 {
   const looped = tweet(1);
   looped.quoted_tweet = tweet(0, { nested: false });
   const model = domModel();
-  model.blocks.unshift({
-    ...engine.syndicationToQuoteBlock(tweet(3, { nested: false })),
-    replyContext: true,
-  });
-  const { fetchTweet, calls } = stubFetch({ [CHAIN[1].id]: () => looped });
+  const { fetchTweet } = stubFetch({ [CHAIN[1].id]: () => looped });
   await engine.followQuoteChainsViaSyndication(model, null, fetchTweet);
-  assert.deepEqual(chainIds({ blocks: model.blocks.slice(1) }), [CHAIN[0].id, CHAIN[1].id]);
+  assert.deepEqual(chainIds(model), [CHAIN[0].id, CHAIN[1].id]);
   assert.equal(findBlock(model.blocks, 'quote-chain-note'), null);
-  assert.ok(!calls.includes(CHAIN[3].id), 'the reply-context card is not followed');
+}
+
+// 5b. A reply-context card's quote chain is followed too (#98): it used to stop one level
+// down with no note. A cut-short chain there is context, so it is a note, not a gap.
+{
+  const contextModel = () => ({
+    ...domModel(),
+    blocks: [
+      { ...engine.syndicationToQuoteBlock(tweet(3, { nested: false })), replyContext: true },
+      { kind: 'paragraph', html: 'Main post' },
+    ],
+  });
+  const model = contextModel();
+  const { fetchTweet } = stubFetch();
+  await engine.followQuoteChainsViaSyndication(model, null, fetchTweet);
+  assert.deepEqual(chainIds(model), [CHAIN[3].id, CHAIN[4].id, CHAIN[5].id]);
+
+  const capped = contextModel();
+  await engine.followQuoteChainsViaSyndication(capped, null, stubFetch().fetchTweet, {
+    maxDepth: 2,
+  });
+  assert.ok(findBlock(capped.blocks, 'quote-chain-note'), 'the cap is still stated');
+  const md = engine.renderLlmMarkdown(capped);
+  assert.match(md, /Status: COMPLETE/, 'a cut-short chain in the context is no capture gap');
+  assert.match(md, /Quote chain not followed past/);
 }
 
 // 6. A quote the main pass could not fetch is rebuilt by the strict-mode repair round,
