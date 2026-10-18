@@ -2,7 +2,7 @@
 
 Source: https://x.com/ada/article/12345
 Exported at: 2026-06-25 10:00:00 UTC
-Exporter: SourceCapsule v1.6.13
+Exporter: SourceCapsule v1.6.14
 Language: en
 Published at: 2026-06-24 09:30:00 UTC
 Author: Ada Lovelace @ada
@@ -35,11 +35,10 @@ The media bytes are embedded (base64) inside the companion file sample-export.ht
 - Video posters captured: 2
 - Video source links preserved: 5
 - Incomplete media: 3
-- Source links: 13
+- Source links: 14
 - Duplicate media groups: 1
 - Warnings:
   - Image image-002 was unavailable at export time.
-  - Video video-003 was detected, but the video file was not preserved offline. Only the poster and source link were preserved.
   - Video video-005 was detected, but the video file was not preserved offline. No poster and source link were preserved.
   - Video video-005 was unavailable at export time.
   - Video poster for video-006 was unavailable at export time.
@@ -47,9 +46,10 @@ The media bytes are embedded (base64) inside the companion file sample-export.ht
   - Video video-007 was unavailable at export time.
   - Quoted post 7 was unavailable at export time.
   - Quoted post 8 was unavailable at export time.
-  - 6 item(s) were unavailable at export time.
   - Embedded Post 1 text may be truncated because only preview text may have been available at export time.
+  - 6 item(s) were unavailable at export time.
 - Notes:
+  - Video video-003 was detected, but the video file was not preserved offline. Only the poster and source link were preserved.
   - 1 duplicate media hash group(s) were detected.
   - Video video-003 has no transcript or visual description in llm.md.
   - Video video-004 bytes are embedded in the companion file sample-export.html; this markdown holds only metadata (no video bytes, transcript, or visual description).
@@ -311,6 +311,8 @@ Text:
   Reason: video_file_not_captured
   Source post ID: 1002
   Source URL: https://x.com/ada/status/1002
+- Embedded post 42: text may be truncated (preview only).
+  Source URL: https://x.com/charles/status/42
 
 ---
 
@@ -319,13 +321,14 @@ Text:
 1. https://x.com/ada/article/12345
 2. https://example.com
 3. https://example.org/path
-4. https://x.com/ada/status/999
-5. https://x.com/ada/status/1000
-6. https://x.com/ada/status/deleted-video
-7. https://x.com/ada/status/1001
-8. https://x.com/ada/status/1002
-9. https://x.com/charles/status/42
-10. https://x.com/nested/status/43
-11. https://x.com/private/status/7
-12. https://x.com/deleted/status/8
-13. https://x.com/ada/status/1234567890
+4. https://x.com/ada/status/12345
+5. https://x.com/ada/status/999
+6. https://x.com/ada/status/1000
+7. https://x.com/ada/status/deleted-video
+8. https://x.com/ada/status/1001
+9. https://x.com/ada/status/1002
+10. https://x.com/charles/status/42
+11. https://x.com/nested/status/43
+12. https://x.com/private/status/7
+13. https://x.com/deleted/status/8
+14. https://x.com/ada/status/1234567890

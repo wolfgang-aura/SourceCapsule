@@ -373,7 +373,13 @@ check('states capture completeness at the top of both capsule files', () => {
   assert.ok(!warnings.includes('bytes are embedded in the companion'), 'note listed as a gap');
   assert.ok(!warnings.includes('duplicate media hash group'), 'note listed as a gap');
   const video003 = 'Video video-003 was detected, but the video file was not preserved offline.';
-  assert.equal(warnings.split(video003).length - 1, 1, 'warning repeated');
+  // video-003 kept its poster, so it is an accepted outcome: one note, no warning (#97).
+  const notes = markdown.slice(
+    markdown.indexOf('- Notes:'),
+    markdown.indexOf('\n---', markdown.indexOf('- Notes:'))
+  );
+  assert.equal(warnings.split(video003).length - 1, 0, 'poster-only video listed as a gap');
+  assert.equal(notes.split(video003).length - 1, 1, 'note repeated');
 
   const clean = {
     type: 'post',
@@ -1193,10 +1199,14 @@ check('handles failed media with a visible placeholder', () => {
   assert.ok(html.includes('data-xa-missing-type="video"'));
   assert.ok(html.includes('Quoted post unavailable'));
   assert.ok(html.includes('data-xa-missing-type="quoted-post"'));
-  assert.equal(debugJson.capture.missingMedia, 6);
+  // Two of the six missing records are quoted posts, which are not media (#97).
+  assert.equal(debugJson.capture.missingMedia, 4);
   assert.equal(debugJson.capture.incompleteMedia, 3);
   assert.equal(debugJson.missing.length, 6);
-  assert.equal(debugJson.incomplete.length, 3);
+  assert.equal(debugJson.incomplete.length, 4);
+  // The fourth is the quote whose preview stops mid-sentence: the Status line already
+  // counted it as possibly truncated, and now the list the reader is sent to names it.
+  assert.equal(debugJson.incomplete[3].type, 'quoted-post-text');
   assert.deepEqual(
     debugJson.missing.map((item) => item.type),
     ['image', 'video', 'video-poster', 'video', 'quoted-post', 'quoted-post']

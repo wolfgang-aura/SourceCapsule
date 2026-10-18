@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SourceCapsule - Save X/Twitter Threads & Articles as Markdown for LLMs + Offline HTML
 // @namespace    https://github.com/wolfgang-aura/SourceCapsule
-// @version      1.6.13
+// @version      1.6.14
 // @description  One click saves an X (Twitter) thread, Article, or post as clean Markdown for LLM context (Claude, ChatGPT) plus a self-contained offline HTML archive - images, video, and quoted posts embedded, with honest completeness reporting. Local-first, with optional expiring AI readable links.
 // @author       wolfgang-aura
 // @license      MIT
@@ -222,7 +222,7 @@
   };
 
   const APP = 'SourceCapsule';
-  const VERSION = '1.6.13';
+  const VERSION = '1.6.14';
 
   // ===========================================================================
   // Small utilities
@@ -664,7 +664,10 @@
     const match = value.match(
       /(?:amplify_video_thumb|amplify_video|ext_tw_video_thumb|ext_tw_video|tweet_video_thumb|tweet_video)\/(\d+)/i
     );
-    return match ? match[1] : '';
+    if (match) return match[1];
+    // Animated GIFs: the poster and MP4 share an alphanumeric key (#100).
+    const gif = value.match(/\/tweet_video(?:_thumb)?\/([A-Za-z0-9_-]+)\.\w+(?:[?#]|$)/);
+    return gif ? gif[1] : '';
   }
 
   function structuredPosterUrl(value) {
@@ -2731,6 +2734,14 @@
         publishedAt: publishedAtFromElement(tweet, statusId),
       };
     });
+    const cutShort = includeThread
+      ? threadCutShortInfo(
+          lastForceLoadStop,
+          threadPosts.map((post) => post.statusId),
+          threadTweetCandidates(column).map(tweetStatusId)
+        )
+      : null;
+    if (cutShort) warn('thread capture stopped at the scroll limit mid-thread', cutShort);
     const combinedBlocks = [];
     tweetParts.forEach((part, index) => {
       if (tweetParts.length > 1) {
@@ -2738,6 +2749,7 @@
           kind: 'thread-marker',
           ...threadPosts[index],
           total: tweetParts.length,
+          ...(cutShort ? { totalAtLeast: true } : {}),
         });
       }
       combinedBlocks.push(...part.blocks);
@@ -2779,6 +2791,7 @@
         capturedPosts: threadPosts.length,
         sourcePostIds: threadPosts.map((post) => post.statusId).filter(Boolean),
         completeness: 'best-effort',
+        ...(cutShort ? { cutShort } : {}),
       };
     }
     if (CONFIG.debugEmbed) {
@@ -3457,6 +3470,11 @@
     return fallback;
   }
 
+  // A thread the scroll stopped in the middle of has an unknown length (#101).
+  function threadMarkerLabel(b) {
+    return `Post ${b.index || '?'} of ${b.totalAtLeast ? 'at least ' : ''}${b.total || '?'}`;
+  }
+
   function missingRecord(type, attrs = {}) {
     const record = { type, ...attrs };
     Object.keys(record).forEach((key) => {
@@ -3637,7 +3655,7 @@
         return '<hr class="xa-divider">';
       case 'thread-marker': {
         const source = safeUrl(b.sourceUrl || '');
-        const label = `Post ${b.index || '?'} of ${b.total || '?'}`;
+        const label = threadMarkerLabel(b);
         const published = safeIsoTime(b.publishedAt)
           ? `<time datetime="${escapeAttr(safeIsoTime(b.publishedAt))}">${escapeHtml(
               readableUtcTime(b.publishedAt)
@@ -3737,7 +3755,9 @@
           replyContextNoteText(b)
         )}${
           href
-            ? ` <a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">Continue on X &rarr;</a>`
+            ? ` <a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${
+                b.reason === 'partial' ? 'Open on X' : 'Continue on X'
+              } &rarr;</a>`
             : ''
         }</p>`;
       }
@@ -3890,6 +3910,13 @@
       recoveredNotes: 0,
       quoteCards: 0,
       quoteTombstones: 0,
+      // Posts above a reply (#92) are context for it, not posts it embeds (#97).
+      replyContextCards: 0,
+      replyContextTombstones: 0,
+      // Media, polls and embedded posts that belong to the exported post itself. A
+      // caption-less photo or quote post has no main text to miss; a reply-context
+      // card does not make a reply's missing text caption-less.
+      ownContent: 0,
       quoteChainsUnfollowed: 0,
       renderedTweetCards: 0,
       images: 0,
@@ -3923,21 +3950,27 @@
       if (!url) return;
       stats.mediaUrls.set(url, (stats.mediaUrls.get(url) || 0) + 1);
     };
-    const walk = (blocks) => {
+    // Main text is judged at depth 0 only: a quote card or reply-context card always
+    // carries a paragraph, and counting it hid a main post whose own text was lost (#97).
+    const walk = (blocks, depth = 0, inContext = false) => {
       (blocks || []).forEach((b) => {
+        if (!inContext && ['image', 'video', 'poll'].includes(b.kind)) stats.ownContent += 1;
         if (b.kind === 'heading') {
           stats.headings += 1;
-          stats.mainTextCaptured = stats.mainTextCaptured || !!String(b.text || '').trim();
+          if (depth === 0)
+            stats.mainTextCaptured = stats.mainTextCaptured || !!String(b.text || '').trim();
         } else if (b.kind === 'thread-marker') {
           if (b.sourceUrl) stats.sourceLinks.add(b.sourceUrl);
         } else if (b.kind === 'paragraph') {
           stats.paragraphs += 1;
-          stats.mainTextCaptured = stats.mainTextCaptured || !!textFromHtml(b.html);
+          if (depth === 0)
+            stats.mainTextCaptured = stats.mainTextCaptured || !!textFromHtml(b.html);
           hrefsFromHtml(b.html).forEach((href) => stats.sourceLinks.add(href));
         } else if (b.kind === 'list') {
           stats.lists += 1;
-          stats.mainTextCaptured =
-            stats.mainTextCaptured || (b.items || []).some((item) => !!textFromHtml(item));
+          if (depth === 0)
+            stats.mainTextCaptured =
+              stats.mainTextCaptured || (b.items || []).some((item) => !!textFromHtml(item));
           (b.items || []).forEach((item) =>
             hrefsFromHtml(item).forEach((href) => stats.sourceLinks.add(href))
           );
@@ -3961,7 +3994,8 @@
         } else if (b.kind === 'quote-tombstone') {
           // Informational, never missing/incomplete: the quoted post was gone on
           // X itself, so "complete" stays true - but the reader is told why.
-          stats.quoteTombstones += 1;
+          if (b.replyContext) stats.replyContextTombstones += 1;
+          else stats.quoteTombstones += 1;
           addNote(
             b.replyContext
               ? b.replyDepth > 1
@@ -3976,10 +4010,20 @@
         } else if (b.kind === 'reply-context-note') {
           // Context the exported post does not hold: informational, never a gap.
           addNote(replyContextNoteText(b));
+        } else if (b.kind === 'quote-chain-note' && inContext) {
+          // Inside the conversation above a reply: context, not the exported post (#98).
+          addNote(quoteChainNoteText(b));
         } else if (b.kind === 'quote-chain-note') {
           // A real gap: posts deeper in the chain exist (or may exist) and are not here.
           stats.quoteChainsUnfollowed += 1;
           stats.warnings.push(quoteChainNoteText(b));
+          stats.incomplete.push(
+            missingRecord('quote-chain', {
+              sourcePostId: b.statusId || statusIdFromSourceUrl(b.sourceUrl) || undefined,
+              sourceUrl: b.sourceUrl || undefined,
+              reason: b.reason === 'cap' ? 'depth_limit' : 'fetch_failed',
+            })
+          );
         } else if (b.kind === 'image') {
           stats.images += 1;
           markMediaUrl(b.url);
@@ -4019,7 +4063,9 @@
                 sourceLinkPreserved: !!b.sourceUrl,
               })
             );
-            stats.warnings.push(
+            // Poster + source link is an accepted outcome, not a gap (captureGaps), so it
+            // is a note; only a video with no poster is a warning.
+            (b.posterDataUri ? addNote : (warning) => stats.warnings.push(warning))(
               `Video ${b._xaMediaId || ''} was detected, but the video file was not preserved offline. ${
                 b.posterDataUri ? 'Only the poster' : 'No poster'
               } and ${b.sourceUrl ? 'source link were' : 'no source link was'} preserved.`.trim()
@@ -4052,7 +4098,11 @@
           }
           if (b.sourceUrl) stats.sourceLinks.add(b.sourceUrl);
         } else if (b.kind === 'quote') {
-          stats.quoteCards += 1;
+          if (b.replyContext) stats.replyContextCards += 1;
+          else {
+            stats.quoteCards += 1;
+            if (!inContext) stats.ownContent += 1;
+          }
           stats.renderedTweetCards += 1;
           if (b.noteRecovered) stats.recoveredNotes += 1;
           if (b.sourceUrl) stats.sourceLinks.add(b.sourceUrl);
@@ -4076,13 +4126,56 @@
               `Quoted post ${postId || b.sourceUrl || ''} was unavailable at export time.`.trim()
             );
           }
-          walk(b.blocks);
+          walk(b.blocks, depth + 1, inContext || !!b.replyContext);
         } else if (b.kind === 'blockquote') {
-          walk(b.blocks);
+          walk(b.blocks, depth, inContext);
+        } else if (b.kind === 'link-card') {
+          if (b.url) stats.sourceLinks.add(b.url);
         }
       });
     };
     walk(model.blocks);
+    // Text gaps captureGaps counts are listed too, so the Status line's "Details are under
+    // Missing / Incomplete Content" points at something, and the manifest warns (#97).
+    (model.blocks || [])
+      .filter((b) => b.kind === 'truncation-notice')
+      .forEach((b) => {
+        const postId = statusIdFromSourceUrl(b.sourceUrl || model.sourceUrl);
+        stats.incomplete.push(
+          missingRecord('post-text', {
+            sourcePostId: postId || undefined,
+            sourceUrl: b.sourceUrl || model.sourceUrl || undefined,
+            reason: 'long_form_preview_only',
+          })
+        );
+        stats.warnings.push(
+          `${postId ? `Post ${postId}` : 'The exported post'} is a long-form post; only its preview text was available at export (full text not included).`
+        );
+      });
+    const cutShort = model.thread && model.thread.cutShort;
+    if (cutShort) {
+      stats.incomplete.push(
+        missingRecord('thread', {
+          sourcePostId: cutShort.lastPostId || undefined,
+          reason: cutShort.reason === 'steps' ? 'scroll_step_limit' : 'scroll_time_limit',
+        })
+      );
+      stats.warnings.push(threadCutShortText(cutShort));
+    }
+    allLlmQuotes(model.blocks)
+      .filter(
+        (quote) => quote.truncated || (!quote.noteRecovered && isPossiblyTruncatedPost(quote))
+      )
+      .forEach((quote) =>
+        stats.incomplete.push(
+          missingRecord('quoted-post-text', {
+            sourcePostId: statusIdFromSourceUrl(quote.sourceUrl) || undefined,
+            sourceUrl: quote.sourceUrl || undefined,
+            reason: quote.truncated ? 'long_form_preview_only' : 'possibly_truncated_preview',
+          })
+        )
+      );
+    llmTruncationWarnings(model).forEach((warning) => stats.warnings.push(warning));
     if (
       !(
         model.author &&
@@ -4101,21 +4194,32 @@
           sourceUrl: model.author.avatarUrl || undefined,
           reason: 'download_failed',
         },
-        'Main author avatar was unavailable at export time.'
+        undefined
       );
+      // Not a gap (captureGaps): the post reads the same without it.
+      addNote('Main author avatar was unavailable at export time.');
     }
     if (!stats.mainTextCaptured) stats.warnings.push('No main text content was captured.');
-    stats.missingMedia = stats.missing.length;
-    stats.incompleteMedia = stats.incomplete.length;
-    if (stats.missingMedia)
-      stats.warnings.push(`${stats.missingMedia} item(s) were unavailable at export time.`);
+    // Media counters count media: a quoted post is not media, and text gaps share the
+    // incomplete list only so the reader finds them in one place.
+    stats.missingMedia = stats.missing.filter((record) => record.type !== 'quoted-post').length;
+    stats.incompleteMedia = stats.incomplete.filter((record) => record.type === 'video').length;
+    const unavailable = stats.missing.filter((record) => record.type !== 'avatar').length;
+    if (unavailable) stats.warnings.push(`${unavailable} item(s) were unavailable at export time.`);
+    (model.syndicationUnchecked || []).forEach((item) => addNote(syndicationUncheckedText(item)));
     if (media.some((item) => item.embedded && !item.sha256))
       addNote('Some embedded media could not be content-hashed in this browser.');
     if (duplicateMedia.length)
       addNote(`${duplicateMedia.length} duplicate media hash group(s) were detected.`);
+    // The .md lists these and the HTML and manifest count them: one list, so the three
+    // never disagree (#104).
+    const sourceLinkUrls = Array.from(stats.sourceLinks).filter(
+      (url) => url && !String(url).startsWith('data:')
+    );
     return {
       ...stats,
-      sourceLinks: stats.sourceLinks.size,
+      sourceLinks: sourceLinkUrls.length,
+      sourceLinkUrls,
     };
   }
 
@@ -4394,6 +4498,7 @@
         polls: stats.polls,
         recoveredLongFormNotes: stats.recoveredNotes,
         quoteCards: stats.quoteCards,
+        replyContextCards: stats.replyContextCards,
         quoteChainsUnfollowed: stats.quoteChainsUnfollowed,
         renderedTweetCards: stats.renderedTweetCards,
         images: stats.images,
@@ -4411,6 +4516,10 @@
         note: String(model.userNote || ''),
         tags: Array.isArray(model.tags) ? model.tags : [],
       },
+      completeness: (() => {
+        const gaps = captureGaps(model, stats);
+        return { status: gaps.complete ? 'complete' : 'incomplete', summary: gaps.summary };
+      })(),
       media: stats.media,
       missing: stats.missing,
       incomplete: stats.incomplete,
@@ -4562,42 +4671,22 @@
     return directQuotes(model.blocks).filter((q) => !String(q._xaLlmNumber || '').includes('.'));
   }
 
+  // Reply-context cards and what they quote are the conversation above the post, not
+  // posts it embeds (#97), so they are counted apart.
   function llmQuoteCounts(model) {
-    const total = allLlmQuotes(model.blocks).length;
-    const direct = topLevelLlmQuotes(model).length;
-    return { total, direct, nested: total - direct };
-  }
-
-  function collectLlmSourceLinks(model) {
-    const links = new Set();
-    const add = (url) => {
-      if (url && !String(url).startsWith('data:')) links.add(String(url));
-    };
-    add(model.sourceUrl);
-    const walk = (blocks) => {
+    let total = 0;
+    let context = 0;
+    const walk = (blocks) =>
       (blocks || []).forEach((b) => {
-        if (b.kind === 'thread-marker') {
-          add(b.sourceUrl);
-        } else if (b.kind === 'link-card') {
-          add(b.url);
-        } else if (b.kind === 'paragraph') {
-          hrefsFromHtml(b.html).forEach(add);
-        } else if (b.kind === 'list') {
-          (b.items || []).forEach((item) => hrefsFromHtml(item).forEach(add));
-        } else if (b.kind === 'image') {
-          add(b.sourceUrl);
-        } else if (b.kind === 'video') {
-          add(b.sourceUrl);
-        } else if (b.kind === 'quote') {
-          add(b.sourceUrl);
+        if (b.kind === 'quote' && b.replyContext) context += 1;
+        else if (b.kind === 'quote') {
+          total += 1;
           walk(b.blocks);
-        } else if (b.kind === 'blockquote') {
-          walk(b.blocks);
-        }
+        } else if (b.kind === 'blockquote') walk(b.blocks);
       });
-    };
     walk(model.blocks);
-    return Array.from(links);
+    const direct = topLevelLlmQuotes(model).filter((q) => !q.replyContext).length;
+    return { total, direct, nested: total - direct, context };
   }
 
   function collectLlmMediaAttachments(model) {
@@ -4714,7 +4803,11 @@
 
   function isPossiblyTruncatedPost(block) {
     if (!block || !block.blocks || !block.blocks.length) return false;
-    const text = markdownPlainText(llmPostText(block));
+    // Only the post's own words: a poll, link card or nested quote below them is not
+    // where its text ends, and a poll's "counts as of … UTC" line read as cut off (#94).
+    const own = block.blocks.filter((b) => ['paragraph', 'heading', 'list'].includes(b.kind));
+    if (!own.length) return false;
+    const text = markdownPlainText(llmPostText({ blocks: own }));
     const compact = text.replace(/\s+/g, ' ').trim();
     if (compact.length < 80) return false;
     if (/[0-9]+[.)\u3001]$/.test(compact)) return true;
@@ -4740,10 +4833,14 @@
             ? `Video ${item.id} full video is NOT included in this bundle (an LLM cannot watch video); ${posterPath ? `its poster frame is ${posterPath}` : 'no poster frame was captured'} and the source link is provided (no transcript or visual description).`
             : llmCompanionHtml
               ? `Video ${item.id} bytes are embedded in the companion file ${llmCompanionHtml}; this markdown holds only metadata (no video bytes, transcript, or visual description).`
-              : `Video ${item.id} bytes were captured but not saved in this Markdown-only export; only metadata is available here (no playable file, transcript, or visual description).`
+              : llmPastedCopy
+                ? `Video ${item.id} bytes are not in this pasted copy; only metadata is available here (no playable file, transcript, or visual description).`
+                : `Video ${item.id} bytes were captured but not saved in this Markdown-only export; only metadata is available here (no playable file, transcript, or visual description).`
         );
       } else {
-        warnings.push(
+        // Poster + link is an accepted outcome (archiveStats notes it); only a video with
+        // no poster is a warning. Same text either way, so it is listed once (#97).
+        (item.posterCaptured ? notes : warnings).push(
           `Video ${item.id} was detected, but the video file was not preserved offline. ${
             item.posterCaptured ? 'Only the poster' : 'No poster'
           } and ${item.sourceLinkPreserved ? 'source link were' : 'no source link was'} preserved.`
@@ -4770,12 +4867,20 @@
   // gaps count: a video kept as poster + source link is not one (no export carries raw video for
   // an LLM, and shared capsules never upload it), quote tombstones are gone on X itself, and a
   // missing avatar does not change what the post says.
+  function threadCutShortText(cut) {
+    return `Thread cut short: the page scroll hit its ${
+      cut.reason === 'steps' ? 'step' : 'time'
+    } limit while the thread was still going, so posts after ${
+      cut.lastPostId || 'the last one captured'
+    } may be missing.`;
+  }
+
   function captureGaps(model, stats) {
     const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
     const count = (type) => stats.missing.filter((record) => record.type === type).length;
     const missing = [];
     // A caption-less photo/video/poll/quote post has no text to miss.
-    const hasOtherContent = stats.images + stats.videos + stats.polls + stats.quoteCards > 0;
+    const hasOtherContent = stats.ownContent > 0;
     if (!stats.mainTextCaptured && !hasOtherContent) missing.push('the main text');
     const quotes = count('quoted-post');
     if (quotes) missing.push(plural(quotes, 'quoted post', 'quoted posts'));
@@ -4793,6 +4898,8 @@
     const truncatedMain = (model.blocks || []).filter((b) => b.kind === 'truncation-notice').length;
     const parts = [];
     if (missing.length) parts.push(`Not captured: ${missing.join(', ')}.`);
+    if (model.thread && model.thread.cutShort)
+      parts.push(threadCutShortText(model.thread.cutShort));
     if (stats.quoteChainsUnfollowed)
       parts.push(
         `Quote chain cut short: ${plural(stats.quoteChainsUnfollowed, 'chain was', 'chains were')} not followed to the end, so deeper quoted posts may be missing.`
@@ -4864,7 +4971,9 @@
       pieces.push(
         llmCompanionHtml
           ? `bytes embedded in companion file ${llmCompanionHtml}, not in this markdown`
-          : 'bytes captured but not saved in this Markdown-only export; metadata only'
+          : llmPastedCopy
+            ? 'bytes not in this pasted copy; metadata only'
+            : 'bytes captured but not saved in this Markdown-only export; metadata only'
       );
     else {
       pieces.push(
@@ -4904,7 +5013,7 @@
       } else if (b.kind === 'divider') {
         lines.push('---');
       } else if (b.kind === 'thread-marker') {
-        lines.push(markdownHeading(3, `Post ${b.index || '?'} of ${b.total || '?'}`));
+        lines.push(markdownHeading(3, threadMarkerLabel(b)));
         if (b.sourceUrl) lines.push(`Source: ${b.sourceUrl}`);
         if (safeIsoTime(b.publishedAt))
           lines.push(`Published at: ${readableUtcTime(b.publishedAt)}`);
@@ -5128,7 +5237,7 @@
           'Bytes location',
           llmCompanionHtml
             ? `embedded in companion file ${llmCompanionHtml} (not in this markdown)`
-            : 'captured but not saved (Markdown-only export); metadata only'
+            : llmNotSavedHere()
         );
       } else {
         row('Video file MIME', 'unavailable');
@@ -5148,7 +5257,7 @@
             'Pixels location',
             llmCompanionHtml
               ? `embedded in companion file ${llmCompanionHtml} (not in this markdown)`
-              : 'captured but not saved (Markdown-only export); metadata only'
+              : llmNotSavedHere()
           );
       }
     }
@@ -5171,18 +5280,28 @@
   // Set per render for the "Save to library" bundle: Map<mediaId, "media/...">. When present, the
   // markdown references the real sidecar files. Precedence: mediaFiles > companionHtmlFilename > md.
   let llmMediaFiles = null;
+  // A clipboard copy (#104): no media/ folder or companion file travels with it, and the
+  // capture may have saved files elsewhere, so it must not claim a Markdown-only export.
+  let llmPastedCopy = false;
+
+  function llmNotSavedHere() {
+    return llmPastedCopy
+      ? 'not in this pasted copy; metadata only'
+      : 'captured but not saved (Markdown-only export); metadata only';
+  }
 
   function renderLlmMarkdown(model, debugJson = '', options = {}) {
     llmCompanionHtml = options.companionHtmlFilename || '';
     llmCompanionArchive = options.companionArchiveFilename || '';
     llmMediaFiles = options.mediaFiles instanceof Map ? options.mediaFiles : null;
+    llmPastedCopy = options.pastedCopy === true && !llmMediaFiles && !llmCompanionHtml;
     prepareArchiveModel(model);
     assignLlmQuoteNumbers(model);
     const documentLang = inferDocumentLang(model);
     const media = collectMediaManifest(model);
     const stats = archiveStats(model, media);
     const manifest = buildArchiveManifest(model, debugJson, stats, documentLang);
-    const links = collectLlmSourceLinks(model);
+    const links = stats.sourceLinkUrls;
     const share = options.share || null;
     const attachments = collectLlmMediaAttachments(model);
     const title = markdownLineText(model.heading || model.title || 'X Export');
@@ -5241,7 +5360,13 @@
           ? llmCompanionArchive
             ? `The media bytes are embedded (base64) inside the companion file ${llmCompanionHtml}, packaged together with this markdown inside ${llmCompanionArchive}. Extract both files before moving or sharing them so the pair stays together.`
             : `The media bytes are embedded (base64) inside the companion file ${llmCompanionHtml}, downloaded alongside this markdown. If you also have that file, the media is available there; if you only have this markdown, it is not.`
-          : 'This was a Markdown-only export, so the media bytes were not saved to any file. Only the metadata and the original source URLs below remain; use those URLs to retrieve the media from the source.';
+          : llmPastedCopy
+            ? `This is a pasted copy of the capture's Markdown, so it holds no media bytes.${
+                options.savedLocation
+                  ? ` Any media the capture saved is in its saved files (${markdownLineText(options.savedLocation)}).`
+                  : ''
+              } The original source URLs below point at the media on X.`
+            : 'This was a Markdown-only export, so the media bytes were not saved to any file. Only the metadata and the original source URLs below remain; use those URLs to retrieve the media from the source.';
     lines.push(
       'Capture note: This file preserves content visible to the logged-in user at export time. It may not include unavailable, private, deleted, failed, or unloaded content.',
       '',
@@ -5269,6 +5394,7 @@
       `- Embedded posts: ${quoteCounts.total} total`,
       `  - Direct embedded posts: ${quoteCounts.direct}`,
       `  - Nested quoted posts: ${quoteCounts.nested}`,
+      ...(quoteCounts.context ? [`- Conversation context posts: ${quoteCounts.context}`] : []),
       `- Polls: ${stats.polls}`,
       `- Images: ${imageMedia.filter((item) => item.embedded).length} captured, ${
         imageMedia.filter((item) => item.missing).length
@@ -5333,6 +5459,28 @@
       });
       (manifest.incomplete || []).forEach((item) => {
         const label = item.mediaId || item.sourcePostId || item.sourceUrl || item.type;
+        if (item.type === 'post-text' || item.type === 'quoted-post-text') {
+          lines.push(
+            `- ${item.type === 'post-text' ? 'Post' : 'Embedded post'} ${label}: ${
+              item.reason === 'long_form_preview_only'
+                ? 'long-form post, only the preview text was captured'
+                : 'text may be truncated (preview only)'
+            }.`
+          );
+          if (item.sourceUrl) lines.push(`  Source URL: ${item.sourceUrl}`);
+          return;
+        }
+        if (item.type === 'thread') {
+          lines.push(
+            `- Thread after post ${label}: not captured; the page scroll stopped before the thread ended.`
+          );
+          return;
+        }
+        if (item.type === 'quote-chain') {
+          lines.push(`- Quote chain below post ${label}: not followed to the end.`);
+          if (item.reason) lines.push(`  Reason: ${item.reason}`);
+          return;
+        }
         if (item.type === 'video') {
           lines.push(
             `- ${label}: video file not preserved offline; ${
@@ -5907,6 +6055,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
     // that report completeness must assess this, not the local model. Non-enumerable so it
     // is never serialized with the link record.
     Object.defineProperty(created, 'sharedModel', { value: sharedModel, enumerable: false });
+    Object.defineProperty(created, 'publicMedia', { value: publicMedia, enumerable: false });
     return created;
   }
 
@@ -6027,7 +6176,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
         return { ok: false, error: 'no_capsule', message: 'The export produced no share link.' };
       }
       const { created, model } = result;
-      const stats = archiveStats(model);
+      const stats = archiveStats(created.sharedModel || model);
       // `complete` is the uploaded capsule's own Status line (#91), so it is judged on the
       // shared copy a recipient sees, not the richer local model. The strict assessment
       // already gated the export; it is not a verdict on what the capsule holds.
@@ -6044,7 +6193,13 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       if (stats.incompleteMedia)
         warnings.push(`${stats.incompleteMedia} media item(s) incomplete (poster or link only)`);
       if (stats.quoteTombstones)
-        warnings.push(`${stats.quoteTombstones} quoted post(s) deleted on X`);
+        warnings.push(
+          `${stats.quoteTombstones} quoted post(s) unavailable on X (deleted, protected or suspended)`
+        );
+      if (stats.replyContextTombstones)
+        warnings.push(
+          `${stats.replyContextTombstones} post(s) above this reply unavailable on X (deleted, protected or suspended)`
+        );
       if (networkCaptureDiagnostics.interestingResponses === 0)
         warnings.push('no passive GraphQL capture was observed for this page');
       // Thread scope was requested. Say plainly how much of the thread came back, and
@@ -6318,6 +6473,13 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       '- Full video files are not uploaded; images and video poster frames may be included.',
       '',
       'Capture status:',
+      ...(created.status
+        ? [
+            `- Shared capsule status: ${
+              created.status.complete ? 'COMPLETE' : `INCOMPLETE. ${created.status.summary}`
+            }`,
+          ]
+        : []),
       `- Missing media: ${stats.missingMedia}`,
       `- Incomplete media: ${stats.incompleteMedia}`,
     ];
@@ -6334,6 +6496,9 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
       markdownUrl: created.markdownUrl || '',
       createdAt: created.createdAt || new Date().toISOString(),
       expiresAt: created.expiresAt || '',
+      // The published copy's own Status line, for AI_LINK.txt (the local bundle can hold
+      // media the shared copy leaves out).
+      ...(created.sharedModel ? { status: captureVerdict(created.sharedModel) } : {}),
     };
   }
 
@@ -6778,8 +6943,23 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     const viewUrl = safeUrl(created && created.viewUrl);
     if (!viewUrl) throw new Error('Share service returned an invalid public link.');
     ensureStyle();
+    // A recipient opens the shared copy (raw video and some local media are left out), so
+    // its own verdict is the one to show here, not the local capture's.
+    const sharedVerdict =
+      created && created.sharedModel ? captureVerdict(created.sharedModel) : null;
+    const incompleteText =
+      sharedVerdict && !sharedVerdict.complete
+        ? `Incomplete (shared capsule) — ${sharedVerdict.summary}`
+        : '';
     const receipt = document.querySelector('.xa-capture-receipt');
     if (receipt) {
+      // Copy for AI reads this, so a copy made after the share carries the link (#104).
+      receipt._xaShare = created;
+      const verdictEl = receipt.querySelector('.xa-receipt-status');
+      if (incompleteText && verdictEl) {
+        verdictEl.classList.add('warning');
+        verdictEl.textContent = incompleteText;
+      }
       const status = receipt.querySelector('.xa-receipt-action-status');
       status.classList.remove('error');
       status.textContent = copied
@@ -6815,6 +6995,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     status.textContent = copied
       ? 'Copied to your clipboard.'
       : 'Chrome could not copy automatically. Use Copy link below.';
+    const verdict = document.createElement('p');
+    verdict.className = 'xa-receipt-status warning';
+    verdict.textContent = incompleteText;
     const label = document.createElement('label');
     label.setAttribute('for', 'xa-share-url');
     label.textContent = 'AI readable link';
@@ -6841,7 +7024,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     openLink.rel = 'noopener';
     openLink.textContent = 'Open link';
     actions.append(closeButton, copyButton, openLink);
-    modal.append(title, status, label, input, actions);
+    modal.append(title, status, ...(incompleteText ? [verdict] : []), label, input, actions);
     backdrop.appendChild(modal);
 
     const close = () => backdrop.remove();
@@ -7209,7 +7392,6 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     model,
     debugJson = '',
     savedLocation = '',
-    markdown = '',
     videosPreservedOffline,
     onShare,
   }) {
@@ -7228,7 +7410,21 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     // a poster-only video is listed there but is not a gap.
     const gaps = captureVerdict(model);
     const complete = gaps.complete;
-    const retainedMarkdown = markdown || renderLlmMarkdown(model, debugJson);
+    const clipboardMarkdown = () => {
+      const created = backdrop._xaShare;
+      if (created && created.sharedModel && created.publicMedia) {
+        return renderLlmMarkdown(created.sharedModel, '', {
+          mediaFiles: created.publicMedia,
+          sharedLink: true,
+          share: shareMetadataFromCreated(created),
+        });
+      }
+      return renderLlmMarkdown(model, debugJson, {
+        pastedCopy: true,
+        savedLocation,
+        share: created ? shareMetadataFromCreated(created) : null,
+      });
+    };
     const backdrop = document.createElement('div');
     backdrop.className = 'xa-modal-backdrop xa-capture-receipt';
     backdrop.innerHTML = `<section class="xa-modal" role="dialog" aria-modal="true" aria-labelledby="xa-receipt-title"><h2 id="xa-receipt-title">Capture saved</h2>${
@@ -7271,7 +7467,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     done.addEventListener('click', close);
     backdrop.querySelector('.xa-receipt-copy').addEventListener('click', async () => {
       try {
-        await copyText(retainedMarkdown);
+        await copyText(clipboardMarkdown());
         setReceiptActionStatus('Clean Markdown copied for AI.');
       } catch (error) {
         setReceiptActionStatus(`Copy failed: ${error.message}`, { error: true });
@@ -7456,6 +7652,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   let capturedImageUrls = new Set(); // urls already placed in the current model
 
   function resetMediaState() {
+    // An export that never scrolls must not inherit the last one's stop (#101).
+    lastForceLoadStop = null;
     harvestedMedia.clear();
     harvestedTweets.clear();
     harvestedVideoCandidates.length = 0;
@@ -8216,6 +8414,19 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return out;
   }
 
+  // Set by forceLoadMedia when it gave up before the bottom of the column (#101).
+  let lastForceLoadStop = null;
+
+  // A thread may continue past the capture only when both hold: the scroll stopped before
+  // the bottom of the column, and the thread ran to the last post the scroll saw. A reply
+  // from someone else or a "Discover more" heading after it means the thread ended (#101).
+  function threadCutShortInfo(scrollStop, sequenceIds, candidateIds) {
+    if (!scrollStop || sequenceIds.length < 2 || !candidateIds.length) return null;
+    const lastId = sequenceIds[sequenceIds.length - 1];
+    if (!lastId || candidateIds[candidateIds.length - 1] !== lastId) return null;
+    return { reason: scrollStop.reason, lastPostId: lastId };
+  }
+
   /**
    * Scroll the content container top-to-bottom, harvesting media at each step so
    * virtualized/lazy images are captured before they're recycled. Bounded to the
@@ -8223,6 +8434,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * Best-effort; never throws.
    */
   async function forceLoadMedia(container, onTick, { fromTop = false } = {}) {
+    lastForceLoadStop = null;
     try {
       const scroller = document.scrollingElement || document.documentElement;
       if (!scroller) return;
@@ -8255,6 +8467,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       }
       if (Date.now() >= deadline) {
         warn(`forceLoadMedia timed out after ${CONFIG.forceLoadMaxMs}ms; continuing export`);
+      }
+      // Below this point X never mounted the column, so a thread running into it may go on.
+      if (y < limit()) {
+        lastForceLoadStop = { reason: Date.now() >= deadline ? 'time' : 'steps' };
       }
       scroller.scrollTo(0, limit());
       await sleep(300);
@@ -8517,7 +8733,74 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return blocks;
   }
 
+  /**
+   * A poll from a syndication payload's `card` (#94). The public payload carries each
+   * choice's label and raw count, so a post rebuilt from syndication keeps its poll
+   * instead of silently losing it. Open-poll counts are a snapshot and say so.
+   */
+  function syndicationPollBlock(t, sourceUrl) {
+    const card = t && t.card;
+    if (!card || !/^poll\dchoice/.test(String(card.name || ''))) return null;
+    const values = card.binding_values || {};
+    const value = (key) => {
+      const v = values[key];
+      if (!v) return undefined;
+      return v.string_value != null ? v.string_value : v.boolean_value;
+    };
+    const choices = [];
+    for (let n = 1; n <= 4; n++) {
+      const label = String(value(`choice${n}_label`) || '').trim();
+      if (!label) continue;
+      const raw = value(`choice${n}_count`);
+      const count = raw == null || raw === '' ? NaN : Number(raw);
+      choices.push({ label, count: Number.isFinite(count) ? count : null });
+    }
+    if (choices.length < 2) return null;
+    const counted = choices.every((choice) => choice.count != null);
+    const total = counted ? choices.reduce((sum, choice) => sum + choice.count, 0) : 0;
+    const end = safeIsoTime(value('end_datetime_utc') || '');
+    const asOf = safeIsoTime(value('last_updated_datetime_utc') || '');
+    let status = '';
+    if (value('counts_are_final') === true) status = 'Final results';
+    else if (end && Date.parse(end) <= Date.now()) status = 'Poll closed';
+    else if (end) status = `Open until ${readableUtcTime(end)}`;
+    if (status && status !== 'Final results' && asOf) {
+      status += `; counts as of ${readableUtcTime(asOf)}`;
+    }
+    return {
+      kind: 'poll',
+      choices: choices.map((choice) => ({
+        label: choice.label,
+        ...(counted ? { votes: choice.count.toLocaleString('en-US') } : {}),
+        ...(counted && total > 0
+          ? { percentage: `${((choice.count / total) * 100).toFixed(1).replace(/\.0$/, '')}%` }
+          : {}),
+      })),
+      ...(counted ? { totalVotes: total.toLocaleString('en-US') } : {}),
+      ...(status ? { status } : {}),
+      sourcePostId: statusIdFromUrl(sourceUrl) || String(t.id_str || ''),
+      sourceUrl,
+      resultsUnavailable: !counted,
+    };
+  }
+
   /** Turn a syndication tweet object into a `quote` model block. */
+  // A quoted_tweet with no author is a post gone on X (deleted, protected or suspended).
+  // It renders as an honest tombstone; an empty quote with no URL is a strict-mode blocker
+  // that no repair can clear (#102).
+  function isSyndicationTombstone(t) {
+    return !!t && (t.__typename === 'TweetTombstone' || !t.user);
+  }
+
+  function syndicationTombstoneBlock(t, sourceUrl) {
+    const text = t && t.tombstone && t.tombstone.text && t.tombstone.text.text;
+    return {
+      kind: 'quote-tombstone',
+      notice: text || 'This Post is unavailable.',
+      sourceUrl: sourceUrl || '',
+    };
+  }
+
   function syndicationToQuoteBlock(t) {
     const user = t.user || {};
     const sourceUrl = user.screen_name
@@ -8528,7 +8811,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (html) blocks.push({ kind: 'paragraph', html });
     syndicationMediaBlocks(t, sourceUrl).forEach((b) => blocks.push(b));
     syndicationLinkBlocks(t, sourceUrl).forEach((b) => blocks.push(b));
-    if (t.quoted_tweet) blocks.push(syndicationToQuoteBlock(t.quoted_tweet));
+    const poll = syndicationPollBlock(t, sourceUrl);
+    if (poll) blocks.push(poll);
+    if (t.quoted_tweet) {
+      blocks.push(
+        isSyndicationTombstone(t.quoted_tweet)
+          ? syndicationTombstoneBlock(t.quoted_tweet, sourceUrl)
+          : syndicationToQuoteBlock(t.quoted_tweet)
+      );
+    }
     return {
       kind: 'quote',
       author: {
@@ -8552,11 +8843,25 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * upgrading everything syndication did provide. Nested quote trees are
    * merged recursively so a poll inside a quote of a quote does not disappear.
    */
-  function mergeQuoteAfterSyndication(existing, fresh) {
+  function mergeQuoteAfterSyndication(existing, fresh, { nested = false } = {}) {
     if (!existing || !fresh) return fresh;
     const oldBlocks = existing.blocks || [];
-    const nextBlocks = (fresh.blocks || []).slice();
+    let nextBlocks = (fresh.blocks || []).slice();
     const extras = [];
+
+    // A nested quoted_tweet never carries note_tweet, so a rebuild from it cannot tell a
+    // preview from a full post. What this quote learned from its own payload stands:
+    // recovered long-form text, or the flag that only a preview was available.
+    if (nested && existing.noteRecovered && !fresh.noteRecovered) {
+      const fullText = oldBlocks.filter((block) => block.kind === 'paragraph');
+      if (fullText.length) {
+        nextBlocks = [...fullText, ...nextBlocks.filter((block) => block.kind !== 'paragraph')];
+        fresh.noteRecovered = true;
+        fresh.truncated = false;
+      }
+    } else if (nested && existing.truncated && !fresh.truncated) {
+      fresh.truncated = true;
+    }
 
     oldBlocks
       .filter((block) => block.kind === 'link-card')
@@ -8576,10 +8881,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         if (oldCard.imageDataUri) match.imageDataUri = oldCard.imageDataUri;
       });
 
+    // A DOM poll that showed results is what the viewer saw, so it wins. One that showed
+    // none (an open poll the viewer has not voted on) gives way to syndication's counts.
     oldBlocks
       .filter((block) => block.kind === 'poll')
       .forEach((poll) => {
-        if (!nextBlocks.some((block) => block.kind === 'poll')) extras.push(poll);
+        const freshAt = nextBlocks.findIndex((block) => block.kind === 'poll');
+        if (freshAt < 0) extras.push(poll);
+        else if (!poll.resultsUnavailable) nextBlocks[freshAt] = poll;
       });
 
     const oldQuotes = oldBlocks.filter((block) => block.kind === 'quote');
@@ -8590,12 +8899,28 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         oldQuotes.find(
           (candidate) => freshId && statusIdFromUrl(candidate.sourceUrl) === freshId
         ) || oldQuotes[index];
-      if (oldQuote) mergeQuoteAfterSyndication(oldQuote, freshQuote);
+      if (oldQuote) mergeQuoteAfterSyndication(oldQuote, freshQuote, { nested: true });
     });
 
     if (extras.length) {
       const nestedAt = nextBlocks.findIndex((block) => block.kind === 'quote');
       nextBlocks.splice(nestedAt < 0 ? nextBlocks.length : nestedAt, 0, ...extras);
+    }
+    // The payload is authoritative for what this post quotes only when it says something.
+    // A protected or age-gated nested post, or one already gone, comes back with no
+    // quoted_tweet at all, so keep what the DOM showed instead of dropping it (#102).
+    const payloadNamesNested = nextBlocks.some((block) =>
+      ['quote', 'quote-tombstone', 'quote-chain-note'].includes(block.kind)
+    );
+    if (!payloadNamesNested) {
+      const ownId = statusIdFromUrl(fresh.sourceUrl);
+      oldBlocks
+        .filter((block) => {
+          if (block.kind === 'quote-tombstone' || block.kind === 'quote-chain-note') return true;
+          const nestedId = block.kind === 'quote' && statusIdFromUrl(block.sourceUrl);
+          return !!nestedId && nestedId !== ownId;
+        })
+        .forEach((block) => nextBlocks.push(block));
     }
     fresh.blocks = nextBlocks;
     return fresh;
@@ -8778,7 +9103,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * Replace each top-level quote block's content with authoritative syndication
    * data (by status id). On any failure the original DOM-extracted quote is kept.
    */
-  async function enrichQuotesViaSyndication(model, onProgress) {
+  async function enrichQuotesViaSyndication(model, onProgress, fetchTweet = fetchTweetSyndication) {
     const quotes = model.blocks.filter((b) => b.kind === 'quote' && b.sourceUrl);
     let done = 0;
     onProgress && onProgress(0, quotes.length);
@@ -8786,8 +9111,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const id = statusIdFromUrl(q.sourceUrl);
       if (id) {
         try {
-          const data = await fetchTweetSyndication(id);
-          if (data && data.user && (data.__typename === 'Tweet' || data.text != null)) {
+          const data = await fetchTweet(id);
+          if (isSyndicationTombstone(data) && q.blocks && q.blocks.length) {
+            recordSyndicationUnchecked(model, id, { status: 404, message: 'tombstone' });
+          } else if (data && data.user && (data.__typename === 'Tweet' || data.text != null)) {
             const fresh = mergeQuoteAfterSyndication(q, syndicationToQuoteBlock(data));
             q.author = fresh.author;
             q.blocks = fresh.blocks;
@@ -8801,6 +9128,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           }
         } catch (e) {
           warn('syndication enrich failed for', id, '-', e.message);
+          // An empty card is already a strict blocker; one that kept its DOM text would
+          // otherwise ship with whatever media never loaded, and no note (#99).
+          if (q.blocks && q.blocks.length) recordSyndicationUnchecked(model, id, e);
         }
       }
       done++;
@@ -8820,6 +9150,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (match) return `media:${match[1]}`;
     match = value.match(/\/(?:ext_tw_video_thumb|amplify_video_thumb|tweet_video_thumb)\/(\d+)\//);
     if (match) return `video:${match[1]}`;
+    // An animated GIF's poster and MP4 share an alphanumeric key, not a numeric id (#100):
+    // tweet_video_thumb/<key>.jpg and video.twimg.com/tweet_video/<key>.mp4.
+    match = value.match(/\/tweet_video(?:_thumb)?\/([A-Za-z0-9_-]+)\.\w+(?:[?#]|$)/);
+    if (match) return `gif:${match[1]}`;
     return '';
   }
 
@@ -8982,6 +9316,18 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       });
     });
 
+    // A poll card virtualized away before capture exists only in the payload (#94). A DOM
+    // poll that showed no results takes the payload's counts; one that did is kept.
+    const payloadPoll = syndicationPollBlock(data, marker.sourceUrl);
+    if (payloadPoll) {
+      const domPoll = segment.find((b) => b.kind === 'poll');
+      if (!domPoll) additions.push(payloadPoll);
+      else if (domPoll.resultsUnavailable && !payloadPoll.resultsUnavailable) {
+        const question = domPoll.question;
+        Object.assign(domPoll, payloadPoll, question ? { question } : {});
+      }
+    }
+
     // Long-form (note) post: syndication only ever has the preview text, but the
     // network capture may hold the full text X's own web app already downloaded.
     let segEnd = end;
@@ -9093,6 +9439,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         }
       } catch (e) {
         warn('thread syndication check failed for post', marker.statusId, '-', e.message);
+        recordSyndicationUnchecked(model, marker.statusId, e);
       }
       done++;
       onProgress && onProgress(done, markers.length);
@@ -9122,6 +9469,29 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * are skipped (their body has no tweet syndication payload); failures keep
    * the DOM capture as-is.
    */
+  /**
+   * The per-post syndication check is what recovers media, link cards and quotes that never
+   * mounted in the DOM, and flags long-form previews. When it fails, the capture is
+   * unverified, not known to be missing anything, so it is a note, never a gap or a strict
+   * blocker: under a 429 every unattended capture would become needs_owner (#99).
+   */
+  function recordSyndicationUnchecked(model, statusId, error) {
+    if (!model || !statusId) return;
+    const list = model.syndicationUnchecked || (model.syndicationUnchecked = []);
+    if (list.some((item) => item.statusId === String(statusId))) return;
+    list.push({
+      statusId: String(statusId),
+      status: (error && error.status) || 0,
+      error: String((error && error.message) || 'fetch failed'),
+    });
+  }
+
+  function syndicationUncheckedText(item) {
+    return item.status === 404
+      ? `X's public copy of post ${item.statusId} is not available (protected or removed), so media or quotes that never loaded on the page could not be recovered from it.`
+      : `Post ${item.statusId} could not be cross-checked: X did not answer (${item.error}), so media or quotes that never loaded on the page may be missing.`;
+  }
+
   async function enrichFocusedPostViaSyndication(
     model,
     onProgress,
@@ -9152,6 +9522,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       }
     } catch (e) {
       warn('post syndication check failed for', statusId, '-', e.message);
+      recordSyndicationUnchecked(model, statusId, e);
     }
     onProgress && onProgress(1, 1);
     return model;
@@ -9224,6 +9595,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         // Only a 404 is X saying the post is gone. Any other failure (5xx, timeout,
         // network) says nothing about it, so it must not be reported as deleted.
         let fetchInconclusive = false;
+        let fromInline = false;
         try {
           // Full fetch first: the inline `parent` payload is a slimmer shape that can lack
           // media; fall back to it only when the id fetch fails.
@@ -9231,6 +9603,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         } catch (e) {
           warn('reply-context fetch failed for', hop.id, '-', e.message);
           parentData = hop.inline;
+          fromInline = !!hop.inline;
           fetchInconclusive = !(e && e.status === 404);
         }
         if (
@@ -9245,6 +9618,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             card.sourceUrl = `https://x.com/${hop.handle}/status/${hop.id}`;
           }
           if (card.truncated) recoverQuoteNoteText(card, getCapturedNoteTweet(hop.id));
+          // The slim copy carries text and the next hop but no mediaDetails (#98).
+          if (fromInline) {
+            card.blocks.push({
+              kind: 'reply-context-note',
+              replyContext: true,
+              reason: 'partial',
+              statusId: hop.id,
+            });
+          }
           ancestors.push(card);
           hop = nextHop(parentData);
         } else {
@@ -9267,7 +9649,15 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         }
       }
     } catch (e) {
+      // Only the root fetch reaches here. The DOM has no reliable reply signal, so all the
+      // export can say is that it could not check (#98).
       warn('reply-context check failed for', rootId, '-', e.message);
+      ancestors.push({
+        kind: 'reply-context-note',
+        replyContext: true,
+        reason: 'unchecked',
+        error: String((e && e.message) || 'fetch failed'),
+      });
     }
     if (ancestors.length) {
       // Directly above the exported post: inside a thread that is its own marker, so a
@@ -9282,6 +9672,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
 
   /** Reader-facing text for a conversation the reply-context walk stopped climbing. */
   function replyContextNoteText(b) {
+    if (b.reason === 'unchecked') {
+      return `Could not check whether this post replies to another: X did not answer when this was saved (${
+        b.error || 'fetch failed'
+      }).`;
+    }
+    if (b.reason === 'partial') {
+      return `Post ${b.statusId || ''} could not be fetched in full, so it is shown from the reply's own copy of it: its text, without its media.`;
+    }
     return `Earlier conversation not included: this export keeps the ${
       b.limit || CONFIG.replyContextMaxDepth
     } posts directly above the reply. The conversation continues with ${
@@ -9304,7 +9702,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    *     `quote-chain-note`, counted so the receipt stops saying COMPLETE;
    *   - a 404 on the leaf, or a tombstoned quoted_tweet: a `quote-tombstone`.
    * A cycle stops silently, since the post is already shown above it. Reply-context cards
-   * are not followed: they are context for the exported post, not part of what it quotes.
+   * are followed too (#98): they used to stop one level down with no note. A gap inside
+   * one is context, so archiveStats reports it as a note, not a capture gap.
    * Must run before inlineMedia so the new cards' media and avatars are inlined.
    */
   async function followQuoteChainsViaSyndication(
@@ -9324,7 +9723,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           segmentId = b.statusId || rootId;
         } else if (b.kind === 'blockquote') {
           collect(b.blocks, depth, path);
-        } else if (b.kind === 'quote' && !b.replyContext) {
+        } else if (b.kind === 'quote') {
           const id = statusIdFromUrl(b.sourceUrl);
           const chainPath = (depth === 0 ? [rootId, segmentId] : path).concat(id ? [id] : []);
           if ((b.blocks || []).some((child) => ends.has(child.kind))) {
@@ -9346,6 +9745,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const id = statusIdFromUrl(quote.sourceUrl);
       try {
         const data = await fetchTweet(id);
+        applyLeafPayloadToQuote(quote, data, lookupNote(id));
         const qt = data && data.quoted_tweet;
         const nextId = qt ? String(qt.id_str || data.quoted_status_id_str || '') : '';
         if (!qt || (nextId && path.includes(nextId))) {
@@ -9359,13 +9759,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             limit: maxDepth,
             sourceUrl: quote.sourceUrl,
           });
-        } else if (!qt.user || qt.__typename === 'TweetTombstone') {
-          const tombstoneText = qt.tombstone && qt.tombstone.text && qt.tombstone.text.text;
-          quote.blocks.push({
-            kind: 'quote-tombstone',
-            notice: tombstoneText || 'This Post is unavailable.',
-            sourceUrl: quote.sourceUrl,
-          });
+        } else if (isSyndicationTombstone(qt)) {
+          quote.blocks.push(syndicationTombstoneBlock(qt, quote.sourceUrl));
         } else {
           const child = syndicationToQuoteBlock(qt);
           if (!statusIdFromUrl(child.sourceUrl)) {
@@ -9408,6 +9803,27 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     }
     if (followed) log(`quote chain pass: followed ${followed} deeper quote level(s)`);
     return model;
+  }
+
+  /**
+   * A quote built from its parent's nested quoted_tweet lacks `card` and `note_tweet`:
+   * real payloads drop both at that level. The leaf's own by-id payload, already fetched
+   * to find the next hop, supplies its poll and its long-form flag (#94).
+   */
+  function applyLeafPayloadToQuote(quote, data, note) {
+    if (!quote || !data) return;
+    const payloadPoll = syndicationPollBlock(data, quote.sourceUrl);
+    if (payloadPoll) {
+      const at = (quote.blocks || []).findIndex((b) => b.kind === 'poll');
+      if (at < 0) quote.blocks.push(payloadPoll);
+      else if (quote.blocks[at].resultsUnavailable && !payloadPoll.resultsUnavailable) {
+        quote.blocks[at] = payloadPoll;
+      }
+    }
+    if (data.note_tweet && !quote.truncated && !quote.noteRecovered) {
+      quote.truncated = true;
+      recoverQuoteNoteText(quote, note);
+    }
   }
 
   /** Reader-facing text for a quote chain the export stopped following. */
@@ -11872,6 +12288,27 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     });
   }
 
+  // How many posts by the root author follow it with nobody else in between: the run
+  // buildTweetSequence reads as the thread. The author answering commenters further down
+  // is not part of it, and counting those warned about a thread that was never there (#106).
+  function sameAuthorRunFromRoot(entries, rootId, rootHandle) {
+    const norm = (h) =>
+      String(h || '')
+        .replace(/^@/, '')
+        .toLowerCase();
+    const want = norm(rootHandle);
+    const start = Math.max(
+      0,
+      entries.findIndex((entry) => entry.id && entry.id === rootId)
+    );
+    let run = 0;
+    for (const entry of entries.slice(start)) {
+      if (norm(entry.handle) !== want) break;
+      run += 1;
+    }
+    return run;
+  }
+
   async function waitForConversation(column) {
     if (!column) return 0;
     const started = Date.now();
@@ -11903,8 +12340,13 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       handleFromSourceUrl(typeof location !== 'undefined' ? location.href : '')
     );
     const sameAuthor = rootHandle
-      ? topLevelTweetEls(column).filter((el) => norm(extractAuthor(el).handle) === rootHandle)
-          .length
+      ? sameAuthorRunFromRoot(
+          topLevelTweetEls(column)
+            .sort(compareDocumentOrder)
+            .map((el) => ({ id: tweetStatusId(el), handle: extractAuthor(el).handle })),
+          currentStatusId(),
+          rootHandle
+        )
       : null;
     Object.assign(conversationWaitDiagnostics, {
       ran: true,
@@ -12251,7 +12693,6 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           model,
           debugJson,
           savedLocation: saved.location,
-          markdown: saved.markdown,
           videosPreservedOffline: saved.videosPreservedOffline,
           onShare: () => shareFromReceipt(saved),
         });
@@ -12291,7 +12732,6 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           model,
           debugJson,
           savedLocation: saved.location,
-          markdown: saved.markdown,
           videosPreservedOffline: saved.videosPreservedOffline,
           onShare: () => shareFromReceipt(saved),
         });
@@ -12312,7 +12752,6 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const basename = `${slugify(model.title)}.${nowStamp()}`;
       const htmlFilename = `${basename}.html`;
       const saved = [];
-      let receiptMarkdown = '';
       if (outputType === 'both') {
         const html = assembleHtml(model, debugJson);
         const zipFilename = `${basename}.zip`;
@@ -12321,7 +12760,6 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           companionHtmlFilename: htmlFilename,
           companionArchiveFilename: zipFilename,
         });
-        receiptMarkdown = markdown;
         downloadBlob(
           zipFilename,
           new Blob(
@@ -12351,7 +12789,6 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         if (outputType === 'md') {
           // A Markdown-only export has no companion on disk, so it must not claim one.
           const markdown = renderLlmMarkdown(model, debugJson);
-          receiptMarkdown = markdown;
           const markdownFilename = `${basename}.llm.md`;
           downloadBlob(
             markdownFilename,
@@ -12361,12 +12798,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
           log('markdown', markdownFilename, humanBytes(markdown.length));
         }
       }
-      if (!receiptMarkdown) receiptMarkdown = renderLlmMarkdown(model, debugJson);
       showCaptureReceipt({
         model,
         debugJson,
         savedLocation: saved.join(' and '),
-        markdown: receiptMarkdown,
         videosPreservedOffline:
           outputType === 'html' || outputType === 'both'
             ? archiveStats(model).videosPreservedOffline
@@ -13030,6 +13465,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       deleteSharedCapsule,
       shareLinkExpired,
       aiLinkReceiptText,
+      shareMetadataFromCreated,
       showRecentShareLinks,
       renderArchiveManifestJson,
       createShareLink,
@@ -13085,6 +13521,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       saveToLibrary,
       resaveLibraryAfterShare,
       archiveStats,
+      sameAuthorRunFromRoot,
+      threadCutShortInfo,
       // Strict-mode ship-blocker: assessment, diagnostic bundle, auto-repair
       // round, and the confirm modal (DOM-bound; exercised via jsdom).
       assessExportCompleteness,
@@ -13152,6 +13590,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       mediaKeyFromUrl,
       enrichThreadViaSyndication,
       enrichFocusedPostViaSyndication,
+      enrichQuotesViaSyndication,
       enrichReplyContextViaSyndication,
       followQuoteChainsViaSyndication,
       repairExportBlockers,

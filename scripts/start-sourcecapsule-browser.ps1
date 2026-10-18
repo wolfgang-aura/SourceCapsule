@@ -363,7 +363,12 @@ while ((Get-Date) -lt $deadline) {
     # Do NOT redirect the CLI's stderr here. In PowerShell 5.1, `2>&1` on a native exe
     # wraps each stderr line in an ErrorRecord, and with $ErrorActionPreference = 'Stop'
     # that aborts this loop on the CLI's own progress output. Exit code is the signal.
-    $output = & node $cli --ping
+    # A caller that captures this script's output (an agent, a scheduled task) wraps the
+    # stderr lines anyway, so the call runs with a local 'Continue' as well.
+    $output = & {
+        $ErrorActionPreference = 'Continue'
+        & node $cli --ping
+    }
     if ($LASTEXITCODE -eq 0) {
         Write-Host ''
         Write-Host 'Bridge is live:'

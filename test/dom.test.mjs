@@ -347,6 +347,181 @@ check('AI readable link receipt records expiry, URLs, and missing media warnings
   assert.match(receipt, /Re-export from X/);
 });
 
+check('AI_LINK.txt states the shared capsule verdict, not the local one', () => {
+  const sharedModel = {
+    title: 'Shared',
+    sourceUrl: STATUS_URL,
+    blocks: [{ kind: 'paragraph', html: 'Main' }, { kind: 'truncation-notice' }],
+  };
+  const created = { viewUrl: 'https://sourcecapsule-share.example/c/abc', expiresAt: '' };
+  Object.defineProperty(created, 'sharedModel', { value: sharedModel, enumerable: false });
+  const receipt = engine.aiLinkReceiptText(engine.shareMetadataFromCreated(created), {
+    title: 'Local',
+    sourceUrl: STATUS_URL,
+    blocks: [{ kind: 'paragraph', html: 'Main' }],
+  });
+  assert.match(receipt, /Shared capsule status: INCOMPLETE\. Possibly truncated: 1 main post/);
+});
+
+// #97: every surface that reports on a capture must agree with the Status line.
+const reportModel = (blocks, extra = {}) => ({
+  type: 'post',
+  title: 'Report',
+  author: { name: 'R', handle: '@r' },
+  sourceUrl: 'https://x.com/r/status/2111000000000000005',
+  exportedAt: '2026-10-19T00:00:00Z',
+  blocks,
+  ...extra,
+});
+const mdSection = (md, heading) => {
+  const start = md.indexOf(`## ${heading}`);
+  const end = md.indexOf('\n## ', start + 3);
+  return md.slice(start, end < 0 ? undefined : end);
+};
+
+check('a truncated main post is listed where the Status line sends the reader', () => {
+  const model = reportModel([
+    { kind: 'paragraph', html: 'Long preview' },
+    { kind: 'truncation-notice', sourceUrl: 'https://x.com/r/status/2111000000000000005' },
+  ]);
+  const md = engine.renderLlmMarkdown(model);
+  assert.match(md, /Status: INCOMPLETE/);
+  const missing = mdSection(md, 'Missing / Incomplete Content');
+  assert.doesNotMatch(missing, /- None/);
+  assert.match(missing, /2111000000000000005/);
+  const manifest = JSON.parse(engine.renderArchiveManifestJson(model, ''));
+  assert.equal(manifest.completeness.status, 'incomplete');
+  assert.ok(
+    manifest.warnings.some((w) => /long-form/i.test(w)),
+    'the manifest warns too'
+  );
+});
+
+// #101: a thread the scroll stopped in the middle of must not read "Post 2 of 2", COMPLETE.
+const T1 = '2111000000000000005';
+const T2 = '2111000000000000006';
+const cutThread = () =>
+  reportModel(
+    [
+      { kind: 'thread-marker', index: 1, total: 2, totalAtLeast: true, statusId: T1 },
+      { kind: 'paragraph', html: 'First' },
+      { kind: 'thread-marker', index: 2, total: 2, totalAtLeast: true, statusId: T2 },
+      { kind: 'paragraph', html: 'Second' },
+    ],
+    {
+      thread: {
+        capturedPosts: 2,
+        sourcePostIds: [T1, T2],
+        completeness: 'best-effort',
+        cutShort: { reason: 'time', lastPostId: T2 },
+      },
+    }
+  );
+
+check('a thread cut short by the scroll limit reads INCOMPLETE and says where', () => {
+  const md = engine.renderLlmMarkdown(cutThread());
+  assert.match(md, /Status: INCOMPLETE/);
+  assert.match(md, /Thread cut short/);
+  assert.match(mdSection(md, 'Missing / Incomplete Content'), new RegExp(T2));
+  assert.match(md, /Post 2 of at least 2/);
+  assert.doesNotMatch(md, /Post 2 of 2\b/);
+  assert.match(engine.assembleHtml(cutThread()), /Post 2 of at least 2/);
+  const manifest = JSON.parse(engine.renderArchiveManifestJson(cutThread(), ''));
+  assert.equal(manifest.completeness.status, 'incomplete');
+});
+
+check('only a scroll that stopped mid-thread counts as cut short', () => {
+  const stop = { reason: 'time' };
+  // The thread ran to the last post the scroll saw: it may go on.
+  assert.deepEqual(engine.threadCutShortInfo(stop, ['1', '2'], ['0', '1', '2']), {
+    reason: 'time',
+    lastPostId: '2',
+  });
+  // A reply from someone else follows the thread: it ended.
+  assert.equal(engine.threadCutShortInfo(stop, ['1', '2'], ['1', '2', '3']), null);
+  // The scroll reached the bottom: nothing was left unseen.
+  assert.equal(engine.threadCutShortInfo(null, ['1', '2'], ['1', '2']), null);
+  // A single post is not a thread.
+  assert.equal(engine.threadCutShortInfo(stop, ['1'], ['1']), null);
+});
+
+check('text in a reply-context card does not count as the reply main text', () => {
+  const model = reportModel([
+    {
+      kind: 'quote',
+      replyContext: true,
+      replyDepth: 1,
+      author: { name: 'P', handle: '@p' },
+      sourceUrl: 'https://x.com/p/status/2111000000000000004',
+      blocks: [{ kind: 'paragraph', html: 'The parent post' }],
+    },
+  ]);
+  const md = engine.renderLlmMarkdown(model);
+  assert.match(md, /Status: INCOMPLETE\. Not captured: the main text/);
+  assert.match(md, /- Main text: not detected/);
+});
+
+check('reply-context cards are conversation context, not embedded or gone quoted posts', () => {
+  const model = reportModel([
+    {
+      kind: 'quote-tombstone',
+      replyContext: true,
+      replyDepth: 1,
+      notice: 'This Post was deleted.',
+      sourceUrl: 'https://x.com/p/status/2111000000000000004',
+    },
+    { kind: 'paragraph', html: 'A reply' },
+  ]);
+  const stats = engine.archiveStats(model);
+  assert.equal(stats.quoteTombstones, 0, 'a gone parent is not a gone quoted post');
+  assert.equal(stats.replyContextTombstones, 1);
+  const model2 = reportModel([
+    {
+      kind: 'quote',
+      replyContext: true,
+      replyDepth: 1,
+      author: { name: 'P', handle: '@p' },
+      sourceUrl: 'https://x.com/p/status/2111000000000000004',
+      blocks: [{ kind: 'paragraph', html: 'Parent' }],
+    },
+    { kind: 'paragraph', html: 'A reply' },
+  ]);
+  const md = engine.renderLlmMarkdown(model2);
+  assert.match(md, /- Embedded posts: 0 total/);
+  assert.match(md, /- Conversation context posts: 1/);
+  assert.equal(engine.archiveStats(model2).quoteCards, 0);
+});
+
+// Seen live on 1913214683064197567 (two GIFs kept as poster + link): each message was
+// printed under Warnings and again under Notes.
+check('a poster-only video is noted once, not also warned about', () => {
+  const model = reportModel([
+    { kind: 'paragraph', html: 'Text' },
+    {
+      kind: 'video',
+      _xaMediaId: 'video-001',
+      posterUrl: 'https://pbs.twimg.com/tweet_video_thumb/Go0amycbQAAkrZ0.jpg',
+      posterDataUri: 'data:image/jpeg;base64,AAAA',
+      sourceUrl: 'https://x.com/r/status/2111000000000000005',
+      mode: 'poster-only',
+    },
+  ]);
+  const md = engine.renderLlmMarkdown(model);
+  const summary = mdSection(md, 'Capture Summary');
+  assert.equal(summary.split('Video video-001 was detected').length - 1, 1);
+  assert.match(summary, /- Warnings:\n {2}- None/);
+});
+
+check('a missing avatar is a note, not a warning, on a COMPLETE capture', () => {
+  const model = reportModel([{ kind: 'paragraph', html: 'Text' }]);
+  model.author.avatarUrl = 'https://pbs.twimg.com/profile_images/1/a.jpg';
+  model.author.avatarFailed = true;
+  const md = engine.renderLlmMarkdown(model);
+  assert.match(md, /Status: COMPLETE/);
+  assert.match(md, /- Warnings:\n {2}- None/);
+  assert.match(mdSection(md, 'Capture Summary'), /- Notes:\n {2}- Main author avatar/);
+});
+
 await checkAsync('media byte fetch retries transient userscript request failures', async () => {
   let calls = 0;
   global.GM_xmlhttpRequest = (options) => {
@@ -1875,6 +2050,69 @@ check('mediaKeyFromUrl canonicalizes DOM and syndication URL shapes to one key',
   assert.equal(engine.mediaKeyFromUrl('https://pbs.twimg.com/profile_images/1/a.jpg'), '');
 });
 
+// #100: real GIF URLs (from 2110683893837799707) carry an alphanumeric key, not digits.
+check('a GIF poster and its MP4 share one media key', () => {
+  const poster = engine.mediaKeyFromUrl(
+    'https://pbs.twimg.com/tweet_video_thumb/HUqnzksX0AAofGB.jpg'
+  );
+  assert.equal(poster, 'gif:HUqnzksX0AAofGB');
+  assert.equal(
+    engine.mediaKeyFromUrl('https://video.twimg.com/tweet_video/HUqnzksX0AAofGB.mp4'),
+    poster
+  );
+});
+
+await checkAsync('a GIF that never mounted is recovered from syndication, once', async () => {
+  const gif = {
+    type: 'animated_gif',
+    media_url_https: 'https://pbs.twimg.com/tweet_video_thumb/HUqnzksX0AAofGB.jpg',
+    original_info: { width: 480, height: 270 },
+    video_info: {
+      variants: [
+        {
+          bitrate: 0,
+          content_type: 'video/mp4',
+          url: 'https://video.twimg.com/tweet_video/HUqnzksX0AAofGB.mp4',
+        },
+      ],
+    },
+  };
+  const payload = {
+    __typename: 'Tweet',
+    id_str: '2110683893837799707',
+    text: 'me when',
+    user: { name: 'G', screen_name: 'g' },
+    mediaDetails: [gif],
+  };
+  const post = (blocks) => ({
+    type: 'post',
+    sourceUrl: 'https://x.com/g/status/2110683893837799707',
+    blocks: [{ kind: 'paragraph', html: 'me when' }, ...blocks],
+  });
+  const lost = post([]);
+  await engine.enrichFocusedPostViaSyndication(
+    lost,
+    null,
+    async () => payload,
+    () => null
+  );
+  assert.equal(lost.blocks.filter((b) => b.kind === 'video').length, 1, 'the lost GIF is back');
+  const mounted = post([
+    {
+      kind: 'video',
+      posterUrl: 'https://pbs.twimg.com/tweet_video_thumb/HUqnzksX0AAofGB.jpg',
+      mp4Url: 'https://video.twimg.com/tweet_video/HUqnzksX0AAofGB.mp4',
+    },
+  ]);
+  await engine.enrichFocusedPostViaSyndication(
+    mounted,
+    null,
+    async () => payload,
+    () => null
+  );
+  assert.equal(mounted.blocks.filter((b) => b.kind === 'video').length, 1, 'no twin');
+});
+
 await checkAsync(
   'thread media enrichment recovers lazy-load losses into the right post, no dupes',
   async () => {
@@ -2537,7 +2775,7 @@ check('threads can carry multiple poll blocks through HTML, Markdown, and manife
 });
 
 await checkAsync(
-  'persistent receipt copies retained Markdown, preserves local success on share failure, and dismisses with Escape',
+  'persistent receipt copies a pasted-copy Markdown, preserves local success on share failure, and dismisses with Escape',
   async () => {
     const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
     let copied = '';
@@ -2571,7 +2809,6 @@ await checkAsync(
     engine.showCaptureReceipt({
       model: receiptModel,
       savedLocation: 'Library/2026-07-01/r-1',
-      markdown: 'retained clean markdown',
       onShare: async () => {
         throw new Error('network unavailable');
       },
@@ -2582,7 +2819,10 @@ await checkAsync(
     assert.match(receipt.querySelector('.xa-receipt-grid').textContent, /Polls captured1/);
     receipt.querySelector('.xa-receipt-copy').click();
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.equal(copied, 'retained clean markdown');
+    // Rendered for the clipboard at click time, not the library bundle text (#104).
+    assert.match(copied, /Saved text/);
+    assert.match(copied, /pasted copy/);
+    assert.doesNotMatch(copied, /media\/ folder/);
     receipt.querySelector('.xa-receipt-share').click();
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.match(
@@ -4093,6 +4333,115 @@ await checkAsync('a failed fetch mid-conversation ends the walk honestly', async
   assert.equal(model.blocks[1].sourceUrl, 'https://x.com/u300/status/300');
 });
 
+// #98: the walk used to stop without a trace in both of these.
+await checkAsync('a failed root fetch says the conversation was not checked', async () => {
+  const model = deepReply();
+  await engine.enrichReplyContextViaSyndication(model, null, conversationFetch({ 400: 503 }));
+  assert.equal(model.blocks[0].kind, 'reply-context-note');
+  const md = engine.renderLlmMarkdown(model);
+  assert.match(md, /could not check whether this post replies to another/i);
+  assert.match(md, /Status: COMPLETE/, 'an unanswered check is a note, not a gap');
+});
+
+await checkAsync(
+  'an ancestor shown from the slim inline copy says its media may be missing',
+  async () => {
+    const model = deepReply();
+    const base = conversationFetch({ 300: 500 });
+    await engine.enrichReplyContextViaSyndication(model, null, async (id) => {
+      const data = await base(id);
+      // The reply's own payload carries a slim copy of its parent, without media.
+      if (id === '400') {
+        data.parent = {
+          id_str: '300',
+          text: 'post 300',
+          user: { name: 'U300', screen_name: 'u300' },
+          in_reply_to_status_id_str: '200',
+          in_reply_to_screen_name: 'u200',
+        };
+      }
+      return data;
+    });
+    const cards = model.blocks.filter((b) => b.kind === 'quote' && b.replyContext);
+    assert.deepEqual(
+      cards.map((b) => b.sourceUrl),
+      [
+        'https://x.com/u100/status/100',
+        'https://x.com/u200/status/200',
+        'https://x.com/u300/status/300',
+      ],
+      'the walk continues past the slim copy'
+    );
+    const card300 = cards[2];
+    const note = (card300.blocks || []).find((b) => b.kind === 'reply-context-note');
+    assert.ok(note, 'the card built from the slim copy carries a note');
+    assert.match(engine.renderLlmMarkdown(model), /without its media/i);
+  }
+);
+
+// #99: a post whose syndication cross-check failed used to leave no trace, though that
+// check is what recovers media and quotes that never mounted in the DOM.
+await checkAsync('a failed syndication cross-check is a note in the capture', async () => {
+  const fail = (status) => async () => {
+    throw Object.assign(new Error(`syndication: HTTP ${status}`), { status });
+  };
+  const focused = deepReply();
+  await engine.enrichFocusedPostViaSyndication(focused, null, fail(429), () => null);
+  let md = engine.renderLlmMarkdown(focused);
+  assert.match(md, /Status: COMPLETE/, 'unverified is not the same as missing');
+  assert.match(
+    mdSection(md, 'Capture Summary'),
+    /post 400.*X did not answer \(syndication: HTTP 429\)/i
+  );
+
+  const thread = {
+    ...deepReply(),
+    blocks: [
+      { kind: 'thread-marker', statusId: '300', sourceUrl: 'https://x.com/u400/status/300' },
+      { kind: 'paragraph', html: 'post 300' },
+      { kind: 'thread-marker', statusId: '400', sourceUrl: 'https://x.com/u400/status/400' },
+      { kind: 'paragraph', html: 'post 400' },
+    ],
+    thread: { capturedPosts: 2 },
+  };
+  await engine.enrichThreadViaSyndication(
+    thread,
+    null,
+    async (id) => (id === '300' ? fail(404)() : conversationFetch()(id)),
+    () => null
+  );
+  md = engine.renderLlmMarkdown(thread);
+  assert.match(mdSection(md, 'Capture Summary'), /post 300.*not available/i);
+  assert.doesNotMatch(mdSection(md, 'Capture Summary'), /post 400 could not/i);
+});
+
+await checkAsync('a quote whose own cross-check failed says so', async () => {
+  const previous = global.GM_xmlhttpRequest;
+  global.GM_xmlhttpRequest = (options) =>
+    options.onload({ status: 404, responseText: '', response: '', responseHeaders: '' });
+  try {
+    const model = {
+      ...deepReply(),
+      blocks: [
+        { kind: 'paragraph', html: 'post 400' },
+        {
+          kind: 'quote',
+          author: { name: 'Q', handle: '@q' },
+          sourceUrl: 'https://x.com/q/status/2111000000000000777',
+          blocks: [{ kind: 'paragraph', html: 'Quoted text from the page.' }],
+        },
+      ],
+    };
+    await engine.enrichQuotesViaSyndication(model, null);
+    assert.match(
+      mdSection(engine.renderLlmMarkdown(model), 'Capture Summary'),
+      /post 2111000000000000777 is not available/i
+    );
+  } finally {
+    global.GM_xmlhttpRequest = previous;
+  }
+});
+
 await checkAsync('reply context sits right above the exported post inside a thread', async () => {
   // The thread holds 200 and the exported post 400; 300 sits between them in the
   // conversation, so its card belongs after post 200 and before 400.
@@ -5477,7 +5826,8 @@ check('a capture pass never advances to a surface it does not understand', () =>
       assert.equal(engine.conversationWaitDiagnostics.startedWith, 1);
       assert.equal(engine.conversationWaitDiagnostics.settled, 4);
       assert.equal(engine.conversationWaitDiagnostics.timedOut, false);
-      assert.equal(engine.conversationWaitDiagnostics.sameAuthor, 2);
+      // root, @someone, then the author answering: a run of 1, not a thread (#106).
+      assert.equal(engine.conversationWaitDiagnostics.sameAuthor, 1);
       // A genuinely single post must still return, not hang.
       const soloColumn = waitDom.window.document.createElement('div');
       const solo = waitDom.window.document.createElement('article');
@@ -5820,6 +6170,31 @@ check('a single post with replies from others does not warn about a dropped thre
   // No author in the URL: keep the old, cruder signal rather than going quiet.
   assert.match(warn(1, { settled: 5, sameAuthor: null }), /5 top-level post\(s\)/);
   assert.equal(warn(8, { settled: 25, sameAuthor: 8 }), '');
+});
+
+check('an author answering commenters is not a thread the capture dropped (#106)', () => {
+  const run = engine.sameAuthorRunFromRoot;
+  // hibtc37/status/2111240021563056451, live: root, a reply, the author's answer, ...
+  const page = [
+    { id: '1', handle: '@hibtc37' },
+    { id: '2', handle: '@ZY724' },
+    { id: '3', handle: '@hibtc37' },
+    { id: '4', handle: '@Xinbtc20' },
+    { id: '5', handle: '@hibtc37' },
+  ];
+  assert.equal(run(page, '1', 'hibtc37'), 1);
+  assert.equal(engine.singlePostCaptureWarning(1, { settled: 5, sameAuthor: 1 }), '');
+  // A real thread: the run from the root is what counts.
+  const thread = [
+    { id: '1', handle: '@a' },
+    { id: '2', handle: '@a' },
+    { id: '3', handle: '@a' },
+    { id: '4', handle: '@b' },
+    { id: '5', handle: '@a' },
+  ];
+  assert.equal(run(thread, '1', 'a'), 3);
+  // The root sits below its parent on a reply's page: count from the root, not the top.
+  assert.equal(run([{ id: '0', handle: '@p' }, ...thread], '1', 'A'), 3);
 });
 
 check('a capture that never waited on a conversation (Article) gets no scope warning', () => {

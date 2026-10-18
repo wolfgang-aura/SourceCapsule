@@ -167,6 +167,48 @@ assert.equal(directCalls, 1, 'a background answer or a missing result never trig
 delete globalThis.chrome;
 globalThis.fetch = realProxyFetch;
 
+console.log('[3b/5] Checking the capture deadline covers opening the window (#79)...');
+{
+  // A slow windows.create used to sit outside the deadline, so a 3s request published 9s later.
+  const events = [];
+  const started = Date.now();
+  globalThis.chrome = {
+    windows: {
+      create: () =>
+        new Promise((resolve) =>
+          setTimeout(() => {
+            events.push(['created', Date.now() - started]);
+            resolve({ id: 7, tabs: [{ id: 70 }] });
+          }, 300)
+        ),
+      remove: async (id) => events.push(['removed', id]),
+    },
+    tabs: {
+      sendMessage: async (_tabId, message) => {
+        events.push(['message', message.action]);
+        return { ok: true };
+      },
+    },
+  };
+  const reply = await background.captureShare({
+    url: 'https://x.com/jack/status/20',
+    timeoutMs: 100,
+  });
+  const repliedAt = Date.now() - started;
+  assert.equal(reply.error, 'timeout', `expected a timeout, got ${JSON.stringify(reply)}`);
+  assert.ok(repliedAt < 250, `the reply waited for windows.create (${repliedAt}ms)`);
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.ok(
+    events.some(([kind, id]) => kind === 'removed' && id === 7),
+    `a window that opened after the deadline must still be closed: ${JSON.stringify(events)}`
+  );
+  assert.ok(
+    !events.some(([kind, action]) => kind === 'message' && action === 'capture-share'),
+    'a capture must never start after its deadline'
+  );
+  delete globalThis.chrome;
+}
+
 console.log('[4/5] Checking passive bridge validation, caps, and duplicate suppression...');
 const engine = require(path.join(root, 'sourcecapsule.user.js'));
 const payload = {

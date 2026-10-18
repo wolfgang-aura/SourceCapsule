@@ -58,7 +58,9 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
    has no id for the next hop, so `followQuoteChainsViaSyndication` fetches every leaf quote by
    id and appends its `quoted_tweet` until a post quotes nothing. It runs last in the syndication
    block and before `inlineMedia`. Cap: `CONFIG.quoteChainMaxDepth` (8 levels below the main
-   post); a cycle stops silently, and reply-context cards are not followed. A chain past the cap,
+   post); a cycle stops silently. Reply-context cards are followed too (#98), and a gap inside one
+   is a note, not a capture gap. Each leaf's own by-id payload also supplies its poll and
+   `note_tweet` flag, which the nested `quoted_tweet` copy never carries (#94). A chain past the cap,
    or a non-404 failure, leaves a `quote-chain-note` that makes the receipt INCOMPLETE; a 404
    leaves a `quote-tombstone` (`chainEnd`). Neither is a strict-mode blocker, since a deeper hop
    is only discoverable by fetching and a blocker would turn unattended captures into
@@ -123,12 +125,18 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
   `CONFIG.replyContextMaxDepth` (8); past it a `reply-context-note` links onward to X. It stops
   at an ancestor that is already a captured thread post. A 404 ends it with a "gone on X"
   tombstone; any other failure ends it with a `fetchFailed` tombstone that never claims the
-  post is gone (#25). The cap note and the tombstones are never capture gaps, since ancestors
+  post is gone (#25). A failed root fetch leaves a `reply-context-note` (`unchecked`), and a card
+  built from the slim inline `parent` copy (no `mediaDetails`) carries one (`partial`), so the
+  walk never stops without a trace (#98). The cap note and the tombstones are never capture gaps, since ancestors
   are context. Truncated text or a missing image inside a context card still is, as in any
   embedded post. Ancestors go directly above the exported post, after any earlier thread post.
 - Status-page quick save captures the visible same-author thread by default. It progressively
   scrolls from the top and keeps cloned tweet nodes so X virtualization does not erase earlier
-  posts. Capture remains best-effort and is labelled as such. Every focused-post button also
+  posts. Capture remains best-effort and is labelled as such. When the scroll stops at its
+  time or step limit and the thread runs to the last post it saw (`threadCutShortInfo`),
+  `model.thread.cutShort` makes the capsule INCOMPLETE and labels posts "of at least N" (#101);
+  a reply from someone else after the thread means it ended, so a long reply section never
+  trips it. Every focused-post button also
   exposes **Save full thread** in its drop-down (`postControlCaptureMode` returns
   `THREAD_EXPORT_TYPES` whenever `isFocusedPost=true`, regardless of `isThread`), as an
   escape hatch when X's virtualization or a false-positive thread-boundary heading defeats

@@ -6,6 +6,43 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.14] - 2026-10-19
+
+### Fixed
+
+- Polls survive every post rebuilt from X's public data: deeper quote-chain levels, posts
+  above a reply, quote cards that never mounted, and a focused post whose poll scrolled away.
+  Each shows its counts, and an open poll says when they were taken (#94).
+- A long-form post deeper in a quote chain is flagged as preview-only, and its full text is
+  used when X delivered it to the browser. It used to read as complete (#94).
+- The share result, an open receipt and `AI_LINK.txt` now state the shared capsule's own
+  verdict. They used to say nothing, or "Complete", for a capsule that says INCOMPLETE (#96).
+- Every report agrees with its Status line. A truncated main post is listed under "Missing /
+  Incomplete Content" and in the manifest, which gains a `completeness` field. A reply's
+  context card no longer counts as its main text, as an embedded post, or as a quoted post
+  gone on X. Media counters count only media (#97).
+- The walk up a conversation no longer stops without a trace. A failed first fetch says the
+  conversation could not be checked, a post shown from the reply's slim copy says its media
+  is missing, and quote chains inside those posts are followed (#98).
+- A post or quote whose cross-check against X failed is named in the capture's notes. It
+  used to look fully checked (#99).
+- Animated GIFs that scrolled out of the page are recovered like other media (#100).
+- **Copy for AI** copies Markdown that stands on its own. It no longer points at `media/` files
+  a paste doesn't carry, and once a link exists the copy includes it. The `.md`, HTML and
+  manifest now agree on the source-link count (#104).
+- A quoted post that is gone on X shows as a "post unavailable" note wherever X's public data
+  rebuilds the quote. It used to become an empty card that blocked the export. A nested quote
+  or note the page showed is kept when X's public data leaves it out (#102).
+- A thread capture that ran out of scroll time while the thread was still going says so: the
+  capsule reads INCOMPLETE and numbers posts "Post n of at least N". It used to say "Post n of
+  N" and COMPLETE (#101).
+- An unattended capture of a post whose author answered commenters no longer warns that only
+  the root post was captured. Only posts that follow the root with nobody in between count as
+  its thread (#106).
+- A video kept as poster plus link is listed once, as a note, not also as a warning (#97).
+- An unattended capture that times out can no longer publish a capsule afterwards (#79).
+- `npm test` no longer writes fake capture replies into the real native-host log (#105).
+
 ## [1.6.13] - 2026-10-19
 
 ### Fixed
