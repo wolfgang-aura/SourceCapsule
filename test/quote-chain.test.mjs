@@ -207,4 +207,22 @@ function findBlock(blocks, kind) {
   assert.ok(!calls.includes(CHAIN[3].id), 'the reply-context card is not followed');
 }
 
+// 6. A quote the main pass could not fetch is rebuilt by the strict-mode repair round,
+// which must follow its chain too, not stop at the one level the payload carries.
+{
+  const model = domModel();
+  model.blocks[1].blocks = [];
+  const { fetchTweet } = stubFetch();
+  await engine.repairExportBlockers(model, engine.assessExportCompleteness(model), null, {
+    fetchTweet,
+    rescue: async () => {},
+    pauseMs: 0,
+  });
+  assert.deepEqual(
+    chainIds(model),
+    CHAIN.map((link) => link.id),
+    'the repair round follows the chain'
+  );
+}
+
 console.log('quote-chain test passed');

@@ -4305,6 +4305,9 @@
         warn('strict-gate quote repair failed for', id, '-', e.message);
       }
     }
+    // A rebuilt quote carries one nested level; follow the rest of its chain before
+    // the rescue pass so the deeper cards' media is downloaded too.
+    await followQuoteChainsViaSyndication(model, null, fetchTweet);
     await rescue(model, onProgress);
     return assessExportCompleteness(model);
   }
