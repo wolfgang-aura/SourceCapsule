@@ -19,6 +19,15 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // A dedicated pipe per test run, so the test never collides with the host the browser
 // already has running (which owns the real \\.\pipe\sourcecapsule-capture).
 const PIPE = String.raw`\\.\pipe\sourcecapsule-test-` + process.pid;
+// And a log of its own: test hosts used to append fake late viewUrls to the real host log,
+// which is what an owner reads to diagnose a live capture (#105). Every host this file
+// spawns inherits process.env.
+const REAL_LOG = path.join(os.tmpdir(), 'sourcecapsule-native-host.log');
+const TEST_LOG = path.join(
+  fs.mkdtempSync(path.join(os.tmpdir(), 'sourcecapsule-hostlog-')),
+  'host.log'
+);
+process.env.SOURCECAPSULE_HOST_LOG = TEST_LOG;
 
 function encode(message) {
   const body = Buffer.from(JSON.stringify(message), 'utf8');
@@ -150,8 +159,7 @@ async function transportChecks() {
     assert.equal(received[0].url, undefined);
     console.log('ok  round trip CLI -> host -> extension -> CLI');
 
-    const readLog = () =>
-      fs.readFileSync(path.join(os.tmpdir(), 'sourcecapsule-native-host.log'), 'utf8');
+    const readLog = () => fs.readFileSync(TEST_LOG, 'utf8');
     const timedOut = await sendOverPipe({
       id: 'a2',
       action: 'never-answered',
@@ -217,6 +225,10 @@ async function transportChecks() {
     host.stdin.write(encode({ id: 'a5', ok: true, viewUrl }));
     await new Promise((resolve) => setTimeout(resolve, 200));
     assert.ok(readLog().includes(viewUrl), 'late reply viewUrl is logged when the CLI is gone');
+    assert.ok(
+      !fs.existsSync(REAL_LOG) || !fs.readFileSync(REAL_LOG, 'utf8').includes(viewUrl),
+      'a test host must never write to the real host log'
+    );
     const free = await sendOverPipe({ id: 'a7', action: 'ping', timeoutMs: 5000 });
     assert.equal(free.ok, true, 'lock is released once the extension has replied');
     console.log('ok  lock survives a closed CLI socket and the late reply is logged');

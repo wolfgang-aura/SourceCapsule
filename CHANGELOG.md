@@ -28,6 +28,7 @@ All notable changes to this project are documented here. The format is based on
   used to look fully checked (#99).
 - Animated GIFs that scrolled out of the page are recovered like other media (#100).
 - An unattended capture that times out can no longer publish a capsule afterwards (#79).
+- `npm test` no longer writes fake capture replies into the real native-host log (#105).
 
 ## [1.6.13] - 2026-10-19
 

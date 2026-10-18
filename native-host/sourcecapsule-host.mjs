@@ -22,7 +22,10 @@ const DEFAULT_PIPE = String.raw`\\.\pipe\sourcecapsule-capture`;
 // Tests (and any parallel install) can point at their own pipe so they never fight
 // the host the browser already has running.
 const PIPE = process.env.SOURCECAPSULE_PIPE || DEFAULT_PIPE;
-const LOG = path.join(os.tmpdir(), 'sourcecapsule-native-host.log');
+// Tests point this at their own file so fake replies never land in the log an owner
+// reads to diagnose a live capture (#105).
+const LOG =
+  process.env.SOURCECAPSULE_HOST_LOG || path.join(os.tmpdir(), 'sourcecapsule-native-host.log');
 const REQUEST_MAX_MS = 15 * 60 * 1000;
 // After a request timeout the capture may still be running in the extension. Keep the
 // lock this much longer, then give up so a dead worker cannot hold it forever.
