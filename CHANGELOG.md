@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.13] - 2026-10-19
+
 ### Fixed
 
 - The unattended `complete` field and the in-page receipt now give the same verdict as the
