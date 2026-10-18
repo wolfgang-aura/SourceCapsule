@@ -8517,6 +8517,57 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return blocks;
   }
 
+  /**
+   * A poll from a syndication payload's `card` (#94). The public payload carries each
+   * choice's label and raw count, so a post rebuilt from syndication keeps its poll
+   * instead of silently losing it. Open-poll counts are a snapshot and say so.
+   */
+  function syndicationPollBlock(t, sourceUrl) {
+    const card = t && t.card;
+    if (!card || !/^poll\dchoice/.test(String(card.name || ''))) return null;
+    const values = card.binding_values || {};
+    const value = (key) => {
+      const v = values[key];
+      if (!v) return undefined;
+      return v.string_value != null ? v.string_value : v.boolean_value;
+    };
+    const choices = [];
+    for (let n = 1; n <= 4; n++) {
+      const label = String(value(`choice${n}_label`) || '').trim();
+      if (!label) continue;
+      const raw = value(`choice${n}_count`);
+      const count = raw == null || raw === '' ? NaN : Number(raw);
+      choices.push({ label, count: Number.isFinite(count) ? count : null });
+    }
+    if (choices.length < 2) return null;
+    const counted = choices.every((choice) => choice.count != null);
+    const total = counted ? choices.reduce((sum, choice) => sum + choice.count, 0) : 0;
+    const end = safeIsoTime(value('end_datetime_utc') || '');
+    const asOf = safeIsoTime(value('last_updated_datetime_utc') || '');
+    let status = '';
+    if (value('counts_are_final') === true) status = 'Final results';
+    else if (end && Date.parse(end) <= Date.now()) status = 'Poll closed';
+    else if (end) status = `Open until ${readableUtcTime(end)}`;
+    if (status && status !== 'Final results' && asOf) {
+      status += `; counts as of ${readableUtcTime(asOf)}`;
+    }
+    return {
+      kind: 'poll',
+      choices: choices.map((choice) => ({
+        label: choice.label,
+        ...(counted ? { votes: choice.count.toLocaleString('en-US') } : {}),
+        ...(counted && total > 0
+          ? { percentage: `${((choice.count / total) * 100).toFixed(1).replace(/\.0$/, '')}%` }
+          : {}),
+      })),
+      ...(counted ? { totalVotes: total.toLocaleString('en-US') } : {}),
+      ...(status ? { status } : {}),
+      sourcePostId: statusIdFromUrl(sourceUrl) || String(t.id_str || ''),
+      sourceUrl,
+      resultsUnavailable: !counted,
+    };
+  }
+
   /** Turn a syndication tweet object into a `quote` model block. */
   function syndicationToQuoteBlock(t) {
     const user = t.user || {};
@@ -8528,6 +8579,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (html) blocks.push({ kind: 'paragraph', html });
     syndicationMediaBlocks(t, sourceUrl).forEach((b) => blocks.push(b));
     syndicationLinkBlocks(t, sourceUrl).forEach((b) => blocks.push(b));
+    const poll = syndicationPollBlock(t, sourceUrl);
+    if (poll) blocks.push(poll);
     if (t.quoted_tweet) blocks.push(syndicationToQuoteBlock(t.quoted_tweet));
     return {
       kind: 'quote',
@@ -8576,10 +8629,14 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         if (oldCard.imageDataUri) match.imageDataUri = oldCard.imageDataUri;
       });
 
+    // A DOM poll that showed results is what the viewer saw, so it wins. One that showed
+    // none (an open poll the viewer has not voted on) gives way to syndication's counts.
     oldBlocks
       .filter((block) => block.kind === 'poll')
       .forEach((poll) => {
-        if (!nextBlocks.some((block) => block.kind === 'poll')) extras.push(poll);
+        const freshAt = nextBlocks.findIndex((block) => block.kind === 'poll');
+        if (freshAt < 0) extras.push(poll);
+        else if (!poll.resultsUnavailable) nextBlocks[freshAt] = poll;
       });
 
     const oldQuotes = oldBlocks.filter((block) => block.kind === 'quote');
@@ -8981,6 +9038,18 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         sourceUrl: marker.sourceUrl,
       });
     });
+
+    // A poll card virtualized away before capture exists only in the payload (#94). A DOM
+    // poll that showed no results takes the payload's counts; one that did is kept.
+    const payloadPoll = syndicationPollBlock(data, marker.sourceUrl);
+    if (payloadPoll) {
+      const domPoll = segment.find((b) => b.kind === 'poll');
+      if (!domPoll) additions.push(payloadPoll);
+      else if (domPoll.resultsUnavailable && !payloadPoll.resultsUnavailable) {
+        const question = domPoll.question;
+        Object.assign(domPoll, payloadPoll, question ? { question } : {});
+      }
+    }
 
     // Long-form (note) post: syndication only ever has the preview text, but the
     // network capture may hold the full text X's own web app already downloaded.
