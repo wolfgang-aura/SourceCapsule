@@ -12288,6 +12288,27 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     });
   }
 
+  // How many posts by the root author follow it with nobody else in between: the run
+  // buildTweetSequence reads as the thread. The author answering commenters further down
+  // is not part of it, and counting those warned about a thread that was never there (#106).
+  function sameAuthorRunFromRoot(entries, rootId, rootHandle) {
+    const norm = (h) =>
+      String(h || '')
+        .replace(/^@/, '')
+        .toLowerCase();
+    const want = norm(rootHandle);
+    const start = Math.max(
+      0,
+      entries.findIndex((entry) => entry.id && entry.id === rootId)
+    );
+    let run = 0;
+    for (const entry of entries.slice(start)) {
+      if (norm(entry.handle) !== want) break;
+      run += 1;
+    }
+    return run;
+  }
+
   async function waitForConversation(column) {
     if (!column) return 0;
     const started = Date.now();
@@ -12319,8 +12340,13 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       handleFromSourceUrl(typeof location !== 'undefined' ? location.href : '')
     );
     const sameAuthor = rootHandle
-      ? topLevelTweetEls(column).filter((el) => norm(extractAuthor(el).handle) === rootHandle)
-          .length
+      ? sameAuthorRunFromRoot(
+          topLevelTweetEls(column)
+            .sort(compareDocumentOrder)
+            .map((el) => ({ id: tweetStatusId(el), handle: extractAuthor(el).handle })),
+          currentStatusId(),
+          rootHandle
+        )
       : null;
     Object.assign(conversationWaitDiagnostics, {
       ran: true,
@@ -13495,6 +13521,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       saveToLibrary,
       resaveLibraryAfterShare,
       archiveStats,
+      sameAuthorRunFromRoot,
       threadCutShortInfo,
       // Strict-mode ship-blocker: assessment, diagnostic bundle, auto-repair
       // round, and the confirm modal (DOM-bound; exercised via jsdom).

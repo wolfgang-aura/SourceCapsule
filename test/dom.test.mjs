@@ -5826,7 +5826,8 @@ check('a capture pass never advances to a surface it does not understand', () =>
       assert.equal(engine.conversationWaitDiagnostics.startedWith, 1);
       assert.equal(engine.conversationWaitDiagnostics.settled, 4);
       assert.equal(engine.conversationWaitDiagnostics.timedOut, false);
-      assert.equal(engine.conversationWaitDiagnostics.sameAuthor, 2);
+      // root, @someone, then the author answering: a run of 1, not a thread (#106).
+      assert.equal(engine.conversationWaitDiagnostics.sameAuthor, 1);
       // A genuinely single post must still return, not hang.
       const soloColumn = waitDom.window.document.createElement('div');
       const solo = waitDom.window.document.createElement('article');
@@ -6169,6 +6170,31 @@ check('a single post with replies from others does not warn about a dropped thre
   // No author in the URL: keep the old, cruder signal rather than going quiet.
   assert.match(warn(1, { settled: 5, sameAuthor: null }), /5 top-level post\(s\)/);
   assert.equal(warn(8, { settled: 25, sameAuthor: 8 }), '');
+});
+
+check('an author answering commenters is not a thread the capture dropped (#106)', () => {
+  const run = engine.sameAuthorRunFromRoot;
+  // hibtc37/status/2111240021563056451, live: root, a reply, the author's answer, ...
+  const page = [
+    { id: '1', handle: '@hibtc37' },
+    { id: '2', handle: '@ZY724' },
+    { id: '3', handle: '@hibtc37' },
+    { id: '4', handle: '@Xinbtc20' },
+    { id: '5', handle: '@hibtc37' },
+  ];
+  assert.equal(run(page, '1', 'hibtc37'), 1);
+  assert.equal(engine.singlePostCaptureWarning(1, { settled: 5, sameAuthor: 1 }), '');
+  // A real thread: the run from the root is what counts.
+  const thread = [
+    { id: '1', handle: '@a' },
+    { id: '2', handle: '@a' },
+    { id: '3', handle: '@a' },
+    { id: '4', handle: '@b' },
+    { id: '5', handle: '@a' },
+  ];
+  assert.equal(run(thread, '1', 'a'), 3);
+  // The root sits below its parent on a reply's page: count from the root, not the top.
+  assert.equal(run([{ id: '0', handle: '@p' }, ...thread], '1', 'A'), 3);
 });
 
 check('a capture that never waited on a conversation (Article) gets no scope warning', () => {

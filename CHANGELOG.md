@@ -36,6 +36,9 @@ All notable changes to this project are documented here. The format is based on
 - A thread capture that ran out of scroll time while the thread was still going says so: the
   capsule reads INCOMPLETE and numbers posts "Post n of at least N". It used to say "Post n of
   N" and COMPLETE (#101).
+- An unattended capture of a post whose author answered commenters no longer warns that only
+  the root post was captured. Only posts that follow the root with nobody in between count as
+  its thread (#106).
 - A video kept as poster plus link is listed once, as a note, not also as a warning (#97).
 - An unattended capture that times out can no longer publish a capsule afterwards (#79).
 - `npm test` no longer writes fake capture replies into the real native-host log (#105).
