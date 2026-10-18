@@ -123,7 +123,9 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
   `CONFIG.replyContextMaxDepth` (8); past it a `reply-context-note` links onward to X. It stops
   at an ancestor that is already a captured thread post. A 404 ends it with a "gone on X"
   tombstone; any other failure ends it with a `fetchFailed` tombstone that never claims the
-  post is gone (#25). None of these is a capture gap: ancestors are context, not content.
+  post is gone (#25). The cap note and the tombstones are never capture gaps, since ancestors
+  are context. Truncated text or a missing image inside a context card still is, as in any
+  embedded post. Ancestors go directly above the exported post, after any earlier thread post.
 - Status-page quick save captures the visible same-author thread by default. It progressively
   scrolls from the top and keeps cloned tweet nodes so X virtualization does not erase earlier
   posts. Capture remains best-effort and is labelled as such. Every focused-post button also

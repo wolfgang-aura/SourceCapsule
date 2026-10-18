@@ -3955,17 +3955,18 @@
           if (b.sourceUrl) stats.sourceLinks.add(b.sourceUrl);
         } else if (b.kind === 'note-recovered') {
           stats.recoveredNotes += 1;
+        } else if (b.kind === 'quote-tombstone' && b.fetchFailed) {
+          // X did not answer, so nothing here may count the post as gone (#25).
+          addNote(b.notice || 'A post in the conversation above could not be fetched.');
         } else if (b.kind === 'quote-tombstone') {
           // Informational, never missing/incomplete: the quoted post was gone on
           // X itself, so "complete" stays true - but the reader is told why.
           stats.quoteTombstones += 1;
           addNote(
             b.replyContext
-              ? b.fetchFailed
-                ? b.notice
-                : b.replyDepth > 1
-                  ? `${b.notice} Nothing further up was capturable.`
-                  : 'The post this reply answers was already unavailable on X at capture time. Nothing was capturable.'
+              ? b.replyDepth > 1
+                ? `${b.notice} Nothing further up was capturable.`
+                : 'The post this reply answers was already unavailable on X at capture time. Nothing was capturable.'
               : b.chainEnd
                 ? `${b.notice} Nothing further was capturable.`
                 : `A quoted post was already unavailable on X at capture time (${
@@ -9269,7 +9270,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       warn('reply-context check failed for', rootId, '-', e.message);
     }
     if (ancestors.length) {
-      model.blocks.unshift(...ancestors.reverse());
+      // Directly above the exported post: inside a thread that is its own marker, so a
+      // card never lands above an earlier thread post it replies to.
+      const at = model.blocks.findIndex((b) => b.kind === 'thread-marker' && b.statusId === rootId);
+      model.blocks.splice(Math.max(at, 0), 0, ...ancestors.reverse());
       log(`reply context: prepended ${ancestors.length} post(s) from the conversation above`);
     }
     onProgress && onProgress(1, 1);

@@ -3986,6 +3986,12 @@ await checkAsync(
       // The surrounding copy must not contradict the notice (#25).
       assert.doesNotMatch(engine.assembleHtml(model), /already gone on X/);
       assert.doesNotMatch(engine.renderLlmMarkdown(model), /already unavailable/i);
+      // Nor may the counters behind the receipt and the CLI warning call it deleted.
+      assert.equal(engine.archiveStats(model).quoteTombstones, 0);
+      engine.showCaptureReceipt({ model, savedLocation: 'x.html', markdown: 'md' });
+      const receipt = document.querySelector('.xa-capture-receipt');
+      assert.doesNotMatch(receipt.textContent, /gone on X/);
+      receipt.remove();
     }
   }
 );
@@ -4085,6 +4091,28 @@ await checkAsync('a failed fetch mid-conversation ends the walk honestly', async
   assert.match(model.blocks[0].notice, /could not be fetched/);
   assert.match(model.blocks[0].notice, /@u200/);
   assert.equal(model.blocks[1].sourceUrl, 'https://x.com/u300/status/300');
+});
+
+await checkAsync('reply context sits right above the exported post inside a thread', async () => {
+  // The thread holds 200 and the exported post 400; 300 sits between them in the
+  // conversation, so its card belongs after post 200 and before 400.
+  const model = {
+    type: 'post',
+    sourceUrl: 'https://x.com/u400/status/400',
+    blocks: [
+      { kind: 'thread-marker', statusId: '200', sourceUrl: 'https://x.com/u200/status/200' },
+      { kind: 'paragraph', html: 'post 200' },
+      { kind: 'thread-marker', statusId: '400', sourceUrl: 'https://x.com/u400/status/400' },
+      { kind: 'paragraph', html: 'post 400' },
+    ],
+    thread: { capturedPosts: 2 },
+  };
+  await engine.enrichReplyContextViaSyndication(model, null, conversationFetch());
+  assert.deepEqual(
+    model.blocks.map((b) => b.statusId || (b.replyContext && b.sourceUrl) || b.html),
+    ['200', 'post 200', 'https://x.com/u300/status/300', '400', 'post 400'],
+    'the 300 card must come after post 200, which it replies to'
+  );
 });
 
 check('extension controller accepts the replyContext preference', () => {
