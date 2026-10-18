@@ -397,6 +397,54 @@ check('a truncated main post is listed where the Status line sends the reader', 
   );
 });
 
+// #101: a thread the scroll stopped in the middle of must not read "Post 2 of 2", COMPLETE.
+const T1 = '2111000000000000005';
+const T2 = '2111000000000000006';
+const cutThread = () =>
+  reportModel(
+    [
+      { kind: 'thread-marker', index: 1, total: 2, totalAtLeast: true, statusId: T1 },
+      { kind: 'paragraph', html: 'First' },
+      { kind: 'thread-marker', index: 2, total: 2, totalAtLeast: true, statusId: T2 },
+      { kind: 'paragraph', html: 'Second' },
+    ],
+    {
+      thread: {
+        capturedPosts: 2,
+        sourcePostIds: [T1, T2],
+        completeness: 'best-effort',
+        cutShort: { reason: 'time', lastPostId: T2 },
+      },
+    }
+  );
+
+check('a thread cut short by the scroll limit reads INCOMPLETE and says where', () => {
+  const md = engine.renderLlmMarkdown(cutThread());
+  assert.match(md, /Status: INCOMPLETE/);
+  assert.match(md, /Thread cut short/);
+  assert.match(mdSection(md, 'Missing / Incomplete Content'), new RegExp(T2));
+  assert.match(md, /Post 2 of at least 2/);
+  assert.doesNotMatch(md, /Post 2 of 2\b/);
+  assert.match(engine.assembleHtml(cutThread()), /Post 2 of at least 2/);
+  const manifest = JSON.parse(engine.renderArchiveManifestJson(cutThread(), ''));
+  assert.equal(manifest.completeness.status, 'incomplete');
+});
+
+check('only a scroll that stopped mid-thread counts as cut short', () => {
+  const stop = { reason: 'time' };
+  // The thread ran to the last post the scroll saw: it may go on.
+  assert.deepEqual(engine.threadCutShortInfo(stop, ['1', '2'], ['0', '1', '2']), {
+    reason: 'time',
+    lastPostId: '2',
+  });
+  // A reply from someone else follows the thread: it ended.
+  assert.equal(engine.threadCutShortInfo(stop, ['1', '2'], ['1', '2', '3']), null);
+  // The scroll reached the bottom: nothing was left unseen.
+  assert.equal(engine.threadCutShortInfo(null, ['1', '2'], ['1', '2']), null);
+  // A single post is not a thread.
+  assert.equal(engine.threadCutShortInfo(stop, ['1'], ['1']), null);
+});
+
 check('text in a reply-context card does not count as the reply main text', () => {
   const model = reportModel([
     {

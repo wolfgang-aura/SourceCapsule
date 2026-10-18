@@ -132,7 +132,11 @@ CI (`.github/workflows/lint.yml`) runs lint + format check + `npm test` on push/
   embedded post. Ancestors go directly above the exported post, after any earlier thread post.
 - Status-page quick save captures the visible same-author thread by default. It progressively
   scrolls from the top and keeps cloned tweet nodes so X virtualization does not erase earlier
-  posts. Capture remains best-effort and is labelled as such. Every focused-post button also
+  posts. Capture remains best-effort and is labelled as such. When the scroll stops at its
+  time or step limit and the thread runs to the last post it saw (`threadCutShortInfo`),
+  `model.thread.cutShort` makes the capsule INCOMPLETE and labels posts "of at least N" (#101);
+  a reply from someone else after the thread means it ended, so a long reply section never
+  trips it. Every focused-post button also
   exposes **Save full thread** in its drop-down (`postControlCaptureMode` returns
   `THREAD_EXPORT_TYPES` whenever `isFocusedPost=true`, regardless of `isThread`), as an
   escape hatch when X's virtualization or a false-positive thread-boundary heading defeats

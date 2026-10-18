@@ -33,6 +33,9 @@ All notable changes to this project are documented here. The format is based on
 - A quoted post that is gone on X shows as a "post unavailable" note wherever X's public data
   rebuilds the quote. It used to become an empty card that blocked the export. A nested quote
   or note the page showed is kept when X's public data leaves it out (#102).
+- A thread capture that ran out of scroll time while the thread was still going says so: the
+  capsule reads INCOMPLETE and numbers posts "Post n of at least N". It used to say "Post n of
+  N" and COMPLETE (#101).
 - A video kept as poster plus link is listed once, as a note, not also as a warning (#97).
 - An unattended capture that times out can no longer publish a capsule afterwards (#79).
 - `npm test` no longer writes fake capture replies into the real native-host log (#105).

@@ -2734,6 +2734,14 @@
         publishedAt: publishedAtFromElement(tweet, statusId),
       };
     });
+    const cutShort = includeThread
+      ? threadCutShortInfo(
+          lastForceLoadStop,
+          threadPosts.map((post) => post.statusId),
+          threadTweetCandidates(column).map(tweetStatusId)
+        )
+      : null;
+    if (cutShort) warn('thread capture stopped at the scroll limit mid-thread', cutShort);
     const combinedBlocks = [];
     tweetParts.forEach((part, index) => {
       if (tweetParts.length > 1) {
@@ -2741,6 +2749,7 @@
           kind: 'thread-marker',
           ...threadPosts[index],
           total: tweetParts.length,
+          ...(cutShort ? { totalAtLeast: true } : {}),
         });
       }
       combinedBlocks.push(...part.blocks);
@@ -2782,6 +2791,7 @@
         capturedPosts: threadPosts.length,
         sourcePostIds: threadPosts.map((post) => post.statusId).filter(Boolean),
         completeness: 'best-effort',
+        ...(cutShort ? { cutShort } : {}),
       };
     }
     if (CONFIG.debugEmbed) {
@@ -3460,6 +3470,11 @@
     return fallback;
   }
 
+  // A thread the scroll stopped in the middle of has an unknown length (#101).
+  function threadMarkerLabel(b) {
+    return `Post ${b.index || '?'} of ${b.totalAtLeast ? 'at least ' : ''}${b.total || '?'}`;
+  }
+
   function missingRecord(type, attrs = {}) {
     const record = { type, ...attrs };
     Object.keys(record).forEach((key) => {
@@ -3640,7 +3655,7 @@
         return '<hr class="xa-divider">';
       case 'thread-marker': {
         const source = safeUrl(b.sourceUrl || '');
-        const label = `Post ${b.index || '?'} of ${b.total || '?'}`;
+        const label = threadMarkerLabel(b);
         const published = safeIsoTime(b.publishedAt)
           ? `<time datetime="${escapeAttr(safeIsoTime(b.publishedAt))}">${escapeHtml(
               readableUtcTime(b.publishedAt)
@@ -4137,6 +4152,16 @@
           `${postId ? `Post ${postId}` : 'The exported post'} is a long-form post; only its preview text was available at export (full text not included).`
         );
       });
+    const cutShort = model.thread && model.thread.cutShort;
+    if (cutShort) {
+      stats.incomplete.push(
+        missingRecord('thread', {
+          sourcePostId: cutShort.lastPostId || undefined,
+          reason: cutShort.reason === 'steps' ? 'scroll_step_limit' : 'scroll_time_limit',
+        })
+      );
+      stats.warnings.push(threadCutShortText(cutShort));
+    }
     allLlmQuotes(model.blocks)
       .filter(
         (quote) => quote.truncated || (!quote.noteRecovered && isPossiblyTruncatedPost(quote))
@@ -4842,6 +4867,14 @@
   // gaps count: a video kept as poster + source link is not one (no export carries raw video for
   // an LLM, and shared capsules never upload it), quote tombstones are gone on X itself, and a
   // missing avatar does not change what the post says.
+  function threadCutShortText(cut) {
+    return `Thread cut short: the page scroll hit its ${
+      cut.reason === 'steps' ? 'step' : 'time'
+    } limit while the thread was still going, so posts after ${
+      cut.lastPostId || 'the last one captured'
+    } may be missing.`;
+  }
+
   function captureGaps(model, stats) {
     const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
     const count = (type) => stats.missing.filter((record) => record.type === type).length;
@@ -4865,6 +4898,8 @@
     const truncatedMain = (model.blocks || []).filter((b) => b.kind === 'truncation-notice').length;
     const parts = [];
     if (missing.length) parts.push(`Not captured: ${missing.join(', ')}.`);
+    if (model.thread && model.thread.cutShort)
+      parts.push(threadCutShortText(model.thread.cutShort));
     if (stats.quoteChainsUnfollowed)
       parts.push(
         `Quote chain cut short: ${plural(stats.quoteChainsUnfollowed, 'chain was', 'chains were')} not followed to the end, so deeper quoted posts may be missing.`
@@ -4978,7 +5013,7 @@
       } else if (b.kind === 'divider') {
         lines.push('---');
       } else if (b.kind === 'thread-marker') {
-        lines.push(markdownHeading(3, `Post ${b.index || '?'} of ${b.total || '?'}`));
+        lines.push(markdownHeading(3, threadMarkerLabel(b)));
         if (b.sourceUrl) lines.push(`Source: ${b.sourceUrl}`);
         if (safeIsoTime(b.publishedAt))
           lines.push(`Published at: ${readableUtcTime(b.publishedAt)}`);
@@ -5433,6 +5468,12 @@
             }.`
           );
           if (item.sourceUrl) lines.push(`  Source URL: ${item.sourceUrl}`);
+          return;
+        }
+        if (item.type === 'thread') {
+          lines.push(
+            `- Thread after post ${label}: not captured; the page scroll stopped before the thread ended.`
+          );
           return;
         }
         if (item.type === 'quote-chain') {
@@ -7611,6 +7652,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   let capturedImageUrls = new Set(); // urls already placed in the current model
 
   function resetMediaState() {
+    // An export that never scrolls must not inherit the last one's stop (#101).
+    lastForceLoadStop = null;
     harvestedMedia.clear();
     harvestedTweets.clear();
     harvestedVideoCandidates.length = 0;
@@ -8371,6 +8414,19 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return out;
   }
 
+  // Set by forceLoadMedia when it gave up before the bottom of the column (#101).
+  let lastForceLoadStop = null;
+
+  // A thread may continue past the capture only when both hold: the scroll stopped before
+  // the bottom of the column, and the thread ran to the last post the scroll saw. A reply
+  // from someone else or a "Discover more" heading after it means the thread ended (#101).
+  function threadCutShortInfo(scrollStop, sequenceIds, candidateIds) {
+    if (!scrollStop || sequenceIds.length < 2 || !candidateIds.length) return null;
+    const lastId = sequenceIds[sequenceIds.length - 1];
+    if (!lastId || candidateIds[candidateIds.length - 1] !== lastId) return null;
+    return { reason: scrollStop.reason, lastPostId: lastId };
+  }
+
   /**
    * Scroll the content container top-to-bottom, harvesting media at each step so
    * virtualized/lazy images are captured before they're recycled. Bounded to the
@@ -8378,6 +8434,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * Best-effort; never throws.
    */
   async function forceLoadMedia(container, onTick, { fromTop = false } = {}) {
+    lastForceLoadStop = null;
     try {
       const scroller = document.scrollingElement || document.documentElement;
       if (!scroller) return;
@@ -8410,6 +8467,10 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       }
       if (Date.now() >= deadline) {
         warn(`forceLoadMedia timed out after ${CONFIG.forceLoadMaxMs}ms; continuing export`);
+      }
+      // Below this point X never mounted the column, so a thread running into it may go on.
+      if (y < limit()) {
+        lastForceLoadStop = { reason: Date.now() >= deadline ? 'time' : 'steps' };
       }
       scroller.scrollTo(0, limit());
       await sleep(300);
@@ -13434,6 +13495,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       saveToLibrary,
       resaveLibraryAfterShare,
       archiveStats,
+      threadCutShortInfo,
       // Strict-mode ship-blocker: assessment, diagnostic bundle, auto-repair
       // round, and the confirm modal (DOM-bound; exercised via jsdom).
       assessExportCompleteness,
