@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SourceCapsule - Save X/Twitter Threads & Articles as Markdown for LLMs + Offline HTML
 // @namespace    https://github.com/wolfgang-aura/SourceCapsule
-// @version      1.6.14
+// @version      1.6.15
 // @description  One click saves an X (Twitter) thread, Article, or post as clean Markdown for LLM context (Claude, ChatGPT) plus a self-contained offline HTML archive - images, video, and quoted posts embedded, with honest completeness reporting. Local-first, with optional expiring AI readable links.
 // @author       wolfgang-aura
 // @license      MIT
@@ -222,7 +222,7 @@
   };
 
   const APP = 'SourceCapsule';
-  const VERSION = '1.6.14';
+  const VERSION = '1.6.15';
 
   // ===========================================================================
   // Small utilities
@@ -4450,6 +4450,7 @@
           // an equally canonical one (payloads missing id_str yield a dead URL).
           if (statusIdFromUrl(fresh.sourceUrl)) quote.sourceUrl = fresh.sourceUrl;
           quote.truncated = fresh.truncated;
+          quote.textComplete = !fresh.truncated;
           if (quote.truncated) recoverQuoteNoteText(quote, getCapturedNoteTweet(id));
         }
       } catch (e) {
@@ -4803,6 +4804,10 @@
 
   function isPossiblyTruncatedPost(block) {
     if (!block || !block.blocks || !block.blocks.length) return false;
+    // The post's own syndication payload had no note_tweet: its text is all there is, even
+    // when it ends in a link or a word with no full stop (#107). The guess below is for
+    // text that was never cross-checked.
+    if (block.textComplete) return false;
     // Only the post's own words: a poll, link card or nested quote below them is not
     // where its text ends, and a poll's "counts as of … UTC" line read as cut off (#94).
     const own = block.blocks.filter((b) => ['paragraph', 'heading', 'list'].includes(b.kind));
@@ -8861,6 +8866,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       }
     } else if (nested && existing.truncated && !fresh.truncated) {
       fresh.truncated = true;
+    } else if (nested && existing.textComplete) {
+      fresh.textComplete = true;
     }
 
     oldBlocks
@@ -9122,6 +9129,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
             // missing id_str yields "https://x.com/<user>/status/" (dead link).
             if (statusIdFromUrl(fresh.sourceUrl)) q.sourceUrl = fresh.sourceUrl;
             q.truncated = fresh.truncated;
+            // Its own payload, so no note_tweet means the text is the whole post (#107).
+            q.textComplete = !fresh.truncated;
             // Long-form quote: syndication only has the preview, but the network capture
             // may hold the full text X's web app already delivered to this browser.
             if (q.truncated) recoverQuoteNoteText(q, getCapturedNoteTweet(id));
@@ -9824,6 +9833,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       quote.truncated = true;
       recoverQuoteNoteText(quote, note);
     }
+    if (!data.note_tweet) quote.textComplete = true;
   }
 
   /** Reader-facing text for a quote chain the export stopped following. */
