@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.15] - 2026-10-29
+
+### Fixed
+
+- A quoted post that ends in a link, or in any word without a full stop, no longer reads
+  "possibly truncated" and makes the capsule INCOMPLETE. When the quote's own post data from
+  X says it is not long-form, its text is taken as whole. Retry recovery could never clear
+  the old false flag, because nothing was missing (#107).
+
 ## [1.6.14] - 2026-10-19
 
 ### Fixed

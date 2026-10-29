@@ -438,4 +438,62 @@ function findBlock(blocks, kind) {
   );
 }
 
+// 12. A short post that ends in a link is not cut off (#107). Its own by-id payload has no
+//     note_tweet, so its text is the whole post. A nested quoted_tweet copy proves nothing,
+//     and a quote whose fetch failed still gets the preview guess.
+{
+  const [A, B] = CHAIN;
+  const linked = (link, extra = {}) => ({
+    __typename: 'Tweet',
+    id_str: link.id,
+    text: `Post ${link.name} is now live for everyone who asked about it.\n\nPlace orders with up to ten times leverage today!\n\nStart here: https://t.co/abc`,
+    entities: {
+      urls: [
+        {
+          url: 'https://t.co/abc',
+          expanded_url: 'https://example.com/print/SKHYNIX',
+          display_url: 'example.com/print/SKHYNIX',
+          indices: [133, 149],
+        },
+      ],
+    },
+    created_at: '2026-10-01T00:00:00.000Z',
+    user: { name: link.name, screen_name: link.handle },
+    ...extra,
+  });
+  const quoteOf = (model) => model.blocks.find((b) => b.kind === 'quote');
+  const run = async (payloads) => {
+    const model = domModel();
+    const fetchTweet = async (id) => {
+      if (payloads[id]) return payloads[id];
+      throw Object.assign(new Error('syndication: HTTP 404'), { status: 404 });
+    };
+    await engine.enrichQuotesViaSyndication(model, null, fetchTweet);
+    await engine.followQuoteChainsViaSyndication(model, null, fetchTweet);
+    return model;
+  };
+
+  const whole = await run({
+    [A.id]: linked(A, { quoted_tweet: linked(B) }),
+    [B.id]: linked(B),
+  });
+  const md = engine.renderLlmMarkdown(whole);
+  assert.doesNotMatch(md, /possibly truncated|Possibly truncated/i);
+  assert.match(md, /Status: COMPLETE/);
+
+  const longForm = await run({ [A.id]: linked(A, { note_tweet: { id: 'note-a' } }) });
+  assert.equal(quoteOf(longForm).truncated, true, 'a long-form preview still says so');
+
+  // B's own fetch fails: its card came from A's nested copy, which never carries note_tweet.
+  const nestedOnly = await run({ [A.id]: linked(A, { quoted_tweet: linked(B) }) });
+  assert.match(engine.renderLlmMarkdown(nestedOnly), /Possibly truncated: 1 embedded post/);
+
+  const unchecked = domModel();
+  quoteOf(unchecked).blocks = [{ kind: 'paragraph', html: linked(A).text }];
+  await engine.enrichQuotesViaSyndication(unchecked, null, async () => {
+    throw new Error('syndication: HTTP 500');
+  });
+  assert.match(engine.renderLlmMarkdown(unchecked), /Possibly truncated: 1 embedded post/);
+}
+
 console.log('quote-chain test passed');
