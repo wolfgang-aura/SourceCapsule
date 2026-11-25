@@ -6381,6 +6381,165 @@ await checkAsync('a share error carries the Worker message', async () => {
   }
 });
 
+// X's Nov 2026 client (#110): Tailwind + Base UI, almost no data-testid, no <time>, a quote
+// card that holds its own <article>, "Show more" inside the text div. Trimmed from live markup.
+const NEW_CLIENT_URL = 'https://x.com/TheFlowHorse/status/2125321091702804583';
+const newClientPost = (id, text, extra = '') => `
+  <article class="flex flex-col gap-1">
+    <div data-post-avatar="true"><div data-anchor-to-hovered-child="">
+      <a href="/TheFlowHorse"><img alt="@TheFlowHorse" src="https://pbs.twimg.com/profile_images/206/ijl_normal.jpg"></a>
+      <a href="/TheFlowHorse"><div dir="auto">Ryan Rossi | Horse</div></a>
+      <a href="/TheFlowHorse"><span>@TheFlowHorse</span></a>
+      <a href="/TheFlowHorse/status/${id}">4:10 AM · Nov 25, 2026</a>
+    </div></div>
+    <button data-slot="xds-menu-trigger" aria-label="More" type="button"></button>
+    <div dir="auto" lang="en"><span>${text}</span></div>
+    ${extra}
+    <div aria-label="20 replies, 6 reposts" role="group">
+      <div data-engagement-action="retweet"><button data-slot="xds-menu-trigger" aria-label="6 reposts. Repost"></button></div>
+    </div>
+  </article>`;
+const NEW_CLIENT_PAGE = `<!doctype html><html><body><main>
+  ${newClientPost(
+    '2125321091702804583',
+    'I suggest all of you take your trading data.',
+    `<a aria-label="Image" data-engagement-action="media" href="/TheFlowHorse/status/2125321091702804583/photo/1">
+       <img alt="Image" height="251" width="805" src="https://pbs.twimg.com/media/HX6nrXzWgAAsZSo?format=png&name=small"></a>
+     <div><video poster="https://pbs.twimg.com/amplify_video_thumb/2110590908056195072/img/plHC.jpg" src="blob:https://x.com/1"></video></div>
+     <div aria-labelledby="q" role="link" data-href="/XFreeze/status/2125303227256320111" data-slot="embedded-tweet-frame" tabindex="0">
+       <a aria-hidden="true" href="/XFreeze/status/2125303227256320111" tabindex="-1"></a>
+       <article><div data-anchor-to-hovered-child="">
+         <a href="/XFreeze"><img alt="@XFreeze" src="https://pbs.twimg.com/profile_images/187/2_H_normal.jpg"></a>
+         <a href="/XFreeze"><div dir="auto">X Freeze</div></a><a href="/XFreeze"><span>@XFreeze</span></a>
+         <a href="/XFreeze/status/2125303227256320111">9h</a>
+       </div>
+       <button data-slot="xds-menu-trigger" aria-label="More"></button>
+       <div dir="auto" lang="en"><span>Starlink is rapidly expanding</span><button lang="en" type="button">Show more</button></div>
+       </article>
+     </div>`
+  )}
+  ${newClientPost('2125321100000000000', 'Second post of the thread.')}
+</main></body></html>`;
+
+check('the Nov 2026 client markup exports text, author, media, quote and thread (#110)', () => {
+  withPage(NEW_CLIENT_PAGE, NEW_CLIENT_URL, () => {
+    const focused = document.querySelector('main > article');
+    const model = engine.buildModelForPost(focused, { includeThread: true });
+    assert.equal(model.author.handle, '@TheFlowHorse');
+    assert.equal(model.author.name, 'Ryan Rossi | Horse');
+    assert.equal(model.thread.capturedPosts, 2);
+    const blocks = allBlocks(model.blocks);
+    const text = blocks.filter((b) => b.kind === 'paragraph').map((b) => b.html);
+    assert.ok(text.some((html) => html.includes('take your trading data')));
+    assert.ok(text.some((html) => html.includes('Second post of the thread.')));
+    assert.ok(!text.some((html) => html.includes('Show more')), 'Show more is UI, not text');
+    assert.ok(blocks.some((b) => b.kind === 'image' && b.url.includes('HX6nrXzWgAAsZSo')));
+    assert.ok(
+      blocks.some((b) => b.kind === 'video'),
+      'bare <video> is a player'
+    );
+    const quote = model.blocks.find((b) => b.kind === 'quote');
+    assert.ok(quote, `no quote block; kinds=${model.blocks.map((b) => b.kind)}`);
+    assert.equal(quote.sourceUrl, 'https://x.com/XFreeze/status/2125303227256320111');
+    assert.equal(quote.author.handle, '@XFreeze');
+    assert.match(model.publishedAt, /^2026-11-24T20:10:/);
+  });
+});
+
+check('the inline control goes beside the post header menu, not a quote or repost menu', () => {
+  withPage(NEW_CLIENT_PAGE, NEW_CLIENT_URL, () => {
+    const focused = document.querySelector('main > article');
+    const caret = engine.postCaret(focused);
+    assert.equal(caret.getAttribute('aria-label'), 'More');
+    assert.equal(caret.closest('article'), focused);
+  });
+});
+
+check('X streamed SSR scripts decode into GraphQL bodies (#110)', () => {
+  const inner = JSON.stringify({
+    data: { threaded_conversation_with_injections_v2: { instructions: [] }, x: "<b>it's" },
+  });
+  // seroval writes `<` as \x3C; an escaped backslash before an x must survive.
+  const literal = JSON.stringify(inner).slice(1, -1).replace(/</g, '\\x3C').replace(/'/g, "\\'");
+  const script =
+    `($R=$R[50].next($R[52]={kind:1,requestId:3,key:"K0iX{\\"a\\":1}",value:"${literal}"}))` +
+    `;$R[50].next({kind:1,requestId:4,key:"k",value:"{\\"data\\":{\\"tweet_result_by_rest_id\\":{\\"p\\":\\"a\\\\\\\\x41\\"}}}"})`;
+  const out = engine.ssrPayloadsFromScriptText(script);
+  assert.deepEqual(
+    out.map((p) => p.name),
+    ['TweetDetail', 'TweetResultByRestId']
+  );
+  assert.equal(JSON.parse(out[0].body).data.x, "<b>it's");
+  assert.equal(JSON.parse(out[1].body).data.tweet_result_by_rest_id.p, 'a\\x41');
+  assert.deepEqual(engine.ssrPayloadsFromScriptText('console.log(1)'), []);
+  assert.equal(engine.snowflakeIsoTime('2125367106443301142'), '2026-11-24T23:13:00.244Z');
+  assert.equal(engine.snowflakeIsoTime('12345'), '');
+});
+
+check('captured bodies in the Nov 2026 shape still yield quote refs and reply records', () => {
+  const user = (name) => ({ result: { core: { name, screen_name: name } } });
+  const body = JSON.stringify({
+    data: {
+      threaded_conversation_with_injections_v2: {
+        instructions: [
+          {
+            entries: [
+              {
+                entry_id: 'tweet-2125401284081561971',
+                content: {
+                  content: {
+                    tweet_results: {
+                      result: {
+                        __typename: 'Tweet',
+                        rest_id: '2125401284081561971',
+                        core: { user_results: user('TheFlowHorse') },
+                        details: {
+                          full_text: 'Ty sir, &amp; thanks',
+                          created_at_ms: '1795583409000',
+                        },
+                        legacy: {
+                          conversation_id_str: '2125321091702804583',
+                          lang: 'en',
+                          quoted_status_permalink: {},
+                        },
+                        reply_to_results: { rest_id: '2125360166262444049' },
+                        media_entities2: [
+                          {
+                            type: 'photo',
+                            id_str: '9',
+                            media_url_https: 'https://pbs.twimg.com/media/AbC.jpg',
+                          },
+                        ],
+                        quoted_tweet_results: {
+                          result: {
+                            rest_id: '2125303227256320111',
+                            core: { user_results: user('XFreeze') },
+                          },
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+  assert.deepEqual(engine.quotedRefsFromCapturedBody(body), [
+    { parentId: '2125401284081561971', quotedId: '2125303227256320111', quotedHandle: 'XFreeze' },
+  ]);
+  const reply = engine
+    .searchTimelineReplyRecordsFromCapturedBody(body)
+    .find((r) => r.id === '2125401284081561971');
+  assert.equal(reply.text, 'Ty sir, & thanks');
+  assert.equal(reply.handle, 'TheFlowHorse');
+  assert.equal(reply.parentId, '2125360166262444049');
+  assert.equal(reply.createdAt, new Date(1795583409000).toISOString());
+  assert.equal(reply.mediaLinks[0].type, 'image');
+});
+
 // REVIEW-TESTS-END
 
 if (failures) {

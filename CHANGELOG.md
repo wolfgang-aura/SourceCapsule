@@ -6,6 +6,22 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.16] - 2026-11-25
+
+### Fixed
+
+- The export control shows up again on X's new web client. X dropped almost every
+  `data-testid`, its `<time>` elements and the article `role`, so no post was ever found. The
+  selectors now cover the new markup: bare `<article>` posts, the status link as timestamp,
+  the `More` header menu, quote cards in an `embedded-tweet-frame`, bare `<video>` players,
+  and "Show more" inside the text, which is no longer copied into the post body (#110).
+- A post opened directly (not by clicking through X) gets its captured data again. X now
+  streams that page's data inside the HTML as scripts that delete themselves, which no
+  network tee can see. A document observer reads them, so long-form text, video MP4 links
+  and quote refs are recovered on a direct load. Captured bodies in X's new post shape
+  (`details`, `media_entities2`, `quoted_tweet_results`, `reply_to_results`) now yield quote
+  refs and reply-archive records, and publish times come from the post id (#110).
+
 ## [1.6.15] - 2026-10-29
 
 ### Fixed

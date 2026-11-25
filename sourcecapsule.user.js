@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SourceCapsule - Save X/Twitter Threads & Articles as Markdown for LLMs + Offline HTML
 // @namespace    https://github.com/wolfgang-aura/SourceCapsule
-// @version      1.6.15
+// @version      1.6.16
 // @description  One click saves an X (Twitter) thread, Article, or post as clean Markdown for LLM context (Claude, ChatGPT) plus a self-contained offline HTML archive - images, video, and quoted posts embedded, with honest completeness reporting. Local-first, with optional expiring AI readable links.
 // @author       wolfgang-aura
 // @license      MIT
@@ -72,18 +72,29 @@
   const CONFIG = {
     selectors: {
       // The main content column of a status / article page.
-      primaryColumn: ['div[data-testid="primaryColumn"]', 'main[role="main"]'],
-      // A single tweet block (the primary post and any quoted/embedded tweets).
-      tweet: ['article[data-testid="tweet"]', 'article[role="article"]'],
+      // X's Nov 2026 client (Tailwind + Base UI, #110) dropped almost every data-testid.
+      // Each list keeps the old selector first and the new markup after it.
+      primaryColumn: ['div[data-testid="primaryColumn"]', 'main[role="main"]', 'main'],
+      // A single tweet block (the primary post and any quoted/embedded tweets). The new
+      // client renders a bare <article>, and a quote card holds its own nested <article>;
+      // topLevelTweetEls already drops nested ones.
+      tweet: ['article[data-testid="tweet"]', 'article[role="article"]', 'article'],
       // The rich text of a tweet. `div[lang]` is a fallback: X wraps tweet text
       // in a div carrying a `lang` attribute even if the testid changes.
       tweetText: ['div[data-testid="tweetText"]', 'div[lang]'],
       // Author name/handle block within a tweet.
-      userName: ['div[data-testid="User-Name"]'],
+      userName: ['div[data-testid="User-Name"]', 'div[data-anchor-to-hovered-child]'],
       // Profile links inside that block (`/<handle>`); the handle is read from their href.
       userProfileLink: ['a[href^="/"]'],
-      // Avatar image within a tweet.
-      avatar: ['div[data-testid="Tweet-User-Avatar"] img', 'img[src*="profile_images"]'],
+      // Avatar image within a tweet. `/profile_images/` with the slash, so the reply
+      // composer's `default_profile_images` placeholder never wins.
+      avatar: ['div[data-testid="Tweet-User-Avatar"] img', 'img[src*="/profile_images/"]'],
+      // X's "..." menu in a post header, where the inline control is placed.
+      caret: [
+        '[data-testid="caret"]',
+        'button[data-slot="xds-menu-trigger"][aria-label="More"]',
+        'button[data-slot="xds-menu-trigger"]:not([data-engagement-action]):not([role="group"] *)',
+      ],
       // Photos within a tweet.
       tweetPhoto: [
         'div[data-testid="tweetPhoto"] img',
@@ -91,15 +102,26 @@
         'img[src*="pbs.twimg.com/media/"]',
       ],
       // Video container within a tweet.
-      videoPlayer: ['div[data-testid="videoPlayer"]', 'div[data-testid="videoComponent"]'],
+      // The new client renders a bare <video poster src="blob:..."> (HLS); its parent
+      // div is the player. The MP4 itself comes from captured data or syndication.
+      videoPlayer: [
+        'div[data-testid="videoPlayer"]',
+        'div[data-testid="videoComponent"]',
+        'div:has(> video)',
+      ],
       // External link-preview card within a tweet (the payload of a link post).
       card: ['div[data-testid="card.wrapper"]', 'a[data-testid="card.wrapper"]'],
       // Clickable quoted-post wrapper. X has periodically added/removed the
       // tabindex attribute without changing the card semantics.
-      quoteCard: ['div[role="link"][tabindex="0"]', 'div[role="link"]'],
+      quoteCard: [
+        'div[data-slot="embedded-tweet-frame"]',
+        'div[role="link"][tabindex="0"]',
+        'div[role="link"]',
+      ],
       // "Show more" link X renders on long-form (note) posts in timeline views;
-      // its presence means the visible text is only a preview.
-      showMore: ['[data-testid="tweet-text-show-more-link"]'],
+      // its presence means the visible text is only a preview. The new client puts a
+      // `button[lang]` inside the text div itself.
+      showMore: ['[data-testid="tweet-text-show-more-link"]', 'div[lang] > button[lang]'],
       // X's inline dead-end box for a quoted post that is itself gone on X
       // (deleted, banned/suspended, or restricted account): "This Post is
       // unavailable." etc. Nothing is capturable, but the archive must say so.
@@ -122,7 +144,13 @@
       pollQuestion: ['[data-testid="pollQuestion"]', '[role="heading"]'],
       pollMeta: ['[data-testid="pollMetadata"]', '[aria-label*="vote" i]'],
       // Time element (carries the canonical permalink).
-      timeLink: ['a[href*="/status/"] time'],
+      // The new client has no <time>: the timestamp is a bare status link with no
+      // aria-label (media, analytics, quotes and the quote frame's hidden link all differ).
+      // Callers take `.closest('a')`, which is the anchor itself here.
+      timeLink: [
+        'a[href*="/status/"] time',
+        'a[href*="/status/"]:not([aria-label]):not([aria-hidden="true"]):not([href*="/photo/"]):not([href*="/video/"]):not([href*="/analytics"]):not([href*="/quotes"]):not([href*="/retweets"]):not([href*="/likes"]):not([href*="/history"])',
+      ],
       // Section headings X inserts between a conversation and recommendation feeds
       // such as "Discover more". These are thread boundaries, never continuations.
       threadBoundaryHeading: ['[role="heading"]', 'h1', 'h2', 'h3'],
@@ -222,7 +250,7 @@
   };
 
   const APP = 'SourceCapsule';
-  const VERSION = '1.6.15';
+  const VERSION = '1.6.16';
 
   // ===========================================================================
   // Small utilities
@@ -571,13 +599,25 @@
     return `@${m[1]}`;
   }
 
+  /** Creation time of an X status id (snowflake: ms since the 2010-11-04 epoch, << 22). */
+  function snowflakeIsoTime(statusId) {
+    const id = String(statusId || '');
+    if (!/^\d{15,20}$/.test(id) || typeof BigInt !== 'function') return '';
+    const ms = Number(BigInt(id) >> 22n) + 1288834974657;
+    // Ids from before snowflakes (2010) carry no time; refuse anything implausible.
+    if (ms < Date.UTC(2010, 10, 4) || ms > Date.now() + 86400000) return '';
+    return new Date(ms).toISOString();
+  }
+
   function publishedAtFromElement(root, expectedStatusId = '') {
     const times = Array.from(
       (root || document).querySelectorAll
         ? (root || document).querySelectorAll('time[datetime]')
         : []
     );
-    if (!times.length) return '';
+    // The Nov 2026 client renders no <time datetime> (#110). A status id is a snowflake
+    // whose top bits are the creation time in ms, so it is exact, not an estimate.
+    if (!times.length) return snowflakeIsoTime(expectedStatusId);
     const normalizedExpected = String(expectedStatusId || '');
     const matching = normalizedExpected
       ? times.find((time) => {
@@ -1768,6 +1808,8 @@
         ) ||
         el.closest('div[role="group"]') ||
         (el.tagName.toLowerCase() === 'a' && el.querySelector('time')) ||
+        // The new client's "Show more" is a button inside the text div (#110).
+        el.tagName.toLowerCase() === 'button' ||
         /\/analytics(?:$|[/?#])/.test(href) ||
         /\/photo\/\d+(?:$|[/?#])/.test(href) ||
         /\b(repl|repost|like|view|bookmark|share)\b/i.test(aria)
@@ -6856,6 +6898,7 @@ figure video{display:block;width:100%;height:auto;border-radius:14px;border:1px 
 .${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger{opacity:.96;pointer-events:auto}
 article[data-testid="tweet"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger,
 article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger,
+article:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger,
 .${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger[disabled]{opacity:1;pointer-events:auto}
 @media (prefers-color-scheme:dark){
   .xa-ctl-menu{background:#0f1419;border-color:#2f3336}
@@ -7648,6 +7691,8 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     lastTruncatedUrl: '',
     // Responses the page-side tee shed over its rate cap (cumulative, reported by it).
     bridgeDropped: 0,
+    // GraphQL responses read from X's streamed SSR scripts on a direct load (#110).
+    ssrPayloads: 0,
     errors: [],
     lastUrls: [],
   };
@@ -7683,6 +7728,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     networkCaptureDiagnostics.lastTruncatedUrl = '';
     networkCaptureDiagnostics.lastUrls = [];
     networkCapturePayloadSignatures.clear();
+    // X may replaceState while hydrating a direct load, which lands here. The SSR stream
+    // never repeats, so put back what it delivered for the page still showing.
+    replaySsrStreamPayloads();
   }
 
   function rememberNetworkCaptureUrl(url) {
@@ -7718,12 +7766,16 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * tweet's card. Returning '' keeps article images in the body instead.
    */
   function mediaOwnerStatusId(img) {
-    if (!img.closest('div[data-testid="tweetPhoto"]')) return '';
+    // Old client: div[data-testid="tweetPhoto"]. Nov 2026 client (#110): the photo link
+    // `a[href*="/photo/"]`, and an embedded post sits in an embedded-tweet-frame.
+    if (!img.closest('div[data-testid="tweetPhoto"], a[href*="/photo/"]')) return '';
     const ownerTweet = closestAny(img, CONFIG.selectors.tweet);
     if (!ownerTweet) return '';
     const sid = tweetStatusId(ownerTweet);
     if (!sid) return '';
-    const isEmbedded = !!ownerTweet.closest('div[data-testid="simpleTweet"]');
+    const isEmbedded = !!ownerTweet.closest(
+      'div[data-testid="simpleTweet"], div[data-slot="embedded-tweet-frame"]'
+    );
     const isPrimaryPost = sid === currentStatusId();
     return isEmbedded || isPrimaryPost ? sid : '';
   }
@@ -7904,10 +7956,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
       const parentId =
         item.rest_id || legacy.id_str || (item.legacy && item.legacy.id_str) || item.id_str || '';
       // GraphQL shape: quoted_status_result.result carries its own rest_id + core.user_results.
+      // X's Nov 2026 client names it quoted_tweet_results (#110).
+      const quotedResults = item.quoted_status_result || item.quoted_tweet_results;
       const gqResult =
-        item.quoted_status_result &&
-        item.quoted_status_result.result &&
-        (item.quoted_status_result.result.tweet || item.quoted_status_result.result);
+        quotedResults &&
+        quotedResults.result &&
+        (quotedResults.result.tweet || quotedResults.result);
       if (gqResult) {
         const qLegacy = gqResult.legacy || {};
         const qId = gqResult.rest_id || qLegacy.id_str || '';
@@ -8042,7 +8096,12 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
         const displayName = String(userCore.name || userLegacy.name || '');
         // GraphQL delivers reply bodies with &, <, > HTML-encoded, exactly like
         // syndication does. Live archive Markdown showed "-&gt;" inside real replies.
-        const previewText = decodeBasicEntities((legacy && (legacy.full_text || legacy.text)) || '')
+        // X's Nov 2026 client (#110) moved text and time into `details`, the parent into
+        // `reply_to_results`, and media into `media_entities2`. Read both shapes.
+        const details = value.details && typeof value.details === 'object' ? value.details : {};
+        const previewText = decodeBasicEntities(
+          (legacy && (legacy.full_text || legacy.text)) || details.full_text || ''
+        )
           .replace(/\s+/g, ' ')
           .trim();
         // A long reply arrives as a truncated `full_text` plus the real body in
@@ -8071,10 +8130,29 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
               : `https://x.com/i/web/status/${id}`,
             text: textWins ? text.slice(0, REPLY_ARCHIVE_TEXT_MAX) : prior.text,
             truncated: textWins ? !noteText && /[…]$/.test(previewText) : Boolean(prior.truncated),
-            createdAt: safeIsoTime((legacy && legacy.created_at) || '') || prior.createdAt || '',
+            createdAt:
+              safeIsoTime((legacy && legacy.created_at) || '') ||
+              (Number(details.created_at_ms) > 0
+                ? new Date(Number(details.created_at_ms)).toISOString()
+                : '') ||
+              prior.createdAt ||
+              '',
             parentId:
-              String((legacy && legacy.in_reply_to_status_id_str) || '') || prior.parentId || '',
-            mediaLinks: mergeReplyMediaLinks(prior.mediaLinks, replyMediaLinksFromLegacy(legacy)),
+              String(
+                (legacy && legacy.in_reply_to_status_id_str) ||
+                  (value.reply_to_results && value.reply_to_results.rest_id) ||
+                  ''
+              ) ||
+              prior.parentId ||
+              '',
+            mediaLinks: mergeReplyMediaLinks(
+              prior.mediaLinks,
+              replyMediaLinksFromLegacy(
+                Array.isArray(value.media_entities2) && value.media_entities2.length
+                  ? { extended_entities: { media: value.media_entities2 } }
+                  : legacy
+              )
+            ),
             unavailable,
             unavailableReason: unavailable ? String(value.__typename || 'unavailable') : '',
           });
@@ -10021,7 +10099,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     if (!tweetEl) return null;
     // Promoted posts in timelines commonly have status/analytics links but no timestamp.
     // Requiring X's canonical time link prevents ads from inflating the probe count.
-    const time = tweetEl.querySelector('a[href*="/status/"] time');
+    const time = pick(tweetEl, CONFIG.selectors.timeLink, { quiet: true });
     const anchor = time && time.closest('a');
     const id = anchor && statusIdFromUrl(anchor.getAttribute('href') || anchor.href);
     if (!id) return null;
@@ -12956,8 +13034,21 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
    * appears, the control moves out of the reader's way. Returns true if it ended up
    * inline.
    */
+  /** X's "..." header menu of this post, never one inside a quoted post's nested article. */
+  function postCaret(tweetEl) {
+    if (!tweetEl) return null;
+    for (const sel of CONFIG.selectors.caret) {
+      const hit = Array.from(tweetEl.querySelectorAll(sel)).find((el) => {
+        const owner = el.closest('article');
+        return !owner || owner === tweetEl || !tweetEl.contains(owner);
+      });
+      if (hit) return hit;
+    }
+    return null;
+  }
+
   function placePostControl(wrap, tweetEl) {
-    const caret = tweetEl.querySelector('[data-testid="caret"]');
+    const caret = postCaret(tweetEl);
     if (caret && caret.parentElement) {
       wrap.classList.add('xa-ctl-inline');
       caret.parentElement.insertBefore(wrap, caret);
@@ -12987,7 +13078,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     // A post control on the article tweet was injected before X mounted the reader. Its
     // menu offers post and thread exports, so swap it for the article control (#41).
     if (existing && !articleTweetEl) return;
-    const caret = host.querySelector('[data-testid="caret"]'); // topmost = article header
+    const caret = postCaret(host); // topmost = article header
     if (!caret || !caret.parentElement) return;
     if (existing) existing.remove();
     const { wrap } = createExportControl({
@@ -13342,6 +13433,120 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
     return true;
   }
 
+  /**
+   * X's Nov 2026 client (#110) streams a direct load's GraphQL responses inside the HTML
+   * document as `$R[n].next({kind:1,requestId,key:"...",value:"<JSON>"})` scripts that
+   * remove themselves once they run. No fetch carries them, so none of the network tees
+   * can see them. Returns `{ name, body }` for each `value` in one script's source, where
+   * `name` is the GraphQL operation the data root implies (the key holds only an id).
+   */
+  function ssrPayloadsFromScriptText(text) {
+    const source = String(text || '');
+    const out = [];
+    const marker = ',value:"';
+    let at = source.indexOf(marker);
+    while (at >= 0) {
+      const start = at + marker.length;
+      let end = start;
+      while (end < source.length && source[end] !== '"') end += source[end] === '\\' ? 2 : 1;
+      let body = '';
+      try {
+        // A JS string literal. JSON accepts it once \x escapes become \u (seroval writes
+        // `<` as \x3C) and an escaped ' loses its backslash.
+        // Matching each escape whole, left to right, keeps `\\x` (an escaped backslash
+        // before an x) intact.
+        body = JSON.parse(
+          `"${source
+            .slice(start, end)
+            .replace(/\\(x([0-9a-fA-F]{2})|[\s\S])/g, (escape, rest, hex) =>
+              hex ? `\\u00${hex}` : rest === "'" ? "'" : escape
+            )}"`
+        );
+      } catch {
+        body = '';
+      }
+      if (body && (body[0] === '{' || body[0] === '[')) {
+        const name = /"threaded_conversation_with_injections_v2"/.test(body)
+          ? 'TweetDetail'
+          : /"tweet_result_by_rest_id"|"tweetResult"/.test(body)
+            ? 'TweetResultByRestId'
+            : 'query';
+        out.push({ name, body });
+      }
+      at = source.indexOf(marker, end);
+    }
+    return out;
+  }
+
+  // What the SSR stream delivered, keyed to the path it was delivered for.
+  const ssrStreamCapture = { path: '', payloads: [] };
+
+  function feedSsrStreamPayload(name, body) {
+    const max = CONFIG.video.networkCaptureMaxChars;
+    const payload = {
+      source: `${APP}:network-capture`,
+      contractVersion: 1,
+      type: 'response',
+      url: `ssr:${name}`,
+      transport: 'ssr-stream',
+      truncated: body.length > max,
+      body: body.slice(0, max),
+    };
+    handleNetworkCapturePayload(payload);
+    return payload;
+  }
+
+  function replaySsrStreamPayloads() {
+    if (typeof location === 'undefined' || ssrStreamCapture.path !== location.pathname) return;
+    ssrStreamCapture.payloads.forEach((p) => handleNetworkCapturePayload(p));
+  }
+
+  function captureSsrScript(node) {
+    if (!node || node.nodeName !== 'SCRIPT' || node.src) return;
+    const text = node.textContent || '';
+    if (text.indexOf(',value:"') < 0 || !networkCapturePatterns().body.test(text)) return;
+    ssrPayloadsFromScriptText(text).forEach(({ name, body }) => {
+      if (!networkCapturePatterns().body.test(body)) return;
+      if (ssrStreamCapture.path !== location.pathname) {
+        ssrStreamCapture.path = location.pathname;
+        ssrStreamCapture.payloads = [];
+      }
+      const payload = feedSsrStreamPayload(name, body);
+      networkCaptureDiagnostics.ssrPayloads += 1;
+      if (ssrStreamCapture.payloads.length < 20) ssrStreamCapture.payloads.push(payload);
+    });
+  }
+
+  /**
+   * Watch the document for X's streamed data scripts. The DOM is shared across worlds,
+   * so this works from the isolated world too, and a script that removed itself still
+   * holds its text in the mutation record. The stream ends with the document, so the
+   * observer stops a few seconds after `load`.
+   */
+  function installSsrStreamCapture() {
+    if (typeof document === 'undefined' || typeof MutationObserver !== 'function') return;
+    try {
+      Array.from(document.scripts || []).forEach(captureSsrScript);
+      const observer = new MutationObserver((records) => {
+        for (const record of records) {
+          for (const node of record.addedNodes) {
+            try {
+              captureSsrScript(node);
+            } catch (e) {
+              recordNetworkCaptureError(e);
+            }
+          }
+        }
+      });
+      observer.observe(document, { childList: true, subtree: true });
+      const stop = () => setTimeout(() => observer.disconnect(), 5000);
+      if (document.readyState === 'complete') stop();
+      else window.addEventListener('load', stop, { once: true });
+    } catch (e) {
+      recordNetworkCaptureError(e);
+    }
+  }
+
   function installNetworkCaptureBridge() {
     if (
       networkCaptureBridgeInstalled ||
@@ -13435,6 +13640,7 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   // Browser bootstrap (guarded so the pure engine can be required from Node).
   if (typeof document !== 'undefined') {
     installNetworkCaptureBridge();
+    installSsrStreamCapture();
     const doInit = () => initPageLanguage().then(init).catch(init);
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', doInit);
@@ -13447,6 +13653,9 @@ article[role="article"]:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) 
   // `module` does not exist in the userscript sandbox, so this is a no-op there.
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
+      ssrPayloadsFromScriptText,
+      snowflakeIsoTime,
+      postCaret,
       assembleHtml,
       renderLlmMarkdown,
       renderBlock,
