@@ -159,13 +159,25 @@
         'div[data-testid="twitterArticleReadView"]',
         'div[data-testid="twitterArticleRichTextView"]',
         'div[data-testid="twitterArticleReader"]',
+        // Nov 2026 client: the body is split into several [data-article-body-html] chunks
+        // with embedded posts between them, so the root is the part that holds them all.
+        '[data-article-part="body"]',
       ],
-      articleTextRoot: ['div[data-testid="longformRichTextComponent"]'],
-      articleBlock: ['[data-block="true"]'],
+      articleTextRoot: [
+        'div[data-testid="longformRichTextComponent"]',
+        '[data-article-part="body"]',
+      ],
+      // New client: each chunk holds plain semantic HTML (p, h3, ul > li, figure...). List
+      // items are the blocks, not the list, so the walker's list grouping still applies.
+      articleBlock: [
+        '[data-block="true"]',
+        '[data-article-body-html] > :not(ul):not(ol), [data-article-body-html] > ul > li, [data-article-body-html] > ol > li',
+      ],
       // Long-form Article title.
       articleTitle: [
         'div[data-testid="twitter-article-title"]',
         'div[data-testid="twitterArticleTitle"]',
+        '[data-article-part="title"]',
         'h1[role="heading"]',
         'h1',
       ],
@@ -301,6 +313,13 @@
       if (els.length) return Array.from(els);
     }
     return [];
+  }
+
+  /** The Article's rich-text root: the root itself on the new client, a descendant on the old. */
+  function articleTextRootIn(root) {
+    if (!root) return null;
+    const own = CONFIG.selectors.articleTextRoot.find((sel) => root.matches && root.matches(sel));
+    return own ? root : pick(root, CONFIG.selectors.articleTextRoot, { quiet: true });
   }
 
   /** Blocks of an Article's rich text root; warns when the root has text but no block matches. */
@@ -1650,7 +1669,7 @@
   }
 
   function collectArticleDebug(root, quoteEls, model) {
-    const richRoot = pick(root, CONFIG.selectors.articleTextRoot, { quiet: true });
+    const richRoot = articleTextRootIn(root);
     const rootSig = rawImageSignals(root);
     return {
       app: APP,
@@ -2198,7 +2217,18 @@
       if (quotes.some((q) => q.contains(c))) continue;
       const hasUser = pick(c, CONFIG.selectors.userName, { quiet: true });
       const hasText = pick(c, CONFIG.selectors.tweetText, { quiet: true });
-      if (hasUser || hasText) quotes.push(c);
+      // The new client's embedded frame can still be an un-hydrated shell when the model is
+      // built. Its status link is enough: syndication rebuilds the content by id (#112).
+      const isFrameShell =
+        c.matches('div[data-slot="embedded-tweet-frame"]') &&
+        /\/status\/\d+/.test(
+          c.getAttribute('data-href') ||
+            (c.querySelector('a[href*="/status/"]') || { getAttribute: () => '' }).getAttribute(
+              'href'
+            ) ||
+            ''
+        );
+      if (hasUser || hasText || isFrameShell) quotes.push(c);
     }
     return quotes;
   }
@@ -2232,6 +2262,11 @@
 
   function isTweetLikeBlock(el) {
     if (!el) return false;
+    // A new-client Article paragraph that links to a post matches the bare status-link
+    // timeLink fallback. Semantic text blocks are tweet-like only if they hold a post.
+    if (/^(?:p|li|h[1-6]|blockquote|pre)$/i.test(el.tagName || '')) {
+      return !!el.querySelector('article, div[data-slot="embedded-tweet-frame"]');
+    }
     const hasActionGroup = Array.from(el.querySelectorAll('div[role="group"][aria-label]')).some(
       (group) =>
         /\b(repl|repost|like|view|bookmark|share)\b/i.test(group.getAttribute('aria-label') || '')
@@ -2255,7 +2290,7 @@
       quotes.push(quote);
     };
     findQuotedTweetEls(root).forEach(addQuote);
-    const richRoot = pick(root, CONFIG.selectors.articleTextRoot, { quiet: true });
+    const richRoot = articleTextRootIn(root);
     if (richRoot) {
       articleBlocks(richRoot).forEach((block) => {
         if (!isTweetLikeBlock(block)) return;
@@ -2869,7 +2904,7 @@
     // equality is only checked against the PREVIOUS text block, so a repeated subheading such
     // as "Pros" or "Summary" elsewhere in the article survives.
     let lastTextKey = '';
-    const richRoot = pick(root, CONFIG.selectors.articleTextRoot, { quiet: true });
+    const richRoot = articleTextRootIn(root);
     const quoteEls = findArticleEmbeddedTweetEls(root);
     const insideQuote = (el) => quoteEls.some((quoteEl) => quoteEl !== el && quoteEl.contains(el));
     // Author: trust the canonical page URL for the handle; the article header lives
@@ -2885,7 +2920,14 @@
       const text = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
       if (articleDividerText(text)) blocks.push({ kind: 'divider' });
       else {
+        const tagLevel = /^h([1-6])$/i.exec(el.tagName || '');
         const heading =
+          (tagLevel
+            ? {
+                level: Math.min(Math.max(Number(tagLevel[1]), 2), 4),
+                text: normalizeArticleStructureText(text),
+              }
+            : null) ||
           articleHeadingBlock(text) ||
           (articleHeadingVisualElement(el)
             ? { level: 3, text: normalizeArticleStructureText(text) }
@@ -9190,6 +9232,10 @@ article:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger,
    */
   async function enrichQuotesViaSyndication(model, onProgress, fetchTweet = fetchTweetSyndication) {
     const quotes = model.blocks.filter((b) => b.kind === 'quote' && b.sourceUrl);
+    // An empty card (the new client's un-hydrated embed frame) whose post is gone on X is an
+    // honest tombstone, never a blocker (#112). A card with DOM content keeps it.
+    const tombstones = new Map();
+    const isEmptyCard = (q) => !(q.blocks && q.blocks.length);
     let done = 0;
     onProgress && onProgress(0, quotes.length);
     for (const q of quotes) {
@@ -9197,7 +9243,9 @@ article:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger,
       if (id) {
         try {
           const data = await fetchTweet(id);
-          if (isSyndicationTombstone(data) && q.blocks && q.blocks.length) {
+          if (isSyndicationTombstone(data) && isEmptyCard(q)) {
+            tombstones.set(q, syndicationTombstoneBlock(data, q.sourceUrl));
+          } else if (isSyndicationTombstone(data) && q.blocks && q.blocks.length) {
             recordSyndicationUnchecked(model, id, { status: 404, message: 'tombstone' });
           } else if (data && data.user && (data.__typename === 'Tweet' || data.text != null)) {
             const fresh = mergeQuoteAfterSyndication(q, syndicationToQuoteBlock(data));
@@ -9215,14 +9263,19 @@ article:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger,
           }
         } catch (e) {
           warn('syndication enrich failed for', id, '-', e.message);
+          // A 404 is authoritative: an empty card for a post gone on X is a tombstone.
+          if (e && e.status === 404 && isEmptyCard(q)) {
+            tombstones.set(q, syndicationTombstoneBlock(null, q.sourceUrl));
+          }
           // An empty card is already a strict blocker; one that kept its DOM text would
           // otherwise ship with whatever media never loaded, and no note (#99).
-          if (q.blocks && q.blocks.length) recordSyndicationUnchecked(model, id, e);
+          else if (q.blocks && q.blocks.length) recordSyndicationUnchecked(model, id, e);
         }
       }
       done++;
       onProgress && onProgress(done, quotes.length);
     }
+    if (tombstones.size) model.blocks = model.blocks.map((b) => tombstones.get(b) || b);
     // Collapse any duplicates that now share the same canonical source url.
     model.blocks = dedupeQuoteCards(model.blocks);
     return model;
