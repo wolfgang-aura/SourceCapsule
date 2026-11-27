@@ -6,6 +6,21 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.17] - 2026-11-27
+
+### Fixed
+
+- X Articles export their text again. On the new client the body is several chunks of plain
+  HTML with embedded posts between them; each paragraph, heading, list item and image is now
+  read in order, and the Article header gets its control back. An embedded post that has not
+  loaded yet still counts by its link and is rebuilt from syndication, and one whose post is
+  gone on X becomes an "unavailable" note instead of blocking the export (#112).
+- Link-preview cards are captured again, with the domain and the real title rather than the
+  description (#113).
+- A long-form post inside a thread keeps its full text on a direct load. X's large data
+  scripts can be seen before their text is complete, so they are read again when they remove
+  themselves (#113).
+
 ## [1.6.16] - 2026-11-25
 
 ### Fixed

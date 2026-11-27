@@ -496,4 +496,23 @@ function findBlock(blocks, kind) {
   assert.match(engine.renderLlmMarkdown(unchecked), /Possibly truncated: 1 embedded post/);
 }
 
+// 13. An empty embed card (the new client's un-hydrated frame) for a post gone on X becomes an
+//     honest tombstone, not a strict blocker (#112). A 404 is authoritative the same way.
+for (const fetchTweet of [
+  async () => ({ __typename: 'TweetTombstone', tombstone: { text: { text: 'Gone' } } }),
+  async () => {
+    throw Object.assign(new Error('syndication: HTTP 404'), { status: 404 });
+  },
+]) {
+  const model = domModel();
+  const quote = model.blocks.find((b) => b.kind === 'quote');
+  quote.blocks = [];
+  quote.author = {};
+  await engine.enrichQuotesViaSyndication(model, null, fetchTweet);
+  assert.ok(!model.blocks.some((b) => b.kind === 'quote'), 'the empty card is replaced');
+  const stone = model.blocks.find((b) => b.kind === 'quote-tombstone');
+  assert.equal(stone.sourceUrl, quote.sourceUrl);
+  assert.equal(engine.assessExportCompleteness(model).blockers.length, 0);
+}
+
 console.log('quote-chain test passed');

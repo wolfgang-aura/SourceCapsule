@@ -6540,6 +6540,136 @@ check('captured bodies in the Nov 2026 shape still yield quote refs and reply re
   assert.equal(reply.mediaLinks[0].type, 'image');
 });
 
+const NEW_ARTICLE_URL = 'https://x.com/Vegahao/status/2069733529785905289';
+const NEW_ARTICLE_PAGE = `<!doctype html><html><body><main>
+  <article>
+    <div data-anchor-to-hovered-child="">
+      <a href="/Vegahao"><img alt="@Vegahao" src="https://pbs.twimg.com/profile_images/1/a_normal.jpg"></a>
+      <a href="/Vegahao"><div dir="auto">Vega Hao</div></a><a href="/Vegahao"><span>@Vegahao</span></a>
+    </div>
+    <button data-slot="xds-menu-trigger" aria-label="More" type="button"></button>
+    <a data-article-part="cover" href="/Vegahao/article/2069733529785905289/media/1">
+      <img src="https://pbs.twimg.com/media/COVERimg.jpg" width="1500" height="600"></a>
+    <h1 data-article-part="title">Why he watches three tickers</h1>
+    <div data-article-part="byline">5 min read</div>
+    <div data-article-part="body"><div class="x-article-body">
+      <div data-article-body-html="" class="contents">
+        <p>Opening paragraph with <b><strong>bold words</strong></b> and a
+          <a href="/someone/status/1999999999999999999">link to a post</a>.</p>
+        <h3><span>First section</span></h3>
+        <ul><li value="1"><span>Alpha point</span></li><li value="2"><span>Beta point</span></li></ul>
+        <figure><div class="grid"><a href="/Vegahao/article/2069733529785905289/media/2">
+          <img src="https://pbs.twimg.com/media/BODYimg.jpg" width="2400" height="1844"></a></div></figure>
+      </div>
+      <div class="my-6"><div role="link" data-slot="embedded-tweet-frame" data-href="/xiaomustock/status/1940000000000000000">
+        <a aria-hidden="true" href="/xiaomustock/status/1940000000000000000" tabindex="-1"></a>
+        <article><div data-anchor-to-hovered-child="">
+          <a href="/xiaomustock"><div dir="auto">Trumoo</div></a><a href="/xiaomustock"><span>@xiaomustock</span></a>
+          <a href="/xiaomustock/status/1940000000000000000">Jul 1, 2025</a></div>
+          <button data-slot="xds-menu-trigger" aria-label="More"></button>
+          <div dir="auto" lang="zh"><span>Embedded post text</span></div>
+        </article></div></div>
+      <div data-article-body-html="" class="contents">
+        <p>Closing paragraph after the embed.</p>
+      </div>
+      <div class="my-6"><div role="link" data-slot="embedded-tweet-frame" data-href="/xiaomustock/status/1950000000000000000">
+        <a aria-hidden="true" href="/xiaomustock/status/1950000000000000000" tabindex="-1"></a></div></div>
+    </div></div>
+  </article>
+</main></body></html>`;
+
+check(
+  'the Nov 2026 Article reader exports every body chunk, list, image and embed in order',
+  () => {
+    withPage(NEW_ARTICLE_PAGE, NEW_ARTICLE_URL, () => {
+      assert.equal(engine.detectPageType(), 'article');
+      const model = engine.buildModelForArticle();
+      assert.equal(model.title, 'Why he watches three tickers');
+      assert.equal(model.author.handle, '@Vegahao');
+      const kinds = model.blocks.map((b) => b.kind);
+      const at = (pred) => model.blocks.findIndex(pred);
+      const opening = at((b) => b.kind === 'paragraph' && b.html.includes('Opening paragraph'));
+      const heading = at((b) => b.kind === 'heading' && b.text === 'First section');
+      const list = at((b) => b.kind === 'list' && b.items.length === 2 && !b.ordered);
+      const image = at((b) => b.kind === 'image' && b.url.includes('BODYimg'));
+      const quote = at((b) => b.kind === 'quote');
+      const closing = at((b) => b.kind === 'paragraph' && b.html.includes('Closing paragraph'));
+      assert.ok(opening >= 0, `no opening paragraph; kinds=${kinds}`);
+      assert.ok(model.blocks[opening].html.includes('<strong>bold words</strong>'));
+      assert.ok(model.blocks[opening].html.includes('link to a post'), 'a post link stays text');
+      assert.ok(heading > opening && list > heading, `order; kinds=${kinds}`);
+      assert.ok(image > list && quote > image && closing > quote, `order; kinds=${kinds}`);
+      const shell = model.blocks.findIndex(
+        (b) => b.kind === 'quote' && b.sourceUrl.endsWith('/status/1950000000000000000')
+      );
+      assert.ok(shell > closing, `an un-hydrated embed frame is still a quote; kinds=${kinds}`);
+      assert.equal(
+        model.blocks[quote].sourceUrl,
+        'https://x.com/xiaomustock/status/1940000000000000000'
+      );
+      assert.ok(
+        !kinds.includes('paragraph') ||
+          !model.blocks.some((b) => b.kind === 'paragraph' && b.html.includes('Embedded post text'))
+      );
+    });
+  }
+);
+
+check('a new-client link card keeps its URL, domain, title and image (#113)', () => {
+  const card = `<a href="https://t.co/urg2CftdUp" rel="noopener noreferrer" target="_blank">
+      <div><div><img src="https://pbs.twimg.com/card_img/1/abc?format=jpg&name=small"></div></div>
+      <div><div>claude.ai</div><div>The Last Boring Slide</div>
+      <div>A talk on the intelligence explosion that opens as a dull default slide, then edits itself.</div></div></a>`;
+  const page = `<!doctype html><html><body><main>${newClientPost('2125321091702804583', 'Have a go.', card)}</main></body></html>`;
+  withPage(page, NEW_CLIENT_URL, () => {
+    const model = engine.buildModelForPost(document.querySelector('main > article'));
+    const block = allBlocks(model.blocks).find((b) => b.kind === 'link-card');
+    assert.ok(block, `no link card; kinds=${model.blocks.map((b) => b.kind)}`);
+    assert.equal(block.url, 'https://t.co/urg2CftdUp');
+    assert.equal(block.domain, 'claude.ai');
+    assert.equal(block.title, 'The Last Boring Slide');
+    assert.match(block.imageUrl, /card_img/);
+  });
+});
+
+check(
+  'a data script read half-written at insert is read again, once, when it removes itself (#113)',
+  () => {
+    withPage(
+      '<!doctype html><html><body></body></html>',
+      'https://x.com/a/status/2125701190872915996',
+      () => {
+        const body = JSON.stringify({
+          data: {
+            threaded_conversation_with_injections_v2: {
+              instructions: [
+                {
+                  rest_id: '2125701190872915996',
+                  note_tweet: {
+                    note_tweet_results: { result: { text: 'The whole long-form text.' } },
+                  },
+                },
+              ],
+            },
+          },
+        });
+        const full = `$R[1].next({kind:1,requestId:2,key:"k",value:${JSON.stringify(body)}})`;
+        const script = document.createElement('script');
+        script.textContent = full.slice(0, full.length - 40);
+        engine.captureSsrScript(script);
+        assert.equal(engine.getCapturedNoteTweet('2125701190872915996'), null);
+        script.textContent = full;
+        engine.captureSsrScript(script);
+        engine.captureSsrScript(script);
+        assert.equal(
+          engine.getCapturedNoteTweet('2125701190872915996').text,
+          'The whole long-form text.'
+        );
+      }
+    );
+  }
+);
+
 // REVIEW-TESTS-END
 
 if (failures) {
