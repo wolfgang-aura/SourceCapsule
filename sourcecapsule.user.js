@@ -110,7 +110,13 @@
         'div:has(> video)',
       ],
       // External link-preview card within a tweet (the payload of a link post).
-      card: ['div[data-testid="card.wrapper"]', 'a[data-testid="card.wrapper"]'],
+      // The Nov 2026 client renders a card as a bare t.co anchor around a card_img preview
+      // and three lines: domain, title, description (#113).
+      card: [
+        'div[data-testid="card.wrapper"]',
+        'a[data-testid="card.wrapper"]',
+        'a[href^="https://t.co/"]:has(img[src*="/card_img/"])',
+      ],
       // Clickable quoted-post wrapper. X has periodically added/removed the
       // tabindex attribute without changing the card semantics.
       quoteCard: [
@@ -2498,9 +2504,15 @@
       .filter((el) => !el.children.length)
       .map((el) => (el.textContent || '').trim())
       .filter(Boolean);
-    const domainLine = lines.find((line) => /^from\s+\S/i.test(line)) || '';
-    const title =
-      lines.filter((line) => line !== domainLine).sort((a, b) => b.length - a.length)[0] || '';
+    const fromLine = lines.find((line) => /^from\s+\S/i.test(line)) || '';
+    // New client: no "From" prefix; the first line is the bare domain, then the title,
+    // then a longer description that must not win the title slot (#113).
+    const bareDomain =
+      !fromLine && /^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i.test(lines[0] || '') ? lines[0] : '';
+    const domainLine = fromLine || bareDomain;
+    const title = bareDomain
+      ? lines[1] || ''
+      : lines.filter((line) => line !== domainLine).sort((a, b) => b.length - a.length)[0] || '';
     // Card preview image (X proxies these through pbs.twimg.com/card_img/...).
     // Decorative: a fetch failure never counts missing and never gates the export.
     const imageEl = Array.from(cardEl.querySelectorAll('img')).find((el) =>
@@ -13532,7 +13544,7 @@ article:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger,
   }
 
   // What the SSR stream delivered, keyed to the path it was delivered for.
-  const ssrStreamCapture = { path: '', payloads: [] };
+  const ssrStreamCapture = { path: '', payloads: [], seen: new Set() };
 
   function feedSsrStreamPayload(name, body) {
     const max = CONFIG.video.networkCaptureMaxChars;
@@ -13563,7 +13575,12 @@ article:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger,
       if (ssrStreamCapture.path !== location.pathname) {
         ssrStreamCapture.path = location.pathname;
         ssrStreamCapture.payloads = [];
+        ssrStreamCapture.seen = new Set();
       }
+      // A script is read when it is inserted and again when it removes itself.
+      const key = `${name}:${body.length}:${body.slice(0, 120)}:${body.slice(-120)}`;
+      if (ssrStreamCapture.seen.has(key)) return;
+      ssrStreamCapture.seen.add(key);
       const payload = feedSsrStreamPayload(name, body);
       networkCaptureDiagnostics.ssrPayloads += 1;
       if (ssrStreamCapture.payloads.length < 20) ssrStreamCapture.payloads.push(payload);
@@ -13582,7 +13599,10 @@ article:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger,
       Array.from(document.scripts || []).forEach(captureSsrScript);
       const observer = new MutationObserver((records) => {
         for (const record of records) {
-          for (const node of record.addedNodes) {
+          // A large script can be inserted before the parser has finished its text, so
+          // the insert-time read fails to parse. Each data script removes itself once it
+          // has run, complete by then, so read it again on removal (#113).
+          for (const node of [...record.addedNodes, ...record.removedNodes]) {
             try {
               captureSsrScript(node);
             } catch (e) {
@@ -13707,6 +13727,7 @@ article:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger,
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
       ssrPayloadsFromScriptText,
+      captureSsrScript,
       snowflakeIsoTime,
       postCaret,
       assembleHtml,

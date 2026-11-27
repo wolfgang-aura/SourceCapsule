@@ -6615,6 +6615,61 @@ check(
   }
 );
 
+check('a new-client link card keeps its URL, domain, title and image (#113)', () => {
+  const card = `<a href="https://t.co/urg2CftdUp" rel="noopener noreferrer" target="_blank">
+      <div><div><img src="https://pbs.twimg.com/card_img/1/abc?format=jpg&name=small"></div></div>
+      <div><div>claude.ai</div><div>The Last Boring Slide</div>
+      <div>A talk on the intelligence explosion that opens as a dull default slide, then edits itself.</div></div></a>`;
+  const page = `<!doctype html><html><body><main>${newClientPost('2125321091702804583', 'Have a go.', card)}</main></body></html>`;
+  withPage(page, NEW_CLIENT_URL, () => {
+    const model = engine.buildModelForPost(document.querySelector('main > article'));
+    const block = allBlocks(model.blocks).find((b) => b.kind === 'link-card');
+    assert.ok(block, `no link card; kinds=${model.blocks.map((b) => b.kind)}`);
+    assert.equal(block.url, 'https://t.co/urg2CftdUp');
+    assert.equal(block.domain, 'claude.ai');
+    assert.equal(block.title, 'The Last Boring Slide');
+    assert.match(block.imageUrl, /card_img/);
+  });
+});
+
+check(
+  'a data script read half-written at insert is read again, once, when it removes itself (#113)',
+  () => {
+    withPage(
+      '<!doctype html><html><body></body></html>',
+      'https://x.com/a/status/2125701190872915996',
+      () => {
+        const body = JSON.stringify({
+          data: {
+            threaded_conversation_with_injections_v2: {
+              instructions: [
+                {
+                  rest_id: '2125701190872915996',
+                  note_tweet: {
+                    note_tweet_results: { result: { text: 'The whole long-form text.' } },
+                  },
+                },
+              ],
+            },
+          },
+        });
+        const full = `$R[1].next({kind:1,requestId:2,key:"k",value:${JSON.stringify(body)}})`;
+        const script = document.createElement('script');
+        script.textContent = full.slice(0, full.length - 40);
+        engine.captureSsrScript(script);
+        assert.equal(engine.getCapturedNoteTweet('2125701190872915996'), null);
+        script.textContent = full;
+        engine.captureSsrScript(script);
+        engine.captureSsrScript(script);
+        assert.equal(
+          engine.getCapturedNoteTweet('2125701190872915996').text,
+          'The whole long-form text.'
+        );
+      }
+    );
+  }
+);
+
 // REVIEW-TESTS-END
 
 if (failures) {
