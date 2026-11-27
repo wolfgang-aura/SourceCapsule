@@ -6670,6 +6670,27 @@ check(
   }
 );
 
+check('a library bundle with no media never points at a media/ folder (#115)', () => {
+  const blocks = [{ kind: 'paragraph', html: 'Text only.' }];
+  const md = engine.renderLlmMarkdown(RENDER_MODEL(blocks), '', { mediaFiles: new Map() });
+  assert.doesNotMatch(md, /included as separate files in the media\//);
+  assert.match(md, /there is no media\/ folder/);
+  assert.doesNotMatch(engine.libraryReadme(0), /files in the media\/ folder/);
+  assert.match(engine.libraryReadme(2), /files in the media\/ folder/);
+});
+
+check('source links taken from block HTML are plain URLs, not escaped ones (#116)', () => {
+  const blocks = [
+    {
+      kind: 'paragraph',
+      html: '<a href="https://x.com/search?q=%24NVDA&amp;src=cashtag_click">$NVDA</a>',
+    },
+  ];
+  const md = engine.renderLlmMarkdown(RENDER_MODEL(blocks));
+  assert.match(md, /https:\/\/x\.com\/search\?q=%24NVDA&src=cashtag_click$/m);
+  assert.doesNotMatch(md, /&amp;/);
+});
+
 // REVIEW-TESTS-END
 
 if (failures) {
