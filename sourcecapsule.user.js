@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SourceCapsule - Save X/Twitter Threads & Articles as Markdown for LLMs + Offline HTML
 // @namespace    https://github.com/wolfgang-aura/SourceCapsule
-// @version      1.6.17
+// @version      1.6.18
 // @description  One click saves an X (Twitter) thread, Article, or post as clean Markdown for LLM context (Claude, ChatGPT) plus a self-contained offline HTML archive - images, video, and quoted posts embedded, with honest completeness reporting. Local-first, with optional expiring AI readable links.
 // @author       wolfgang-aura
 // @license      MIT
@@ -268,7 +268,7 @@
   };
 
   const APP = 'SourceCapsule';
-  const VERSION = '1.6.17';
+  const VERSION = '1.6.18';
 
   // ===========================================================================
   // Small utilities
@@ -440,6 +440,12 @@
       .replace(/&lt;/g, '<')
       .replace(/&gt;/g, '>')
       .replace(/&amp;/g, '&');
+  }
+
+  // An href read out of serialized HTML keeps the serializer's escaping ("&" -> "&amp;").
+  // Links pulled that way must be decoded before they become plain URLs (#116).
+  function decodeAttributeEntities(s) {
+    return decodeBasicEntities(String(s == null ? '' : s).replace(/&quot;/g, '"'));
   }
 
   function countBlocks(blocks, predicate) {
@@ -3988,7 +3994,7 @@
   function hrefsFromHtml(html) {
     const hrefs = [];
     String(html || '').replace(/\shref="([^"]+)"/g, (match, href) => {
-      hrefs.push(href);
+      hrefs.push(decodeAttributeEntities(href));
       return match;
     });
     return hrefs;
@@ -4815,7 +4821,7 @@
     String(html || '').replace(
       /<a\b[^>]*\shref="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi,
       (match, href, inner) => {
-        links.push({ href, text: textFromHtml(inner) });
+        links.push({ href: decodeAttributeEntities(href), text: textFromHtml(inner) });
         return match;
       }
     );
@@ -5455,19 +5461,21 @@
     }
     const companionNote = options.sharedLink
       ? 'The images and video poster frames are hosted at the absolute media URLs referenced below. Full videos are NOT uploaded; each video provides its poster frame and original source link instead.'
-      : llmMediaFiles
-        ? 'The images and video poster frames are included as separate files in the media/ folder next to this markdown. Attach them to your LLM together with this file. Full videos are NOT included (an LLM cannot watch them); each video provides its poster frame and source link instead.'
-        : llmCompanionHtml
-          ? llmCompanionArchive
-            ? `The media bytes are embedded (base64) inside the companion file ${llmCompanionHtml}, packaged together with this markdown inside ${llmCompanionArchive}. Extract both files before moving or sharing them so the pair stays together.`
-            : `The media bytes are embedded (base64) inside the companion file ${llmCompanionHtml}, downloaded alongside this markdown. If you also have that file, the media is available there; if you only have this markdown, it is not.`
-          : llmPastedCopy
-            ? `This is a pasted copy of the capture's Markdown, so it holds no media bytes.${
-                options.savedLocation
-                  ? ` Any media the capture saved is in its saved files (${markdownLineText(options.savedLocation)}).`
-                  : ''
-              } The original source URLs below point at the media on X.`
-            : 'This was a Markdown-only export, so the media bytes were not saved to any file. Only the metadata and the original source URLs below remain; use those URLs to retrieve the media from the source.';
+      : llmMediaFiles && llmMediaFiles.size === 0
+        ? 'No image or video poster files were saved with this markdown, so there is no media/ folder. The original source URLs below point at any media on X.'
+        : llmMediaFiles
+          ? 'The images and video poster frames are included as separate files in the media/ folder next to this markdown. Attach them to your LLM together with this file. Full videos are NOT included (an LLM cannot watch them); each video provides its poster frame and source link instead.'
+          : llmCompanionHtml
+            ? llmCompanionArchive
+              ? `The media bytes are embedded (base64) inside the companion file ${llmCompanionHtml}, packaged together with this markdown inside ${llmCompanionArchive}. Extract both files before moving or sharing them so the pair stays together.`
+              : `The media bytes are embedded (base64) inside the companion file ${llmCompanionHtml}, downloaded alongside this markdown. If you also have that file, the media is available there; if you only have this markdown, it is not.`
+            : llmPastedCopy
+              ? `This is a pasted copy of the capture's Markdown, so it holds no media bytes.${
+                  options.savedLocation
+                    ? ` Any media the capture saved is in its saved files (${markdownLineText(options.savedLocation)}).`
+                    : ''
+                } The original source URLs below point at the media on X.`
+              : 'This was a Markdown-only export, so the media bytes were not saved to any file. Only the metadata and the original source URLs below remain; use those URLs to retrieve the media from the source.';
     lines.push(
       'Capture note: This file preserves content visible to the logged-in user at export time. It may not include unavailable, private, deleted, failed, or unloaded content.',
       '',
@@ -12218,14 +12226,22 @@ article:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger,
     return { wrap, trigger, options };
   }
 
-  function libraryReadme() {
+  function libraryReadme(mediaFileCount = 1) {
+    const usage = mediaFileCount
+      ? [
+          '- Attach the .llm.md file together with the image files in the media/ folder.',
+          '- The .llm.md is the readable text plus a metadata inventory; the media/ files are the',
+          '  actual images and video poster frames it references.',
+        ]
+      : [
+          '- Attach the .llm.md file. This post has no saved images or video poster frames,',
+          '  so there is no media/ folder; the .llm.md lists the original source URLs.',
+        ];
     return [
       `${APP} export bundle`,
       '',
       'How to use with an AI assistant / agent:',
-      '- Attach the .llm.md file together with the image files in the media/ folder.',
-      '- The .llm.md is the readable text plus a metadata inventory; the media/ files are the',
-      '  actual images and video poster frames it references.',
+      ...usage,
       '',
       'Full videos are NOT included (an LLM cannot watch video). Each video provides a poster',
       'still frame plus its original source link. The full self-contained .html (when present in',
@@ -12290,7 +12306,7 @@ article:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger,
     });
     const entries = [
       { name: `${paths.postName}.llm.md`, text: markdown },
-      { name: 'README.txt', text: libraryReadme() },
+      { name: 'README.txt', text: libraryReadme(files.length) },
       ...files.map((f) => ({ name: f.name, bytes: f.bytes })),
     ];
     if (share && share.viewUrl) {
@@ -13812,6 +13828,7 @@ article:hover > .${CONFIG.postControlClass}:not(.xa-ctl-inline) .xa-ctl-trigger,
       showCaptureReceipt,
       promptCaptureOptions,
       saveToLibrary,
+      libraryReadme,
       resaveLibraryAfterShare,
       archiveStats,
       sameAuthorRunFromRoot,

@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.6.18] - 2026-11-27
+
+### Fixed
+
+- A library bundle for a post with no images or video no longer tells the reader that files
+  are in a `media/` folder that does not exist; the `.llm.md` and `README.txt` now say there
+  is none (#115).
+- Links read out of a block's HTML are decoded, so a cashtag source link reads
+  `...&src=cashtag_click` instead of `...&amp;src=cashtag_click` in the `.llm.md` (#116).
+
 ## [1.6.17] - 2026-11-27
 
 ### Fixed
